@@ -22,6 +22,7 @@ type Server struct {
 	token    string
 	handler  MessageHandler
 	actions  *ActionClient
+	workers  chan struct{}
 	upgrader websocket.Upgrader
 }
 
@@ -39,6 +40,7 @@ func NewServer(token string, handler MessageHandler) *Server {
 		token:   token,
 		handler: handler,
 		actions: actions,
+		workers: make(chan struct{}, 64),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
@@ -118,10 +120,12 @@ func (s *Server) serveWS(writer http.ResponseWriter, request *http.Request) {
 			}
 			return
 		}
-		// [决策理由] 单条坏消息不应中断长连接，记录后继续读取下一条事件。
-		if err := s.dispatch(request.Context(), payload); err != nil {
-			logger.Error("处理 OneBot 事件失败", "error", err)
+		// [决策理由] Action 响应必须在读循环中立即投递，才能唤醒等待中的插件 Call。
+		if s.actions.handleResponse(payload) {
+			continue
 		}
+		payloadCopy := append([]byte(nil), payload...)
+		go s.handleEvent(request.Context(), payloadCopy)
 	}
 
 	// >>> 数据演变示例
@@ -129,15 +133,32 @@ func (s *Server) serveWS(writer http.ResponseWriter, request *http.Request) {
 	// 2. Bearer wrong -> Token 校验失败 -> HTTP 401 -> 不升级连接。
 }
 
+// handleEvent 在受限 worker 中解析并处理一条事件。
+// @param ctx：连接上下文；payload：独立复制的事件 JSON。
+// @returns 无。
+// ⚠️副作用说明：占用 worker 配额、调用事件处理器并写入错误日志。
+func (s *Server) handleEvent(ctx context.Context, payload []byte) {
+	select {
+	case s.workers <- struct{}{}:
+		defer func() { <-s.workers }()
+	case <-ctx.Done():
+		return
+	}
+	// [决策理由] 单条坏消息或插件错误不应中断 WebSocket 读循环。
+	if err := s.dispatch(ctx, payload); err != nil {
+		logger.Error("处理 OneBot 事件失败", "error", err)
+	}
+
+	// >>> 数据演变示例
+	// 1. ping 事件 -> worker -> 插件等待 Action，同时读循环继续接收 echo。
+	// 2. 连接关闭且 worker 未取得配额 -> ctx.Done -> 放弃事件。
+}
+
 // dispatch 解析并分发一条 OneBot 11 上报事件。
 // @param ctx：请求上下文；payload：WebSocket JSON 消息。
 // @returns JSON、事件类型或处理器返回的错误。
 // ⚠️副作用说明：成功时调用注入的消息处理器。
 func (s *Server) dispatch(ctx context.Context, payload []byte) error {
-	// [决策理由] Action 响应与事件共用连接，必须先按 echo 分流避免被事件解析器误判。
-	if s.actions.handleResponse(payload) {
-		return nil
-	}
 	event, err := ParseEvent(payload)
 	// [决策理由] 非法 JSON 无法可靠识别事件字段，必须拒绝分发。
 	if err != nil {

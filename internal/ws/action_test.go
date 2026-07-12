@@ -121,3 +121,56 @@ func TestActionResponseJSON(t *testing.T) {
 	// 1. data={user_id:1} -> RawMessage -> 插件可二次解析。
 	// 2. data=[] -> RawMessage -> 列表 Action 可二次解析。
 }
+
+// TestEventHandlerCanWaitForActionResponse 验证事件处理等待 Action 时读循环仍能投递 echo。
+// @param testing.T：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：启动临时 WebSocket 服务并交换事件、Action 与响应。
+func TestEventHandlerCanWaitForActionResponse(t *testing.T) {
+	completed := make(chan error, 1)
+	var server *Server
+	server = NewServer("secret", func(ctx context.Context, _ Event) error {
+		_, err := server.Actions().Call(ctx, "send_group_msg", map[string]any{"group_id": 1, "message": "pong"})
+		completed <- err
+
+		// >>> 数据演变示例
+		// 1. message event -> Call -> echo 响应由读循环投递 -> completed=nil。
+		// 2. 连接关闭 -> Call 返回断线错误 -> completed=error。
+		return err
+	})
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	header := http.Header{"Authorization": []string{"Bearer secret"}}
+	connection, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpServer.URL, "http")+endpoint, header)
+	// [决策理由] 握手失败时无法验证读循环与 worker 解耦。
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	// [决策理由] 事件必须先触发 handler 内同步 Action Call。
+	if err := connection.WriteJSON(map[string]any{"post_type": "message", "message_type": "group", "group_id": 1}); err != nil {
+		t.Fatal(err)
+	}
+	var request ActionRequest
+	// [决策理由] 收到 Action 请求证明 handler 正在等待对应响应。
+	if err := connection.ReadJSON(&request); err != nil {
+		t.Fatal(err)
+	}
+	// [决策理由] 相同 echo 响应必须由未阻塞的读循环消费。
+	if err := connection.WriteJSON(map[string]any{"status": "ok", "retcode": 0, "data": map[string]any{"message_id": 2}, "echo": request.Echo}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-completed:
+		// [决策理由] 修复后同步 Call 应在一秒内成功完成。
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("事件处理等待 Action 响应发生死锁")
+	}
+
+	// >>> 数据演变示例
+	// 1. event -> worker Call -> reader echo -> worker 完成。
+	// 2. 旧同步读循环设计 -> reader 被 Call 占用 -> 测试超时。
+}
