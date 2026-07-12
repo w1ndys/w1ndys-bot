@@ -35,20 +35,8 @@ func main() {
 		log.Fatalf("连接数据库失败: %v", err)
 	}
 	defer pool.Close()
-
-	wsServer := ws.NewServer(cfg.NapCatToken, func(_ context.Context, event ws.MessageEvent) error {
-		switch event.PostType {
-		case "message", "message_sent":
-			log.Printf("收到消息事件 type=%s self_id=%d group_id=%d user_id=%d message_id=%d raw_message=%q", event.Name(), event.SelfID, event.GroupID, event.UserID, event.MessageID, event.RawMessage)
-		case "notice":
-			log.Printf("收到通知事件 type=%s self_id=%d group_id=%d user_id=%d operator_id=%d target_id=%d duration=%d", event.Name(), event.SelfID, event.GroupID, event.UserID, event.OperatorID, event.TargetID, event.Duration)
-		case "request":
-			log.Printf("收到请求事件 type=%s self_id=%d group_id=%d user_id=%d comment=%q flag=%q", event.Name(), event.SelfID, event.GroupID, event.UserID, event.Comment, event.Flag)
-		case "meta_event":
-			log.Printf("收到元事件 type=%s self_id=%d time=%d", event.Name(), event.SelfID, event.Time)
-		default:
-			log.Printf("收到未知事件 type=%s self_id=%d", event.Name(), event.SelfID)
-		}
+	wsServer := ws.NewServer(cfg.NapCatToken, func(_ context.Context, event ws.Event) error {
+		logEvent(event)
 
 		// >>> 数据演变示例
 		// 1. message.group.normal -> 提取消息、群和用户字段 -> 写入“收到消息事件”日志。
@@ -83,4 +71,47 @@ func main() {
 	// >>> 数据演变示例
 	// 1. 有效环境变量 + 可连接数据库 -> Config -> pgxpool -> WS 服务 -> 等待退出信号 -> 正常关闭。
 	// 2. 缺少 DB_PASSWORD -> 配置校验错误 -> 输出错误日志 -> 进程终止。
+}
+
+// logEvent 按强类型事件输出其专属关键字段。
+// @param event：已解析的 OneBot 事件。
+// @returns 无。
+// ⚠️副作用说明：向标准日志写入一条事件记录。
+func logEvent(event ws.Event) {
+	switch current := event.(type) {
+	case *ws.MessageEvent:
+		log.Printf("收到消息事件 type=%s self_id=%d group_id=%d user_id=%d message_id=%d raw_message=%q", current.Name(), current.SelfID, current.GroupID, current.UserID, current.MessageID, current.RawMessage)
+	case *ws.HeartbeatEvent:
+		log.Printf("收到元事件 type=%s self_id=%d interval=%d status=%+v", current.Name(), current.SelfID, current.Interval, current.Status)
+	case *ws.LifecycleEvent:
+		log.Printf("收到元事件 type=%s self_id=%d", current.Name(), current.SelfID)
+	case *ws.FriendRequestEvent:
+		log.Printf("收到请求事件 type=%s user_id=%d comment=%q flag=%q", current.Name(), current.UserID, current.Comment, current.Flag)
+	case *ws.GroupRequestEvent:
+		log.Printf("收到请求事件 type=%s group_id=%d user_id=%d comment=%q flag=%q", current.Name(), current.GroupID, current.UserID, current.Comment, current.Flag)
+	case *ws.GroupBanNotice:
+		log.Printf("收到通知事件 type=%s group_id=%d user_id=%d operator_id=%d duration=%d", current.Name(), current.GroupID, current.UserID, current.OperatorID, current.Duration)
+	case *ws.GroupCardNotice:
+		log.Printf("收到通知事件 type=%s group_id=%d user_id=%d card_old=%q card_new=%q", current.Name(), current.GroupID, current.UserID, current.CardOld, current.CardNew)
+	case *ws.GroupUploadNotice:
+		log.Printf("收到通知事件 type=%s group_id=%d user_id=%d file=%+v", current.Name(), current.GroupID, current.UserID, current.File)
+	case *ws.EmojiLikeNotice:
+		log.Printf("收到通知事件 type=%s group_id=%d message_id=%d likes=%+v is_add=%t", current.Name(), current.GroupID, current.MessageID, current.Likes, current.IsAdd)
+	case *ws.EssenceNotice:
+		log.Printf("收到通知事件 type=%s group_id=%d message_id=%d sender_id=%d operator_id=%d", current.Name(), current.GroupID, current.MessageID, current.SenderID, current.OperatorID)
+	case *ws.OnlineFileNotice:
+		log.Printf("收到通知事件 type=%s peer_id=%d", current.Name(), current.PeerID)
+	case *ws.BotOfflineNotice:
+		log.Printf("收到通知事件 type=%s user_id=%d tag=%q message=%q", current.Name(), current.UserID, current.Tag, current.Message)
+	case *ws.NotifyNotice:
+		log.Printf("收到通知事件 type=%s group_id=%d user_id=%d target_id=%d", current.Name(), current.GroupID, current.UserID, current.TargetID)
+	case *ws.NoticeEvent:
+		log.Printf("收到通知事件 type=%s group_id=%d user_id=%d operator_id=%d", current.Name(), current.GroupID, current.UserID, current.OperatorID)
+	default:
+		log.Printf("收到未知事件 type=%s self_id=%d", event.Name(), event.Base().SelfID)
+	}
+
+	// >>> 数据演变示例
+	// 1. *GroupBanNotice -> 类型分支 -> 输出 duration 和 operator_id。
+	// 2. *HeartbeatEvent -> 类型分支 -> 输出 interval 和 status。
 }

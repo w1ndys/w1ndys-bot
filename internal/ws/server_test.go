@@ -17,7 +17,7 @@ import (
 // @returns 无。
 // ⚠️副作用说明：启动并关闭本机临时 HTTP 服务及 WebSocket 连接。
 func TestServerAuthentication(t *testing.T) {
-	server := httptest.NewServer(NewServer("secret", func(context.Context, MessageEvent) error {
+	server := httptest.NewServer(NewServer("secret", func(context.Context, Event) error {
 		// >>> 数据演变示例
 		// 1. 合法消息 -> 测试空处理器 -> 返回 nil。
 		// 2. 空消息 -> 测试空处理器 -> 返回 nil。
@@ -56,8 +56,8 @@ func TestServerAuthentication(t *testing.T) {
 // @returns 无。
 // ⚠️副作用说明：启动临时 HTTP 服务、建立连接并向处理器通道写入事件。
 func TestServerDispatchesMessage(t *testing.T) {
-	received := make(chan MessageEvent, 1)
-	server := httptest.NewServer(NewServer("secret", func(_ context.Context, event MessageEvent) error {
+	received := make(chan Event, 1)
+	server := httptest.NewServer(NewServer("secret", func(_ context.Context, event Event) error {
 		received <- event
 
 		// >>> 数据演变示例
@@ -81,7 +81,12 @@ func TestServerDispatchesMessage(t *testing.T) {
 	}
 
 	select {
-	case event := <-received:
+	case receivedEvent := <-received:
+		event, ok := receivedEvent.(*MessageEvent)
+		// [决策理由] message 上报必须解析成 MessageEvent，而不是通用或其他事件类型。
+		if !ok {
+			t.Fatalf("事件类型 = %T，期望 *MessageEvent", receivedEvent)
+		}
 		// [决策理由] 同时验证关键标识与原始文本，防止 JSON tag 配置错误。
 		if event.GroupID != 100 || event.UserID != 200 || event.RawMessage != "ping" {
 			t.Fatalf("解析结果错误: %+v", event)
@@ -101,7 +106,7 @@ func TestServerDispatchesMessage(t *testing.T) {
 // ⚠️副作用说明：调用内存处理器并更新局部计数器。
 func TestDispatchRejectsInvalidJSONAndDispatchesNotice(t *testing.T) {
 	called := 0
-	server := NewServer("secret", func(context.Context, MessageEvent) error {
+	server := NewServer("secret", func(context.Context, Event) error {
 		called++
 
 		// >>> 数据演变示例
@@ -136,14 +141,14 @@ func TestDispatchRejectsInvalidJSONAndDispatchesNotice(t *testing.T) {
 // ⚠️副作用说明：无。
 func TestEventName(t *testing.T) {
 	tests := []struct {
-		event MessageEvent
+		event Event
 		want  string
 	}{
-		{MessageEvent{PostType: "message", MessageType: "group", SubType: "normal"}, "message.group.normal"},
-		{MessageEvent{PostType: "message_sent", MessageType: "private", SubType: "friend"}, "message_sent.private.friend"},
-		{MessageEvent{PostType: "request", RequestType: "group", SubType: "invite"}, "request.group.invite"},
-		{MessageEvent{PostType: "notice", NoticeType: "group_decrease", SubType: "kick_me"}, "notice.group_decrease.kick_me"},
-		{MessageEvent{PostType: "meta_event", MetaEventType: "heartbeat"}, "meta_event.heartbeat"},
+		{&MessageEvent{BaseEvent: BaseEvent{PostType: "message"}, MessageType: "group", SubType: "normal"}, "message.group.normal"},
+		{&MessageEvent{BaseEvent: BaseEvent{PostType: "message_sent"}, MessageType: "private", SubType: "friend"}, "message_sent.private.friend"},
+		{&GroupRequestEvent{BaseEvent: BaseEvent{PostType: "request"}, RequestType: "group", SubType: "invite"}, "request.group.invite"},
+		{&NoticeEvent{BaseEvent: BaseEvent{PostType: "notice"}, NoticeType: "group_decrease", SubType: "kick_me"}, "notice.group_decrease.kick_me"},
+		{&HeartbeatEvent{BaseEvent: BaseEvent{PostType: "meta_event"}, MetaEventType: "heartbeat"}, "meta_event.heartbeat"},
 	}
 	for _, test := range tests {
 		// [决策理由] 每个类别必须精确映射，避免日志查询与后续路由使用不一致名称。

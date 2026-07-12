@@ -4,7 +4,6 @@ package ws
 import (
 	"context"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -16,7 +15,7 @@ import (
 const endpoint = "/onebot/v11/ws"
 
 // MessageHandler 处理解析完成的 OneBot 11 上报事件。
-type MessageHandler func(context.Context, MessageEvent) error
+type MessageHandler func(context.Context, Event) error
 
 // Server 表示 NapCat 反向 WebSocket 接入服务。
 type Server struct {
@@ -115,9 +114,9 @@ func (s *Server) serveWS(writer http.ResponseWriter, request *http.Request) {
 // @returns JSON、事件类型或处理器返回的错误。
 // ⚠️副作用说明：成功时调用注入的消息处理器。
 func (s *Server) dispatch(ctx context.Context, payload []byte) error {
-	var event MessageEvent
+	event, err := ParseEvent(payload)
 	// [决策理由] 非法 JSON 无法可靠识别事件字段，必须拒绝分发。
-	if err := json.Unmarshal(payload, &event); err != nil {
+	if err != nil {
 		return errors.New("解析 OneBot JSON 失败")
 	}
 	// [决策理由] 处理器缺失表示服务组装错误，返回明确错误避免空指针调用。
