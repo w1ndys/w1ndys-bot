@@ -59,6 +59,12 @@ func main() {
 		projectlogger.Error("执行数据库迁移失败", "error", err)
 		return
 	}
+	pluginSynchronizer := plugin.NewSynchronizer(pool)
+	// [决策理由] 插件定义必须在加载运行状态前与当前二进制 Manifest 保持一致。
+	if err := pluginSynchronizer.Sync(ctx, plugin.Manifests()); err != nil {
+		projectlogger.Error("同步插件元数据失败", "error", err)
+		return
+	}
 	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool))
 	// [决策理由] 插件状态表尚由后续迁移阶段创建；当前未注册插件时不查询，避免阻断基础链路。
 	if err := pluginManager.Load(ctx); err != nil {
