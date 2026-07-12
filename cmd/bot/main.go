@@ -12,6 +12,7 @@ import (
 
 	"github.com/w1ndys/w1ndys-bot/internal/config"
 	"github.com/w1ndys/w1ndys-bot/internal/db"
+	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 )
 
@@ -35,8 +36,18 @@ func main() {
 		log.Fatalf("连接数据库失败: %v", err)
 	}
 	defer pool.Close()
+	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool))
+	// [决策理由] 插件状态表尚由后续迁移阶段创建；当前未注册插件时不查询，避免阻断基础链路。
+	if err := pluginManager.Load(ctx); err != nil {
+		log.Fatalf("加载插件状态失败: %v", err)
+	}
+
 	wsServer := ws.NewServer(cfg.NapCatToken, func(_ context.Context, event ws.Event) error {
 		logEvent(event)
+		// [决策理由] 分类日志完成后统一进入 PluginManager，确保所有事件类别共享相同路由规则。
+		if err := pluginManager.Handle(ctx, event); err != nil {
+			return err
+		}
 
 		// >>> 数据演变示例
 		// 1. message.group.normal -> 提取消息、群和用户字段 -> 写入“收到消息事件”日志。
