@@ -18,6 +18,7 @@ type Logger interface {
 	Error(string, ...any)
 	With(...any) Logger
 	Sync() error
+	write(zapcore.Level, int, string, ...any)
 }
 
 type zapLogger struct {
@@ -112,7 +113,7 @@ func Default() Logger {
 // @returns 无。
 // ⚠️副作用说明：可能向日志输出写入数据。
 func Debug(message string, fields ...any) {
-	Default().Debug(message, fields...)
+	Default().write(zapcore.DebugLevel, 2, message, fields...)
 
 	// >>> 数据演变示例
 	// 1. Debug("收到心跳","interval",30000) -> DEBUG 结构化日志。
@@ -124,7 +125,7 @@ func Debug(message string, fields ...any) {
 // @returns 无。
 // ⚠️副作用说明：可能向日志输出写入数据。
 func Info(message string, fields ...any) {
-	Default().Info(message, fields...)
+	Default().write(zapcore.InfoLevel, 2, message, fields...)
 
 	// >>> 数据演变示例
 	// 1. Info("启动","port",18800) -> INFO 结构化日志。
@@ -136,7 +137,7 @@ func Info(message string, fields ...any) {
 // @returns 无。
 // ⚠️副作用说明：可能向日志输出写入数据。
 func Warn(message string, fields ...any) {
-	Default().Warn(message, fields...)
+	Default().write(zapcore.WarnLevel, 2, message, fields...)
 
 	// >>> 数据演变示例
 	// 1. Warn("连接关闭","code",1005) -> WARN 结构化日志。
@@ -148,7 +149,7 @@ func Warn(message string, fields ...any) {
 // @returns 无。
 // ⚠️副作用说明：向错误日志输出写入数据。
 func Error(message string, fields ...any) {
-	Default().Error(message, fields...)
+	Default().write(zapcore.ErrorLevel, 2, message, fields...)
 
 	// >>> 数据演变示例
 	// 1. Error("连接失败","error",err) -> ERROR 结构化日志。
@@ -194,7 +195,7 @@ func parseLevel(value string) (zapcore.Level, error) {
 // @returns 无。
 // ⚠️副作用说明：可能写入 zap 输出。
 func (l *zapLogger) Debug(message string, fields ...any) {
-	l.inner.Debug(message, toFields(fields)...)
+	l.write(zapcore.DebugLevel, 2, message, fields...)
 
 	// >>> 数据演变示例
 	// 1. message+x=1 -> zap.Debug(message,x=1)。
@@ -206,7 +207,7 @@ func (l *zapLogger) Debug(message string, fields ...any) {
 // @returns 无。
 // ⚠️副作用说明：可能写入 zap 输出。
 func (l *zapLogger) Info(message string, fields ...any) {
-	l.inner.Info(message, toFields(fields)...)
+	l.write(zapcore.InfoLevel, 2, message, fields...)
 
 	// >>> 数据演变示例
 	// 1. message+x=1 -> zap.Info(message,x=1)。
@@ -218,7 +219,7 @@ func (l *zapLogger) Info(message string, fields ...any) {
 // @returns 无。
 // ⚠️副作用说明：可能写入 zap 输出。
 func (l *zapLogger) Warn(message string, fields ...any) {
-	l.inner.Warn(message, toFields(fields)...)
+	l.write(zapcore.WarnLevel, 2, message, fields...)
 
 	// >>> 数据演变示例
 	// 1. message+x=1 -> zap.Warn(message,x=1)。
@@ -230,7 +231,7 @@ func (l *zapLogger) Warn(message string, fields ...any) {
 // @returns 无。
 // ⚠️副作用说明：写入 zap 输出。
 func (l *zapLogger) Error(message string, fields ...any) {
-	l.inner.Error(message, toFields(fields)...)
+	l.write(zapcore.ErrorLevel, 2, message, fields...)
 
 	// >>> 数据演变示例
 	// 1. message+error=err -> zap.Error(message,error=err)。
@@ -261,6 +262,29 @@ func (l *zapLogger) Sync() error {
 	// 1. 有缓冲日志 -> Sync -> 写入输出。
 	// 2. stdout 不支持同步 -> 返回对应系统错误。
 	return err
+}
+
+// write 使用指定 caller 偏移写入 zap 日志。
+// @param level：日志级别；callerSkip：需跳过的封装层数；message：消息；fields：键值字段。
+// @returns 无。
+// ⚠️副作用说明：向 zap 输出写入结构化日志。
+func (l *zapLogger) write(level zapcore.Level, callerSkip int, message string, fields ...any) {
+	logger := l.inner.WithOptions(zap.AddCallerSkip(callerSkip))
+	zapFields := toFields(fields)
+	switch level {
+	case zapcore.DebugLevel:
+		logger.Debug(message, zapFields...)
+	case zapcore.InfoLevel:
+		logger.Info(message, zapFields...)
+	case zapcore.WarnLevel:
+		logger.Warn(message, zapFields...)
+	default:
+		logger.Error(message, zapFields...)
+	}
+
+	// >>> 数据演变示例
+	// 1. 包级 Info skip=2 -> caller 指向业务调用行。
+	// 2. 子 Logger.Info skip=2 -> caller 指向事件处理行。
 }
 
 // toFields 将键值参数转换为 zap 字段。
