@@ -7,16 +7,19 @@ import (
 	"fmt"
 	"net/http"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	commandregistry "github.com/w1ndys/w1ndys-bot/internal/command"
 	"github.com/w1ndys/w1ndys-bot/internal/config"
 	"github.com/w1ndys/w1ndys-bot/internal/db"
 	"github.com/w1ndys/w1ndys-bot/internal/migration"
+	"github.com/w1ndys/w1ndys-bot/internal/onebot"
 	"github.com/w1ndys/w1ndys-bot/internal/permission"
 	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 	projectlogger "github.com/w1ndys/w1ndys-bot/pkg/logger"
+	_ "github.com/w1ndys/w1ndys-bot/plugins/ping"
 )
 
 // main 启动机器人基础设施。
@@ -81,31 +84,56 @@ func main() {
 		return
 	}
 	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool))
+	wsServer := ws.NewServer(cfg.NapCatToken, func(_ context.Context, event ws.Event) error {
+		logEvent(event)
+		message, isMessage := event.(*ws.MessageEvent)
+		// [决策理由] 只有消息事件参与命令匹配，其他事件继续广播给观察型插件。
+		if !isMessage {
+			return pluginManager.Handle(ctx, event)
+		}
+		binding, matched := commands.Resolve(strconv.FormatInt(message.GroupID, 10), message.RawMessage, "/")
+		// [决策理由] 未匹配命令的消息仍可由观察型插件处理。
+		if !matched {
+			return pluginManager.Handle(ctx, event)
+		}
+		defaults, found := featureDefaults(registrations, binding.PluginName, binding.FeatureKey)
+		// [决策理由] 命令指向当前二进制不存在的功能时拒绝执行，避免陈旧数据库映射。
+		if !found {
+			return fmt.Errorf("命令目标 %s 不存在", binding.Target())
+		}
+		role := messageRole(message)
+		// [决策理由] 权限拒绝时不得调用插件实现。
+		if !permissions.Allowed(strconv.FormatInt(message.GroupID, 10), binding.PluginName, binding.FeatureKey, role, defaults) {
+			projectlogger.Warn("命令权限不足", "target", binding.Target(), "user_id", message.UserID, "role", role)
+			return nil
+		}
+		routedContext := plugin.WithFeature(ctx, binding.FeatureKey)
+		routeErr := pluginManager.HandleNamed(routedContext, binding.PluginName, event)
+
+		// >>> 数据演变示例
+		// 1. /ping -> Command Binding -> 权限允许 -> ping.HandleNamed。
+		// 2. 未匹配消息 -> PluginManager 广播给观察型插件。
+		return routeErr
+	})
+	botAPI := onebot.New(wsServer.Actions())
 	for _, registration := range registrations {
-		// [决策理由] 统一 Catalog 中每个实现都必须在加载数据库状态前进入 Manager。
-		if err := pluginManager.Register(registration.Plugin); err != nil {
+		implementation, err := registration.Factory(plugin.Runtime{Messenger: botAPI})
+		// [决策理由] 工厂失败或返回错误实现时该插件不能进入运行路由。
+		if err != nil {
+			projectlogger.Error("创建插件运行实例失败", "plugin", registration.Manifest.Name, "error", err)
+			return
+		}
+		// [决策理由] Manager 注册再次校验运行实例名称和重复项。
+		if err := pluginManager.Register(implementation); err != nil {
 			projectlogger.Error("注册插件运行实例失败", "plugin", registration.Manifest.Name, "error", err)
 			return
 		}
 	}
-	// [决策理由] 插件状态表尚由后续迁移阶段创建；当前未注册插件时不查询，避免阻断基础链路。
+	// [决策理由] 所有实例注册完成后再应用数据库启用状态和优先级。
 	if err := pluginManager.Load(ctx); err != nil {
 		projectlogger.Error("加载插件状态失败", "error", err)
 		return
 	}
-
-	wsServer := ws.NewServer(cfg.NapCatToken, func(_ context.Context, event ws.Event) error {
-		logEvent(event)
-		// [决策理由] 分类日志完成后统一进入 PluginManager，确保所有事件类别共享相同路由规则。
-		if err := pluginManager.Handle(ctx, event); err != nil {
-			return err
-		}
-
-		// >>> 数据演变示例
-		// 1. message.group.normal -> 提取消息、群和用户字段 -> 写入“收到消息事件”日志。
-		// 2. notice.group_ban.ban -> 提取群、操作者和时长 -> 写入“收到通知事件”日志。
-		return nil
-	})
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf("0.0.0.0:%d", cfg.WSPort),
 		Handler: wsServer.Handler(),
@@ -134,6 +162,50 @@ func main() {
 	// >>> 数据演变示例
 	// 1. 有效环境变量 + 可连接数据库 -> Config -> pgxpool -> WS 服务 -> 等待退出信号 -> 正常关闭。
 	// 2. 缺少 DB_PASSWORD -> 配置校验错误 -> 输出错误日志 -> 进程终止。
+}
+
+// featureDefaults 查找功能 Manifest 并转换默认权限。
+// @param registrations：插件注册快照；pluginName：插件名；featureKey：功能键。
+// @returns 权限默认值及是否找到。
+// ⚠️副作用说明：无。
+func featureDefaults(registrations []plugin.Registration, pluginName string, featureKey string) (permission.Defaults, bool) {
+	for _, registration := range registrations {
+		// [决策理由] 仅在目标插件内查找功能，避免不同插件同名 feature_key 混淆。
+		if registration.Manifest.Name != pluginName {
+			continue
+		}
+		for _, feature := range registration.Manifest.Features {
+			// [决策理由] 找到稳定功能键后立即转换并返回对应默认权限。
+			if feature.Key == featureKey {
+				value := feature.DefaultPermissions
+				return permission.Defaults{SuperAdmin: value.SuperAdmin, GroupOwner: value.GroupOwner, GroupAdmin: value.GroupAdmin, Member: value.Member}, true
+			}
+		}
+	}
+
+	// >>> 数据演变示例
+	// 1. ping.ping -> Manifest Feature -> Defaults,true。
+	// 2. removed.missing -> 无匹配 -> 零值,false。
+	return permission.Defaults{}, false
+}
+
+// messageRole 将 NapCat 群角色转换为权限角色。
+// @param event：消息事件。
+// @returns owner/admin/member 对应权限角色；私聊和未知角色按 member 处理。
+// ⚠️副作用说明：无。
+func messageRole(event *ws.MessageEvent) permission.Role {
+	switch event.Sender.Role {
+	case "owner":
+		return permission.RoleGroupOwner
+	case "admin":
+		return permission.RoleGroupAdmin
+	default:
+		return permission.RoleMember
+	}
+
+	// >>> 数据演变示例
+	// 1. sender.role=owner -> RoleGroupOwner。
+	// 2. private sender.role="" -> RoleMember。
 }
 
 // logEvent 按强类型事件输出其专属关键字段。

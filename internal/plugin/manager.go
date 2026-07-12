@@ -158,6 +158,41 @@ func (m *Manager) Handle(ctx context.Context, event ws.Event) error {
 	return nil
 }
 
+// HandleNamed 将事件定向发送给一个已启用插件。
+// @param ctx：处理上下文；name：插件名；event：OneBot 事件。
+// @returns 未注册、未启用或插件处理错误。
+// ⚠️副作用说明：调用目标插件 Handle。
+func (m *Manager) HandleNamed(ctx context.Context, name string, event ws.Event) error {
+	m.mu.RLock()
+	item, exists := m.entries[name]
+	// [决策理由] 锁内复制接口和状态，避免执行插件代码时长期持锁。
+	if !exists {
+		m.mu.RUnlock()
+		return fmt.Errorf("%w: %s", errNotRegistered, name)
+	}
+	current := item.plugin
+	enabled := item.enabled
+	m.mu.RUnlock()
+	// [决策理由] 命令不能绕过数据库驱动的插件关闭状态。
+	if !enabled {
+		return fmt.Errorf("插件 %s 未启用", name)
+	}
+	err := current.Handle(ctx, event)
+	// [决策理由] 定向处理中的停止传播表示成功消费。
+	if errors.Is(err, ErrStopPropagation) {
+		return nil
+	}
+	// [决策理由] 错误需附加插件名便于定位。
+	if err != nil {
+		return fmt.Errorf("插件 %s 处理事件: %w", name, err)
+	}
+
+	// >>> 数据演变示例
+	// 1. enabled ping + event -> ping.Handle -> nil。
+	// 2. disabled ping -> 不调用 Handle -> 返回未启用错误。
+	return nil
+}
+
 var errNotRegistered = errors.New("插件未注册")
 
 // apply 执行状态迁移并更新优先级。

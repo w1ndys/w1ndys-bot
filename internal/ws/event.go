@@ -32,12 +32,21 @@ func (e BaseEvent) Base() BaseEvent {
 
 type MessageEvent struct {
 	BaseEvent
-	MessageType string `json:"message_type"`
-	SubType     string `json:"sub_type"`
-	MessageID   int64  `json:"message_id"`
-	UserID      int64  `json:"user_id"`
-	GroupID     int64  `json:"group_id"`
-	RawMessage  string `json:"raw_message"`
+	MessageType string        `json:"message_type"`
+	SubType     string        `json:"sub_type"`
+	MessageID   int64         `json:"message_id"`
+	UserID      int64         `json:"user_id"`
+	GroupID     int64         `json:"group_id"`
+	RawMessage  string        `json:"raw_message"`
+	Sender      MessageSender `json:"sender"`
+}
+
+// MessageSender 表示 NapCat 消息发送者及其群角色。
+type MessageSender struct {
+	UserID   int64  `json:"user_id"`
+	Nickname string `json:"nickname"`
+	Card     string `json:"card"`
+	Role     string `json:"role"`
 }
 
 // Name 返回消息事件分层名称。

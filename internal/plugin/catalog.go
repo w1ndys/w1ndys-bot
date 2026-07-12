@@ -2,16 +2,31 @@
 package plugin
 
 import (
+	"context"
 	"fmt"
-	"reflect"
 	"sort"
 	"sync"
+
+	"github.com/w1ndys/w1ndys-bot/internal/ws"
 )
+
+// Messenger 是插件发送回复所需的最小 BotAPI 能力。
+type Messenger interface {
+	Reply(context.Context, *ws.MessageEvent, any) (int64, error)
+}
+
+// Runtime 提供插件实例化所需的运行时依赖。
+type Runtime struct {
+	Messenger Messenger
+}
+
+// Factory 使用运行时依赖创建插件实例。
+type Factory func(Runtime) (Plugin, error)
 
 // Registration 将管理元数据与运行时插件实现绑定。
 type Registration struct {
 	Manifest Manifest
-	Plugin   Plugin
+	Factory  Factory
 }
 
 var registrationCatalog = struct {
@@ -28,13 +43,9 @@ func Register(registration Registration) error {
 	if err := registration.Manifest.Validate(); err != nil {
 		return err
 	}
-	// [决策理由] 接口可能包含 typed nil，必须通过反射识别才能避免后续方法调用 panic。
-	if isNilPlugin(registration.Plugin) {
-		return fmt.Errorf("插件 %s 的运行实现不能为空", registration.Manifest.Name)
-	}
-	// [决策理由] Manifest 和实现名称必须一致，确保数据库状态准确映射到运行实例。
-	if registration.Plugin.Name() != registration.Manifest.Name {
-		return fmt.Errorf("Manifest 名称 %q 与插件实现名称 %q 不一致", registration.Manifest.Name, registration.Plugin.Name())
+	// [决策理由] 工厂为空时启动阶段无法创建运行实例。
+	if registration.Factory == nil {
+		return fmt.Errorf("插件 %s 的工厂不能为空", registration.Manifest.Name)
 	}
 	registrationCatalog.Lock()
 	defer registrationCatalog.Unlock()
@@ -45,8 +56,8 @@ func Register(registration Registration) error {
 	registrationCatalog.items[registration.Manifest.Name] = registration
 
 	// >>> 数据演变示例
-	// 1. ping Manifest + ping Plugin -> Catalog[ping] -> nil。
-	// 2. score Manifest + ping Plugin -> 名称不一致 -> 返回错误。
+	// 1. ping Manifest + Factory -> Catalog[ping] -> nil。
+	// 2. ping Manifest + nil Factory -> 返回错误。
 	return nil
 }
 
@@ -104,26 +115,4 @@ func Manifests() []Manifest {
 	// 1. Registration{ping Plugin+Manifest} -> ping Manifest。
 	// 2. 空 Registration -> 空 Manifest 切片。
 	return result
-}
-
-// isNilPlugin 识别 nil 接口和包含 nil 指针的 Plugin 接口。
-// @param candidate：待检查插件接口。
-// @returns 无可用实现时返回 true。
-// ⚠️副作用说明：无。
-func isNilPlugin(candidate Plugin) bool {
-	// [决策理由] 直接 nil 接口可立即判断，避免对无效 Value 调用 Kind。
-	if candidate == nil {
-		return true
-	}
-	value := reflect.ValueOf(candidate)
-	// [决策理由] Plugin 常由指针实现，typed nil 仅能通过 Value.IsNil 识别。
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return value.IsNil()
-	}
-
-	// >>> 数据演变示例
-	// 1. (*Ping)(nil) 装入 Plugin -> true。
-	// 2. &Ping{} -> false。
-	return false
 }
