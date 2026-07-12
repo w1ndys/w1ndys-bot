@@ -33,3 +33,31 @@ func TestManifestValidate(t *testing.T) {
 	// 1. score+[check_in,rank] -> Validate -> nil。
 	// 2. score+[rank,rank] -> Validate -> 重复错误。
 }
+
+// TestRegisterBindsManifestAndImplementation 验证统一注册的名称绑定和重名约束。
+// @param testing.T：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：向测试进程全局 Catalog 注册 catalog_test_plugin。
+func TestRegisterBindsManifestAndImplementation(t *testing.T) {
+	calls := make([]string, 0)
+	manifest := Manifest{Name: "catalog_test_plugin", DisplayName: "注册测试", Version: "1.0.0", SchemaVersion: 1}
+	implementation := &fakePlugin{name: "catalog_test_plugin", calls: &calls}
+	// [决策理由] 名称一致的 Manifest 与实现必须注册成功。
+	if err := Register(Registration{Manifest: manifest, Plugin: implementation}); err != nil {
+		t.Fatal(err)
+	}
+	// [决策理由] 第二次注册相同名称必须失败，避免运行实例歧义。
+	if err := Register(Registration{Manifest: manifest, Plugin: implementation}); err == nil {
+		t.Fatal("重复统一注册未返回错误")
+	}
+	mismatch := manifest
+	mismatch.Name = "catalog_mismatch"
+	// [决策理由] Manifest 与实现名称不一致必须在进入 Catalog 前失败。
+	if err := Register(Registration{Manifest: mismatch, Plugin: implementation}); err == nil {
+		t.Fatal("名称不一致未返回错误")
+	}
+
+	// >>> 数据演变示例
+	// 1. catalog_test_plugin + 同名实现 -> 注册成功。
+	// 2. catalog_mismatch + catalog_test_plugin 实现 -> 返回名称不一致错误。
+}

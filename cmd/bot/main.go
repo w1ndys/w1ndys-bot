@@ -61,6 +61,7 @@ func main() {
 		projectlogger.Error("执行数据库迁移失败", "error", err)
 		return
 	}
+	registrations := plugin.Registrations()
 	pluginSynchronizer := plugin.NewSynchronizer(pool)
 	// [决策理由] 插件定义必须在加载运行状态前与当前二进制 Manifest 保持一致。
 	if err := pluginSynchronizer.Sync(ctx, plugin.Manifests()); err != nil {
@@ -80,6 +81,13 @@ func main() {
 		return
 	}
 	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool))
+	for _, registration := range registrations {
+		// [决策理由] 统一 Catalog 中每个实现都必须在加载数据库状态前进入 Manager。
+		if err := pluginManager.Register(registration.Plugin); err != nil {
+			projectlogger.Error("注册插件运行实例失败", "plugin", registration.Manifest.Name, "error", err)
+			return
+		}
+	}
 	// [决策理由] 插件状态表尚由后续迁移阶段创建；当前未注册插件时不查询，避免阻断基础链路。
 	if err := pluginManager.Load(ctx); err != nil {
 		projectlogger.Error("加载插件状态失败", "error", err)
