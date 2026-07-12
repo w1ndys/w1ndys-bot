@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	commandregistry "github.com/w1ndys/w1ndys-bot/internal/command"
 	"github.com/w1ndys/w1ndys-bot/internal/config"
 	"github.com/w1ndys/w1ndys-bot/internal/db"
 	"github.com/w1ndys/w1ndys-bot/internal/migration"
@@ -63,6 +64,12 @@ func main() {
 	// [决策理由] 插件定义必须在加载运行状态前与当前二进制 Manifest 保持一致。
 	if err := pluginSynchronizer.Sync(ctx, plugin.Manifests()); err != nil {
 		projectlogger.Error("同步插件元数据失败", "error", err)
+		return
+	}
+	commands := commandregistry.NewRegistry(pool)
+	// [决策理由] 启动时发布完整命令快照，后续消息路由无需逐条查询数据库。
+	if err := commands.Load(ctx); err != nil {
+		projectlogger.Error("加载命令注册表失败", "error", err)
 		return
 	}
 	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool))

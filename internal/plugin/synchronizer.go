@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	commandregistry "github.com/w1ndys/w1ndys-bot/internal/command"
 )
 
 // Synchronizer 将编译时 Manifest 同步到数据库。
@@ -132,6 +133,23 @@ func syncManifest(ctx context.Context, transaction pgx.Tx, manifest Manifest) er
 		// [决策理由] 任一功能失败都应回滚整个插件 Manifest。
 		if err != nil {
 			return fmt.Errorf("同步插件 %s 功能 %s: %w", manifest.Name, feature.Key, err)
+		}
+		for _, defaultCommand := range feature.DefaultCommands {
+			normalized, err := commandregistry.Normalize(defaultCommand, "")
+			// [决策理由] Manifest 默认命令也必须遵循运行时相同标准化规则。
+			if err != nil {
+				return fmt.Errorf("标准化插件 %s 功能 %s 默认命令: %w", manifest.Name, feature.Key, err)
+			}
+			_, err = transaction.Exec(ctx, `
+                INSERT INTO plugin_commands
+                    (scope_type, scope_id, plugin_name, feature_key, command, normalized_command, is_default)
+                VALUES ('global', '0', $1, $2, $3, $4, TRUE)
+                ON CONFLICT (scope_type, scope_id, normalized_command) DO NOTHING`,
+				manifest.Name, feature.Key, defaultCommand, normalized)
+			// [决策理由] 默认命令写入失败时 Manifest 与 Command Registry 不一致，必须回滚。
+			if err != nil {
+				return fmt.Errorf("同步插件 %s 功能 %s 默认命令: %w", manifest.Name, feature.Key, err)
+			}
 		}
 	}
 
