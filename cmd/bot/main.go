@@ -11,6 +11,7 @@ import (
 
 	"github.com/w1ndys/w1ndys-bot/internal/config"
 	"github.com/w1ndys/w1ndys-bot/internal/db"
+	"github.com/w1ndys/w1ndys-bot/internal/migration"
 	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 	projectlogger "github.com/w1ndys/w1ndys-bot/pkg/logger"
@@ -46,6 +47,18 @@ func main() {
 		return
 	}
 	defer pool.Close()
+	migrationRunner, err := migration.New(cfg.Database)
+	// [决策理由] 迁移执行器无法初始化时不能保证插件依赖的表结构存在。
+	if err != nil {
+		projectlogger.Error("初始化数据库迁移失败", "error", err)
+		return
+	}
+	defer migrationRunner.Close()
+	// [决策理由] 启动前完成迁移，确保后续 Store 查询面对最新 schema。
+	if err := migrationRunner.Up(); err != nil {
+		projectlogger.Error("执行数据库迁移失败", "error", err)
+		return
+	}
 	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool))
 	// [决策理由] 插件状态表尚由后续迁移阶段创建；当前未注册插件时不查询，避免阻断基础链路。
 	if err := pluginManager.Load(ctx); err != nil {

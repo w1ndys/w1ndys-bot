@@ -1,6 +1,9 @@
 # 📌 影响范围：调用 Go 工具链并读写 Go 构建缓存。
 version: "3"
 
+dotenv:
+  - .env
+
 env:
   GOCACHE: "{{.ROOT_DIR}}/.cache/go-build"
   GOMODCACHE: "{{.ROOT_DIR}}/.cache/go-mod"
@@ -26,6 +29,21 @@ tasks:
     desc: 启动本地机器人基础框架
     cmds:
       - go run ./cmd/bot
+
+  migrate-up:
+    desc: 应用所有未执行的数据库迁移
+    cmds:
+      - env -u DB_PASSWORD -u NAPCAT_TOKEN -u JWT_SECRET docker compose run --rm --no-deps --entrypoint /app/migrate bot up
+
+  migrate-down:
+    desc: 回滚最近一条数据库迁移
+    cmds:
+      - env -u DB_PASSWORD -u NAPCAT_TOKEN -u JWT_SECRET docker compose run --rm --no-deps --entrypoint /app/migrate bot down 1
+
+  migrate-version:
+    desc: 查看当前数据库迁移版本
+    cmds:
+      - env -u DB_PASSWORD -u NAPCAT_TOKEN -u JWT_SECRET docker compose run --rm --no-deps --entrypoint /app/migrate bot version
 
   compose-up:
     desc: 构建并后台启动机器人和 PostgreSQL
