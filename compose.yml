@@ -40,6 +40,7 @@ services:
       WS_PORT: 18800
       JWT_SECRET: ${JWT_SECRET:?请在 .env 中设置 JWT_SECRET}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-text}
     ports:
       - "${WS_BIND_ADDRESS:-0.0.0.0}:${WS_PORT:-18800}:18800"
     networks:

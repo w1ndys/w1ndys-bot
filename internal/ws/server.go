@@ -5,11 +5,11 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 
 	"github.com/gorilla/websocket"
+	"github.com/w1ndys/w1ndys-bot/pkg/logger"
 )
 
 const endpoint = "/onebot/v11/ws"
@@ -83,7 +83,7 @@ func (s *Server) serveWS(writer http.ResponseWriter, request *http.Request) {
 	connection, err := s.upgrader.Upgrade(writer, request, nil)
 	// [决策理由] 升级失败后响应已由 Gorilla 写入，继续读消息没有有效连接。
 	if err != nil {
-		log.Printf("升级 WebSocket 失败: %v", err)
+		logger.Error("升级 WebSocket 失败", "error", err, "remote_addr", request.RemoteAddr)
 		return
 	}
 	defer connection.Close()
@@ -94,13 +94,13 @@ func (s *Server) serveWS(writer http.ResponseWriter, request *http.Request) {
 		if err != nil {
 			// [决策理由] 正常关闭不应作为异常污染日志。
 			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				log.Printf("读取 WebSocket 消息失败: %v", err)
+				logger.Warn("读取 WebSocket 消息失败", "error", err, "remote_addr", request.RemoteAddr)
 			}
 			return
 		}
 		// [决策理由] 单条坏消息不应中断长连接，记录后继续读取下一条事件。
 		if err := s.dispatch(request.Context(), payload); err != nil {
-			log.Printf("处理 OneBot 事件失败: %v", err)
+			logger.Error("处理 OneBot 事件失败", "error", err)
 		}
 	}
 

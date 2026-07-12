@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"os/signal"
 	"syscall"
@@ -14,6 +13,7 @@ import (
 	"github.com/w1ndys/w1ndys-bot/internal/db"
 	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
+	projectlogger "github.com/w1ndys/w1ndys-bot/pkg/logger"
 )
 
 // main 启动机器人基础设施。
@@ -24,8 +24,17 @@ func main() {
 	cfg, err := config.Load()
 	// [决策理由] 配置不完整时继续启动会产生含糊的连接错误，因此立即终止。
 	if err != nil {
-		log.Fatalf("加载配置失败: %v", err)
+		projectlogger.Error("加载配置失败", "error", err)
+		return
 	}
+	logger, err := projectlogger.New(cfg.LogLevel, cfg.LogFormat)
+	// [决策理由] 日志配置无效时继续运行会导致日志格式或过滤规则不可预测。
+	if err != nil {
+		projectlogger.Error("初始化日志器失败", "error", err)
+		return
+	}
+	projectlogger.SetDefault(logger)
+	defer logger.Sync()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -33,13 +42,15 @@ func main() {
 	pool, err := db.Open(ctx, cfg.Database)
 	// [决策理由] 数据库是基础依赖，连接不可用时服务不具备可运行条件。
 	if err != nil {
-		log.Fatalf("连接数据库失败: %v", err)
+		projectlogger.Error("连接数据库失败", "error", err)
+		return
 	}
 	defer pool.Close()
 	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool))
 	// [决策理由] 插件状态表尚由后续迁移阶段创建；当前未注册插件时不查询，避免阻断基础链路。
 	if err := pluginManager.Load(ctx); err != nil {
-		log.Fatalf("加载插件状态失败: %v", err)
+		projectlogger.Error("加载插件状态失败", "error", err)
+		return
 	}
 
 	wsServer := ws.NewServer(cfg.NapCatToken, func(_ context.Context, event ws.Event) error {
@@ -62,7 +73,7 @@ func main() {
 		err := httpServer.ListenAndServe()
 		// [决策理由] 主动关闭会返回 ErrServerClosed，属于正常退出而非服务故障。
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("WebSocket 服务异常退出: %v", err)
+			projectlogger.Error("WebSocket 服务异常退出", "error", err)
 			stop()
 		}
 
@@ -71,13 +82,13 @@ func main() {
 		// 2. 端口被占用 -> ListenAndServe 错误 -> 记录日志 -> 通知主流程退出。
 	}()
 
-	log.Printf("基础框架已启动，WS 端口=%d，日志级别=%s", cfg.WSPort, cfg.LogLevel)
+	projectlogger.Info("基础框架已启动", "ws_port", cfg.WSPort, "log_level", cfg.LogLevel, "log_format", cfg.LogFormat)
 	<-ctx.Done()
 	// [决策理由] 收到退出信号后停止接受新连接，并等待活跃请求结束。
 	if err := httpServer.Shutdown(context.Background()); err != nil {
-		log.Printf("关闭 WebSocket 服务失败: %v", err)
+		projectlogger.Error("关闭 WebSocket 服务失败", "error", err)
 	}
-	log.Print("基础框架正在关闭")
+	projectlogger.Info("基础框架正在关闭")
 
 	// >>> 数据演变示例
 	// 1. 有效环境变量 + 可连接数据库 -> Config -> pgxpool -> WS 服务 -> 等待退出信号 -> 正常关闭。
@@ -89,37 +100,38 @@ func main() {
 // @returns 无。
 // ⚠️副作用说明：向标准日志写入一条事件记录。
 func logEvent(event ws.Event) {
+	logger := projectlogger.With("event_type", event.Name(), "self_id", event.Base().SelfID)
 	switch current := event.(type) {
 	case *ws.MessageEvent:
-		log.Printf("收到消息事件 type=%s self_id=%d group_id=%d user_id=%d message_id=%d raw_message=%q", current.Name(), current.SelfID, current.GroupID, current.UserID, current.MessageID, current.RawMessage)
+		logger.Info("收到消息事件", "group_id", current.GroupID, "user_id", current.UserID, "message_id", current.MessageID, "raw_message", current.RawMessage)
 	case *ws.HeartbeatEvent:
-		log.Printf("收到元事件 type=%s self_id=%d interval=%d status={%s}", current.Name(), current.SelfID, current.Interval, current.Status.String())
+		logger.Debug("收到心跳事件", "interval", current.Interval, "status", current.Status.String())
 	case *ws.LifecycleEvent:
-		log.Printf("收到元事件 type=%s self_id=%d", current.Name(), current.SelfID)
+		logger.Info("收到生命周期事件")
 	case *ws.FriendRequestEvent:
-		log.Printf("收到请求事件 type=%s user_id=%d comment=%q flag=%q", current.Name(), current.UserID, current.Comment, current.Flag)
+		logger.Info("收到好友请求事件", "user_id", current.UserID, "comment", current.Comment, "flag", current.Flag)
 	case *ws.GroupRequestEvent:
-		log.Printf("收到请求事件 type=%s group_id=%d user_id=%d comment=%q flag=%q", current.Name(), current.GroupID, current.UserID, current.Comment, current.Flag)
+		logger.Info("收到群请求事件", "group_id", current.GroupID, "user_id", current.UserID, "comment", current.Comment, "flag", current.Flag)
 	case *ws.GroupBanNotice:
-		log.Printf("收到通知事件 type=%s group_id=%d user_id=%d operator_id=%d duration=%d", current.Name(), current.GroupID, current.UserID, current.OperatorID, current.Duration)
+		logger.Info("收到群禁言通知", "group_id", current.GroupID, "user_id", current.UserID, "operator_id", current.OperatorID, "duration", current.Duration)
 	case *ws.GroupCardNotice:
-		log.Printf("收到通知事件 type=%s group_id=%d user_id=%d card_old=%q card_new=%q", current.Name(), current.GroupID, current.UserID, current.CardOld, current.CardNew)
+		logger.Info("收到群名片通知", "group_id", current.GroupID, "user_id", current.UserID, "card_old", current.CardOld, "card_new", current.CardNew)
 	case *ws.GroupUploadNotice:
-		log.Printf("收到通知事件 type=%s group_id=%d user_id=%d file=%+v", current.Name(), current.GroupID, current.UserID, current.File)
+		logger.Info("收到群文件通知", "group_id", current.GroupID, "user_id", current.UserID, "file", current.File)
 	case *ws.EmojiLikeNotice:
-		log.Printf("收到通知事件 type=%s group_id=%d message_id=%d likes=%+v is_add=%t", current.Name(), current.GroupID, current.MessageID, current.Likes, current.IsAdd)
+		logger.Info("收到表情回应通知", "group_id", current.GroupID, "message_id", current.MessageID, "likes", current.Likes, "is_add", current.IsAdd)
 	case *ws.EssenceNotice:
-		log.Printf("收到通知事件 type=%s group_id=%d message_id=%d sender_id=%d operator_id=%d", current.Name(), current.GroupID, current.MessageID, current.SenderID, current.OperatorID)
+		logger.Info("收到精华消息通知", "group_id", current.GroupID, "message_id", current.MessageID, "sender_id", current.SenderID, "operator_id", current.OperatorID)
 	case *ws.OnlineFileNotice:
-		log.Printf("收到通知事件 type=%s peer_id=%d", current.Name(), current.PeerID)
+		logger.Info("收到在线文件通知", "peer_id", current.PeerID)
 	case *ws.BotOfflineNotice:
-		log.Printf("收到通知事件 type=%s user_id=%d tag=%q message=%q", current.Name(), current.UserID, current.Tag, current.Message)
+		logger.Warn("收到机器人离线通知", "user_id", current.UserID, "tag", current.Tag, "message", current.Message)
 	case *ws.NotifyNotice:
-		log.Printf("收到通知事件 type=%s group_id=%d user_id=%d target_id=%d", current.Name(), current.GroupID, current.UserID, current.TargetID)
+		logger.Info("收到扩展通知事件", "group_id", current.GroupID, "user_id", current.UserID, "target_id", current.TargetID)
 	case *ws.NoticeEvent:
-		log.Printf("收到通知事件 type=%s group_id=%d user_id=%d operator_id=%d", current.Name(), current.GroupID, current.UserID, current.OperatorID)
+		logger.Info("收到通知事件", "group_id", current.GroupID, "user_id", current.UserID, "operator_id", current.OperatorID)
 	default:
-		log.Printf("收到未知事件 type=%s self_id=%d", event.Name(), event.Base().SelfID)
+		logger.Warn("收到未知事件")
 	}
 
 	// >>> 数据演变示例

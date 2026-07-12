@@ -19,7 +19,7 @@ tasks:
   lint:
     desc: 执行格式与静态检查
     cmds:
-      - test -z "$(gofmt -l cmd internal)"
+      - test -z "$(gofmt -l cmd internal pkg)"
       - go vet ./...
 
   run:

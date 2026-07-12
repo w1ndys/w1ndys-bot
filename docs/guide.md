@@ -99,6 +99,7 @@ type Plugin interface {
 | `WS_PORT` | 反向 WebSocket 监听端口 | `18800` | compose 硬编码 |
 | `JWT_SECRET` | WebUI 登录 JWT 密钥 | `xxxx` | **`.env` 文件** |
 | `LOG_LEVEL` | 日志级别 | `info` / `debug` | compose 硬编码 |
+| `LOG_FORMAT` | 日志格式 | `text` / `json` | compose 硬编码 |
 
 ### 5.2 CLI 参数覆盖
 支持启动参数覆盖环境变量（如 `./bot --db-host=127.0.0.1`），用于本地调试，优先级：**CLI 参数 > 环境变量**。

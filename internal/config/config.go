@@ -1,4 +1,4 @@
-// 📌 影响范围：读取 DB_HOST、DB_PORT、DB_USER、DB_NAME、DB_PASSWORD、DB_SSLMODE、NAPCAT_TOKEN、WS_PORT、JWT_SECRET、LOG_LEVEL 及对应 CLI 参数。
+// 📌 影响范围：读取 DB_HOST、DB_PORT、DB_USER、DB_NAME、DB_PASSWORD、DB_SSLMODE、NAPCAT_TOKEN、WS_PORT、JWT_SECRET、LOG_LEVEL、LOG_FORMAT 及对应 CLI 参数。
 package config
 
 import (
@@ -17,6 +17,7 @@ type Config struct {
 	WSPort      int
 	JWTSecret   string
 	LogLevel    string
+	LogFormat   string
 }
 
 // Database 表示 PostgreSQL 连接配置。
@@ -61,6 +62,7 @@ func Load() (Config, error) {
 		WSPort:      v.GetInt("WS_PORT"),
 		JWTSecret:   v.GetString("JWT_SECRET"),
 		LogLevel:    v.GetString("LOG_LEVEL"),
+		LogFormat:   v.GetString("LOG_FORMAT"),
 	}
 	// [决策理由] 密码缺失时数据库必然无法鉴权，提前返回可提供更明确的诊断。
 	if cfg.Database.Password == "" {
@@ -88,6 +90,7 @@ func defineFlags(flags *pflag.FlagSet) {
 	flags.Int("ws-port", 0, "反向 WebSocket 监听端口")
 	flags.String("jwt-secret", "", "WebUI JWT 密钥")
 	flags.String("log-level", "", "日志级别")
+	flags.String("log-format", "", "日志格式")
 
 	// >>> 数据演变示例
 	// 1. 空 FlagSet -> 注册 --db-host 等 9 个参数 -> 可解析完整 CLI 配置。
@@ -104,6 +107,7 @@ func bindFlags(v *viper.Viper, flags *pflag.FlagSet) {
 		"DB_NAME": "db-name", "DB_PASSWORD": "db-password", "NAPCAT_TOKEN": "napcat-token",
 		"DB_SSLMODE": "db-sslmode",
 		"WS_PORT":    "ws-port", "JWT_SECRET": "jwt-secret", "LOG_LEVEL": "log-level",
+		"LOG_FORMAT": "log-format",
 	}
 	for key, name := range bindings {
 		flag := flags.Lookup(name)
@@ -133,6 +137,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("DB_SSLMODE", "disable")
 	v.SetDefault("WS_PORT", 18800)
 	v.SetDefault("LOG_LEVEL", "info")
+	v.SetDefault("LOG_FORMAT", "text")
 
 	// >>> 数据演变示例
 	// 1. 未设置 DB_PORT -> 默认值集合 -> DB_PORT=5432。
