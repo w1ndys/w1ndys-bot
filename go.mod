@@ -3,6 +3,7 @@ module github.com/w1ndys/w1ndys-bot
 go 1.26
 
 require (
+	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.7.6
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0

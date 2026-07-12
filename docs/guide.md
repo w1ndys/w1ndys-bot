@@ -92,8 +92,9 @@ type Plugin interface {
 | `DB_HOST` | PostgreSQL 主机地址 | `postgres` (compose内部) | compose 硬编码 |
 | `DB_PORT` | PostgreSQL 端口 | `5432` | compose 硬编码 |
 | `DB_USER` | 数据库用户 | `bot_admin` | compose 硬编码 |
-| `DB_NAME` | 数据库名称 | `qq_bot` | compose 硬编码 |
+| `DB_NAME` | 数据库名称 | `w1ndys_bot` | compose 硬编码 |
 | `DB_PASSWORD` | 数据库密码 | `xxxx` | **`.env` 文件** |
+| `DB_SSLMODE` | PostgreSQL TLS 模式 | `disable` (compose内部) | compose 硬编码 |
 | `NAPCAT_TOKEN` | WS 连接鉴权 Token | `xxxx` | **`.env` 文件** |
 | `WS_PORT` | 反向 WebSocket 监听端口 | `18800` | compose 硬编码 |
 | `JWT_SECRET` | WebUI 登录 JWT 密钥 | `xxxx` | **`.env` 文件** |

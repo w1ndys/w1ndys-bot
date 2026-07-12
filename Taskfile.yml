@@ -26,3 +26,28 @@ tasks:
     desc: 启动本地机器人基础框架
     cmds:
       - go run ./cmd/bot
+
+  compose-up:
+    desc: 构建并后台启动机器人和 PostgreSQL
+    cmds:
+      - env -u DB_PASSWORD -u NAPCAT_TOKEN -u JWT_SECRET docker compose up --build -d
+
+  compose-rebuild:
+    desc: 重新构建镜像并强制创建机器人和 PostgreSQL 容器
+    cmds:
+      - env -u DB_PASSWORD -u NAPCAT_TOKEN -u JWT_SECRET docker compose up --build --force-recreate -d
+
+  compose-restart:
+    desc: 重新读取 .env 并强制创建容器，不重新构建镜像
+    cmds:
+      - env -u DB_PASSWORD -u NAPCAT_TOKEN -u JWT_SECRET docker compose up --force-recreate -d
+
+  compose-down:
+    desc: 停止并移除机器人和 PostgreSQL 容器
+    cmds:
+      - docker compose down
+
+  compose-logs:
+    desc: 持续查看机器人和 PostgreSQL 日志
+    cmds:
+      - docker compose logs -f

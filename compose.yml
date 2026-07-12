@@ -1,0 +1,53 @@
+# 📌 影响范围：读取 DB_PASSWORD、NAPCAT_TOKEN、JWT_SECRET；创建 bot 与 postgres 容器、内部网络和持久化数据卷；映射宿主机 18800 端口。
+services:
+  postgres:
+    container_name: postgre
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bot_admin
+      POSTGRES_DB: w1ndys_bot
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?请在 .env 中设置 DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bot_admin -d w1ndys_bot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks:
+      - bot-internal
+
+  bot:
+    container_name: w1ndys-bot
+    image: w1ndys-bot:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: bot_admin
+      DB_NAME: w1ndys_bot
+      DB_PASSWORD: ${DB_PASSWORD:?请在 .env 中设置 DB_PASSWORD}
+      DB_SSLMODE: disable
+      NAPCAT_TOKEN: ${NAPCAT_TOKEN:?请在 .env 中设置 NAPCAT_TOKEN}
+      WS_PORT: 18800
+      JWT_SECRET: ${JWT_SECRET:?请在 .env 中设置 JWT_SECRET}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${WS_BIND_ADDRESS:-0.0.0.0}:${WS_PORT:-18800}:18800"
+    networks:
+      - bot-internal
+
+networks:
+  bot-internal:
+    driver: bridge
+
+volumes:
+  postgres-data:

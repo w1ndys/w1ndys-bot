@@ -20,6 +20,9 @@ func Open(ctx context.Context, cfg config.Database) (*pgxpool.Pool, error) {
 		User:   url.UserPassword(cfg.User, cfg.Password),
 		Host:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Path:   cfg.Name,
+		RawQuery: url.Values{
+			"sslmode": []string{cfg.SSLMode},
+		}.Encode(),
 	}).String()
 
 	pool, err := pgxpool.New(ctx, dsn)

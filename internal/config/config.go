@@ -1,4 +1,4 @@
-// 📌 影响范围：读取 DB_HOST、DB_PORT、DB_USER、DB_NAME、DB_PASSWORD、NAPCAT_TOKEN、WS_PORT、JWT_SECRET、LOG_LEVEL 及对应 CLI 参数。
+// 📌 影响范围：读取 DB_HOST、DB_PORT、DB_USER、DB_NAME、DB_PASSWORD、DB_SSLMODE、NAPCAT_TOKEN、WS_PORT、JWT_SECRET、LOG_LEVEL 及对应 CLI 参数。
 package config
 
 import (
@@ -26,6 +26,7 @@ type Database struct {
 	User     string
 	Name     string
 	Password string
+	SSLMode  string
 }
 
 // Load 按 CLI 参数高于环境变量的优先级加载配置。
@@ -54,6 +55,7 @@ func Load() (Config, error) {
 			User:     v.GetString("DB_USER"),
 			Name:     v.GetString("DB_NAME"),
 			Password: v.GetString("DB_PASSWORD"),
+			SSLMode:  v.GetString("DB_SSLMODE"),
 		},
 		NapCatToken: v.GetString("NAPCAT_TOKEN"),
 		WSPort:      v.GetInt("WS_PORT"),
@@ -81,6 +83,7 @@ func defineFlags(flags *pflag.FlagSet) {
 	flags.String("db-user", "", "PostgreSQL 用户")
 	flags.String("db-name", "", "PostgreSQL 数据库名")
 	flags.String("db-password", "", "PostgreSQL 密码")
+	flags.String("db-sslmode", "", "PostgreSQL TLS 模式")
 	flags.String("napcat-token", "", "NapCat 鉴权 Token")
 	flags.Int("ws-port", 0, "反向 WebSocket 监听端口")
 	flags.String("jwt-secret", "", "WebUI JWT 密钥")
@@ -99,7 +102,8 @@ func bindFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	bindings := map[string]string{
 		"DB_HOST": "db-host", "DB_PORT": "db-port", "DB_USER": "db-user",
 		"DB_NAME": "db-name", "DB_PASSWORD": "db-password", "NAPCAT_TOKEN": "napcat-token",
-		"WS_PORT": "ws-port", "JWT_SECRET": "jwt-secret", "LOG_LEVEL": "log-level",
+		"DB_SSLMODE": "db-sslmode",
+		"WS_PORT":    "ws-port", "JWT_SECRET": "jwt-secret", "LOG_LEVEL": "log-level",
 	}
 	for key, name := range bindings {
 		flag := flags.Lookup(name)
@@ -125,7 +129,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("DB_HOST", "postgres")
 	v.SetDefault("DB_PORT", 5432)
 	v.SetDefault("DB_USER", "bot_admin")
-	v.SetDefault("DB_NAME", "qq_bot")
+	v.SetDefault("DB_NAME", "w1ndys_bot")
+	v.SetDefault("DB_SSLMODE", "disable")
 	v.SetDefault("WS_PORT", 18800)
 	v.SetDefault("LOG_LEVEL", "info")
 

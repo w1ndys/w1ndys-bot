@@ -1,0 +1,9 @@
+# 📌 影响范围：控制 Docker 构建上下文，不引用外部变量。
+.git
+.cache
+.env
+*.log
+bin
+coverage.out
+docs
+web
