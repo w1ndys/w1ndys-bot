@@ -73,6 +73,23 @@ type HeartbeatStatus struct {
 	Good   bool  `json:"good"`
 }
 
+// String 返回适合日志展示的心跳状态。
+// @param 无。
+// @returns online 与 good 的可读文本；online 未上报时显示 unknown。
+// ⚠️副作用说明：无。
+func (s HeartbeatStatus) String() string {
+	online := "unknown"
+	// [决策理由] NapCat 源码允许 online 为 undefined，只有非 nil 时才能安全解引用。
+	if s.Online != nil {
+		online = fmt.Sprintf("%t", *s.Online)
+	}
+
+	// >>> 数据演变示例
+	// 1. Online=&true,Good=true -> online=true good=true。
+	// 2. Online=nil,Good=false -> online=unknown good=false。
+	return fmt.Sprintf("online=%s good=%t", online, s.Good)
+}
+
 type HeartbeatEvent struct {
 	BaseEvent
 	MetaEventType string          `json:"meta_event_type"`

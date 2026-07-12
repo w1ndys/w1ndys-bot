@@ -82,7 +82,7 @@ func logEvent(event ws.Event) {
 	case *ws.MessageEvent:
 		log.Printf("收到消息事件 type=%s self_id=%d group_id=%d user_id=%d message_id=%d raw_message=%q", current.Name(), current.SelfID, current.GroupID, current.UserID, current.MessageID, current.RawMessage)
 	case *ws.HeartbeatEvent:
-		log.Printf("收到元事件 type=%s self_id=%d interval=%d status=%+v", current.Name(), current.SelfID, current.Interval, current.Status)
+		log.Printf("收到元事件 type=%s self_id=%d interval=%d status={%s}", current.Name(), current.SelfID, current.Interval, current.Status.String())
 	case *ws.LifecycleEvent:
 		log.Printf("收到元事件 type=%s self_id=%d", current.Name(), current.SelfID)
 	case *ws.FriendRequestEvent:
