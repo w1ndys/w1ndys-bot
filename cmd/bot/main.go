@@ -13,6 +13,7 @@ import (
 	"github.com/w1ndys/w1ndys-bot/internal/config"
 	"github.com/w1ndys/w1ndys-bot/internal/db"
 	"github.com/w1ndys/w1ndys-bot/internal/migration"
+	"github.com/w1ndys/w1ndys-bot/internal/permission"
 	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 	projectlogger "github.com/w1ndys/w1ndys-bot/pkg/logger"
@@ -70,6 +71,12 @@ func main() {
 	// [决策理由] 启动时发布完整命令快照，后续消息路由无需逐条查询数据库。
 	if err := commands.Load(ctx); err != nil {
 		projectlogger.Error("加载命令注册表失败", "error", err)
+		return
+	}
+	permissions := permission.NewResolver(pool)
+	// [决策理由] 启动时发布完整权限快照，为后续命令路由提供无数据库查询的判断能力。
+	if err := permissions.Load(ctx); err != nil {
+		projectlogger.Error("加载权限策略失败", "error", err)
 		return
 	}
 	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool))
