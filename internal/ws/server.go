@@ -21,6 +21,7 @@ type MessageHandler func(context.Context, Event) error
 type Server struct {
 	token    string
 	handler  MessageHandler
+	actions  *ActionClient
 	upgrader websocket.Upgrader
 }
 
@@ -29,9 +30,15 @@ type Server struct {
 // @returns 初始化完成的 Server。
 // ⚠️副作用说明：无；仅在内存中构造服务对象。
 func NewServer(token string, handler MessageHandler) *Server {
+	actions, err := NewActionClient()
+	// [决策理由] 系统随机源失败时无法保证 echo 唯一性，属于不可恢复的程序环境错误。
+	if err != nil {
+		panic(err)
+	}
 	server := &Server{
 		token:   token,
 		handler: handler,
+		actions: actions,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
@@ -48,6 +55,17 @@ func NewServer(token string, handler MessageHandler) *Server {
 	// 1. token=secret + 有处理器 -> Server{token:secret, handler:fn} -> 返回服务。
 	// 2. token="" + nil 处理器 -> Server{token:"", handler:nil} -> 返回服务并在请求阶段拒绝。
 	return server
+}
+
+// Actions 返回与本服务连接绑定的 Action Client。
+// @param 无。
+// @returns 可并发使用的 ActionClient。
+// ⚠️副作用说明：无；返回内部共享实例。
+func (s *Server) Actions() *ActionClient {
+	// >>> 数据演变示例
+	// 1. NewServer -> Actions -> 同一 ActionClient 指针。
+	// 2. 多次 Actions -> 返回共享实例以复用 pending 表。
+	return s.actions
 }
 
 // Handler 返回服务的 HTTP 路由。
@@ -87,6 +105,8 @@ func (s *Server) serveWS(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	defer connection.Close()
+	s.actions.attach(connection)
+	defer s.actions.detach(connection)
 
 	for {
 		_, payload, err := connection.ReadMessage()
@@ -114,6 +134,10 @@ func (s *Server) serveWS(writer http.ResponseWriter, request *http.Request) {
 // @returns JSON、事件类型或处理器返回的错误。
 // ⚠️副作用说明：成功时调用注入的消息处理器。
 func (s *Server) dispatch(ctx context.Context, payload []byte) error {
+	// [决策理由] Action 响应与事件共用连接，必须先按 echo 分流避免被事件解析器误判。
+	if s.actions.handleResponse(payload) {
+		return nil
+	}
 	event, err := ParseEvent(payload)
 	// [决策理由] 非法 JSON 无法可靠识别事件字段，必须拒绝分发。
 	if err != nil {
