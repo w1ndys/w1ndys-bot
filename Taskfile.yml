@@ -1,0 +1,28 @@
+# 📌 影响范围：调用 Go 工具链并读写 Go 构建缓存。
+version: "3"
+
+env:
+  GOCACHE: "{{.ROOT_DIR}}/.cache/go-build"
+  GOMODCACHE: "{{.ROOT_DIR}}/.cache/go-mod"
+
+tasks:
+  setup:
+    desc: 安装或同步 Go 开发依赖
+    cmds:
+      - go mod download
+
+  test:
+    desc: 运行完整测试套件
+    cmds:
+      - go test ./...
+
+  lint:
+    desc: 执行格式与静态检查
+    cmds:
+      - test -z "$(gofmt -l cmd internal)"
+      - go vet ./...
+
+  run:
+    desc: 启动本地机器人基础框架
+    cmds:
+      - go run ./cmd/bot
