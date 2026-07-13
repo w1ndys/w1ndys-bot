@@ -4,6 +4,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"time"
 )
 
 // Channel 表示管理操作来源。
@@ -94,6 +95,43 @@ type SettingState struct {
 	Overridden  bool
 }
 
+// AuditQuery 描述审计日志分页与筛选条件。
+type AuditQuery struct {
+	Page       int
+	PageSize   int
+	ActorID    string
+	Action     string
+	TargetType string
+	TargetID   string
+	StartTime  *time.Time
+	EndTime    *time.Time
+}
+
+// AuditState 表示一条不可修改的管理审计记录。
+type AuditState struct {
+	ID           int64
+	ActorID      string
+	ActorRole    string
+	Channel      string
+	Action       string
+	TargetType   string
+	TargetID     string
+	BeforeJSON   json.RawMessage
+	AfterJSON    json.RawMessage
+	Success      bool
+	ErrorMessage string
+	RequestID    string
+	CreatedAt    time.Time
+}
+
+// AuditPage 表示一页审计记录及总数。
+type AuditPage struct {
+	Items    []AuditState
+	Page     int
+	PageSize int
+	Total    int64
+}
+
 // Controller 定义 QQ 管理插件与未来 WebUI 共用的管理能力。
 type Controller interface {
 	ListPlugins(context.Context, Actor) ([]PluginState, error)
@@ -109,4 +147,6 @@ type Controller interface {
 	ListSettings(context.Context, Actor) ([]SettingState, error)
 	SetSetting(context.Context, Actor, string, json.RawMessage) (SettingState, error)
 	DeleteSetting(context.Context, Actor, string) error
+	ListAuditLogs(context.Context, Actor, AuditQuery) (AuditPage, error)
+	GetAuditLog(context.Context, Actor, int64) (AuditState, error)
 }

@@ -25,6 +25,8 @@ type Repository interface {
 	ListSystemSettings(context.Context) ([]SettingState, error)
 	SetSystemSetting(context.Context, Actor, SettingState) (SettingState, error)
 	DeleteSystemSetting(context.Context, Actor, string) error
+	ListAuditLogs(context.Context, AuditQuery) (AuditPage, error)
+	GetAuditLog(context.Context, int64) (AuditState, error)
 }
 
 // PostgresRepository 使用 PostgreSQL 原子保存插件配置和审计记录。

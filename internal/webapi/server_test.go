@@ -39,6 +39,36 @@ type fakePlugins struct {
 	setting         management.SettingState
 	settingKey      string
 	settingValue    json.RawMessage
+	auditPage       management.AuditPage
+	audit           management.AuditState
+	auditQuery      management.AuditQuery
+	auditID         int64
+}
+
+// ListAuditLogs 返回测试审计分页并记录 Actor 与查询条件。
+// @param ctx：未使用的请求上下文；actor：WebUI 操作者；query：筛选分页条件。
+// @returns 预设审计分页或错误。
+// ⚠️副作用说明：记录 Actor 和查询条件。
+func (f *fakePlugins) ListAuditLogs(_ context.Context, actor management.Actor, query management.AuditQuery) (management.AuditPage, error) {
+	f.actor, f.auditQuery = actor, query
+
+	// >>> 数据演变示例
+	// 1. page1+actor100 -> 记录 -> auditPage,nil。
+	// 2. err=boom -> 返回预设错误。
+	return f.auditPage, f.err
+}
+
+// GetAuditLog 返回测试审计详情并记录 ID。
+// @param ctx：未使用的请求上下文；actor：WebUI 操作者；id：审计ID。
+// @returns 预设审计记录或错误。
+// ⚠️副作用说明：记录 Actor 和审计ID。
+func (f *fakePlugins) GetAuditLog(_ context.Context, actor management.Actor, id int64) (management.AuditState, error) {
+	f.actor, f.auditID = actor, id
+
+	// >>> 数据演变示例
+	// 1. id8+actor100 -> 记录 -> audit,nil。
+	// 2. id404+ErrAuditNotFound -> 记录 -> error。
+	return f.audit, f.err
 }
 
 // ListSettings 返回测试设置列表并记录 Actor。
@@ -686,6 +716,82 @@ func TestSettingRoutesMapInvalidAndUnknown(t *testing.T) {
 	// >>> 数据演变示例
 	// 1. page_size=500 -> ErrInvalidSetting -> 400 invalid_setting。
 	// 2. db_password -> ErrUnknownSetting -> 404 unknown_setting。
+}
+
+// TestAuditRoutesListAndDetail 验证审计分页筛选、详情快照和管理员请求上下文。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行 Argon2id 哈希并创建内存 HTTP 请求。
+func TestAuditRoutesListAndDetail(t *testing.T) {
+	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
+	createdAt := time.Date(2026, 7, 13, 10, 0, 0, 0, time.FixedZone("CST", 8*60*60))
+	record := management.AuditState{ID: 8, ActorID: "100", ActorRole: "super_admin", Channel: "webui", Action: "setting.set", TargetType: "system_setting", TargetID: "command_prefix", BeforeJSON: json.RawMessage(`{"Value":"/"}`), AfterJSON: json.RawMessage(`{"Value":"!"}`), Success: true, RequestID: "req-write", CreatedAt: createdAt}
+	controller := &fakePlugins{audit: record, auditPage: management.AuditPage{Items: []management.AuditState{record}, Page: 2, PageSize: 10, Total: 21}}
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller)
+	// [决策理由] 完整控制器必须成功构造审计 API 服务。
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	token, err := server.sign("100")
+	// [决策理由] 审计接口只允许已认证最高管理员访问。
+	if err != nil {
+		t.Fatalf("sign() error = %v", err)
+	}
+	list := requestAPI(server, token, http.MethodGet, "/api/audit-logs?page=2&page_size=10&actor_id=100&action=setting.set&start_time=2026-07-13T00:00:00%2B08:00", "", "req-list-audit")
+	// [决策理由] 分页、筛选和审计 Actor 必须完整传入服务，响应保留总数。
+	if list.Code != http.StatusOK || controller.auditQuery.Page != 2 || controller.auditQuery.PageSize != 10 || controller.auditQuery.ActorID != "100" || controller.auditQuery.StartTime == nil || controller.actor.RequestID != "req-list-audit" || !strings.Contains(list.Body.String(), `"total":21`) {
+		t.Fatalf("list status=%d query=%+v actor=%+v body=%s", list.Code, controller.auditQuery, controller.actor, list.Body.String())
+	}
+	detail := requestAPI(server, token, http.MethodGet, "/api/audit-logs/8", "", "req-detail-audit")
+	// [决策理由] 详情接口必须传递ID并原样返回前后JSON快照。
+	if detail.Code != http.StatusOK || controller.auditID != 8 || !strings.Contains(detail.Body.String(), `"before":{"Value":"/"}`) || !strings.Contains(detail.Body.String(), `"after":{"Value":"!"}`) || !strings.Contains(detail.Body.String(), `"created_at":"2026-07-13T02:00:00Z"`) {
+		t.Fatalf("detail status=%d id=%d body=%s", detail.Code, controller.auditID, detail.Body.String())
+	}
+
+	// >>> 数据演变示例
+	// 1. GET page2+actor100 -> AuditQuery -> 200 items,total21。
+	// 2. GET id8 -> 完整before/after JSON -> 200详情。
+}
+
+// TestAuditRoutesRejectInvalidQueryAndMapNotFound 验证时间格式、ID和未找到错误映射。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行 Argon2id 哈希并创建内存 HTTP 请求。
+func TestAuditRoutesRejectInvalidQueryAndMapNotFound(t *testing.T) {
+	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
+	controller := &fakePlugins{}
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller)
+	// [决策理由] 错误路径测试需要完整服务依赖。
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	token, err := server.sign("100")
+	// [决策理由] 必须通过认证后才能验证查询参数和领域错误。
+	if err != nil {
+		t.Fatalf("sign() error = %v", err)
+	}
+	invalidTime := requestAPI(server, token, http.MethodGet, "/api/audit-logs?start_time=bad", "", "")
+	// [决策理由] 非 RFC3339 时间应在调用控制器前返回400。
+	if invalidTime.Code != http.StatusBadRequest || !strings.Contains(invalidTime.Body.String(), `"code":"invalid_audit_query"`) || controller.auditQuery.Page != 0 {
+		t.Fatalf("invalid time status=%d body=%s query=%+v", invalidTime.Code, invalidTime.Body.String(), controller.auditQuery)
+	}
+	invalidID := requestAPI(server, token, http.MethodGet, "/api/audit-logs/abc", "", "")
+	// [决策理由] 非数字审计 ID 应返回400且不调用详情服务。
+	if invalidID.Code != http.StatusBadRequest || controller.auditID != 0 {
+		t.Fatalf("invalid id status=%d auditID=%d", invalidID.Code, controller.auditID)
+	}
+	controller.err = admin.ErrAuditNotFound
+	notFound := requestAPI(server, token, http.MethodGet, "/api/audit-logs/404", "", "")
+	// [决策理由] 不存在审计记录应映射为404稳定业务码。
+	if notFound.Code != http.StatusNotFound || !strings.Contains(notFound.Body.String(), `"code":"audit_not_found"`) {
+		t.Fatalf("not found status=%d body=%s", notFound.Code, notFound.Body.String())
+	}
+
+	// >>> 数据演变示例
+	// 1. start_time=bad -> 400 invalid_audit_query零控制器调用。
+	// 2. id404+ErrAuditNotFound -> 404 audit_not_found。
 }
 
 // requestAPI 执行携带管理员 Token 的通用内存 API 请求。

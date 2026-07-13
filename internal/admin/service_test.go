@@ -25,6 +25,32 @@ type fakeRepository struct {
 	err             error
 }
 
+// ListAuditLogs 返回空测试审计页以满足管理仓库契约。
+// @param ctx：未使用的上下文；query：审计查询条件。
+// @returns 空分页或预设错误。
+// ⚠️副作用说明：无。
+func (f *fakeRepository) ListAuditLogs(_ context.Context, query AuditQuery) (AuditPage, error) {
+	page := AuditPage{Items: []AuditState{}, Page: query.Page, PageSize: query.PageSize}
+
+	// >>> 数据演变示例
+	// 1. page1,size20 -> 空AuditPage,nil。
+	// 2. err=boom -> 空AuditPage,boom。
+	return page, f.err
+}
+
+// GetAuditLog 返回测试审计详情以满足管理仓库契约。
+// @param ctx：未使用的上下文；id：审计ID。
+// @returns 使用指定ID的审计状态或预设错误。
+// ⚠️副作用说明：无。
+func (f *fakeRepository) GetAuditLog(_ context.Context, id int64) (AuditState, error) {
+	state := AuditState{ID: id}
+
+	// >>> 数据演变示例
+	// 1. id8 -> AuditState{8},nil。
+	// 2. err=boom -> AuditState{id},boom。
+	return state, f.err
+}
+
 // ListSystemSettings 返回测试预设设置列表。
 // @param ctx：未使用的测试上下文。
 // @returns 预设设置列表或错误。

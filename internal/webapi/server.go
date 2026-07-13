@@ -53,6 +53,8 @@ type ManagementController interface {
 	ListSettings(context.Context, management.Actor) ([]management.SettingState, error)
 	SetSetting(context.Context, management.Actor, string, json.RawMessage) (management.SettingState, error)
 	DeleteSetting(context.Context, management.Actor, string) error
+	ListAuditLogs(context.Context, management.Actor, management.AuditQuery) (management.AuditPage, error)
+	GetAuditLog(context.Context, management.Actor, int64) (management.AuditState, error)
 }
 
 // Server 提供 WebUI 认证 HTTP 接口。
@@ -152,6 +154,29 @@ type settingResponse struct {
 	Overridden  bool            `json:"overridden"`
 }
 
+type auditResponse struct {
+	ID           int64           `json:"id"`
+	ActorID      string          `json:"actor_id"`
+	ActorRole    string          `json:"actor_role"`
+	Channel      string          `json:"channel"`
+	Action       string          `json:"action"`
+	TargetType   string          `json:"target_type"`
+	TargetID     string          `json:"target_id"`
+	Before       json.RawMessage `json:"before"`
+	After        json.RawMessage `json:"after"`
+	Success      bool            `json:"success"`
+	ErrorMessage string          `json:"error_message"`
+	RequestID    string          `json:"request_id"`
+	CreatedAt    time.Time       `json:"created_at"`
+}
+
+type auditPageResponse struct {
+	Items    []auditResponse `json:"items"`
+	Page     int             `json:"page"`
+	PageSize int             `json:"page_size"`
+	Total    int64           `json:"total"`
+}
+
 // New 创建 WebUI API 服务并在内存中准备环境密码哈希。
 // @param password：环境变量中的共享密码；jwtSecret：JWT 签名密钥；admins：管理员快照解析器；controller：管理业务服务。
 // @returns 可注册到 HTTP 路由的 Server，或配置强度错误。
@@ -202,6 +227,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/settings", s.authenticate(http.HandlerFunc(s.listSettings)))
 	mux.Handle("PUT /api/settings/{setting_key}", s.authenticate(http.HandlerFunc(s.setSetting)))
 	mux.Handle("DELETE /api/settings/{setting_key}", s.authenticate(http.HandlerFunc(s.deleteSetting)))
+	mux.Handle("GET /api/audit-logs", s.authenticate(http.HandlerFunc(s.listAuditLogs)))
+	mux.Handle("GET /api/audit-logs/{audit_id}", s.authenticate(http.HandlerFunc(s.getAuditLog)))
 	handler := s.middleware(mux)
 
 	// >>> 数据演变示例
@@ -641,6 +668,148 @@ func settingView(state management.SettingState) settingResponse {
 	return view
 }
 
+// listAuditLogs 返回支持分页和筛选的只读审计列表。
+// @param writer：响应写入器；request：携带可选查询参数的已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：执行 PostgreSQL 审计计数与分页查询并写入 JSON 响应。
+func (s *Server) listAuditLogs(writer http.ResponseWriter, request *http.Request) {
+	actor := actorFromRequest(request)
+	query, err := parseAuditQuery(request)
+	// [决策理由] 查询参数格式错误应在访问数据库前返回400。
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_audit_query", "审计查询参数无效")
+		return
+	}
+	page, err := s.management.ListAuditLogs(request.Context(), actor, query)
+	// [决策理由] 授权、参数边界或数据库错误需要统一领域映射。
+	if err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	items := make([]auditResponse, 0, len(page.Items))
+	for _, state := range page.Items {
+		items = append(items, auditView(state))
+	}
+	writeSuccess(writer, auditPageResponse{Items: items, Page: page.Page, PageSize: page.PageSize, Total: page.Total})
+
+	// >>> 数据演变示例
+	// 1. page=1&page_size=20&actor_id=100 -> 筛选分页 -> 200 AuditPage。
+	// 2. start_time=bad -> 参数解析失败 -> 400零数据库访问。
+}
+
+// getAuditLog 返回指定审计记录的完整前后快照。
+// @param writer：响应写入器；request：携带审计 ID 的已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：执行 PostgreSQL 单条只读查询并写入 JSON 响应。
+func (s *Server) getAuditLog(writer http.ResponseWriter, request *http.Request) {
+	actor := actorFromRequest(request)
+	id, err := parsePositiveID(request.PathValue("audit_id"))
+	// [决策理由] 非正整数路径不能定位审计主键，应在查询前拒绝。
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "审计日志 ID 格式无效")
+		return
+	}
+	state, err := s.management.GetAuditLog(request.Context(), actor, id)
+	// [决策理由] 未找到和数据库错误必须返回不同业务码。
+	if err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	writeSuccess(writer, auditView(state))
+
+	// >>> 数据演变示例
+	// 1. id8存在 -> 查询完整before/after -> 200。
+	// 2. id404 -> ErrAuditNotFound -> 404 audit_not_found。
+}
+
+// parseAuditQuery 解析审计分页、精确筛选和时间范围。
+// @param request：HTTP 查询请求。
+// @returns 带默认分页的 AuditQuery 或格式错误。
+// ⚠️副作用说明：无；仅读取 URL 查询参数。
+func parseAuditQuery(request *http.Request) (management.AuditQuery, error) {
+	values := request.URL.Query()
+	query := management.AuditQuery{Page: 1, PageSize: 20, ActorID: values.Get("actor_id"), Action: values.Get("action"), TargetType: values.Get("target_type"), TargetID: values.Get("target_id")}
+	// [决策理由] 非空 page 必须是十进制整数。
+	if raw := values.Get("page"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		// [决策理由] 解析失败无法形成稳定分页偏移。
+		if err != nil {
+			return management.AuditQuery{}, err
+		}
+		query.Page = value
+	}
+	// [决策理由] 非空 page_size 必须是十进制整数。
+	if raw := values.Get("page_size"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		// [决策理由] 解析失败无法形成稳定 LIMIT。
+		if err != nil {
+			return management.AuditQuery{}, err
+		}
+		query.PageSize = value
+	}
+	startTime, err := parseOptionalTime(values.Get("start_time"))
+	// [决策理由] 起始时间必须使用 RFC3339，避免时区歧义。
+	if err != nil {
+		return management.AuditQuery{}, err
+	}
+	endTime, err := parseOptionalTime(values.Get("end_time"))
+	// [决策理由] 结束时间必须使用 RFC3339，避免服务器本地时区猜测。
+	if err != nil {
+		return management.AuditQuery{}, err
+	}
+	query.StartTime, query.EndTime = startTime, endTime
+
+	// >>> 数据演变示例
+	// 1. 无参数 -> page1,size20,空筛选。
+	// 2. page=2&start_time=RFC3339 -> page2+时间指针。
+	return query, nil
+}
+
+// parseOptionalTime 解析可为空的 RFC3339 时间。
+// @param value：查询参数时间原文。
+// @returns 空值对应 nil，非空对应 UTC 含时区时间或错误。
+// ⚠️副作用说明：无。
+func parseOptionalTime(value string) (*time.Time, error) {
+	// [决策理由] 空筛选表示不限制该时间边界。
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	// [决策理由] 非 RFC3339 时间缺少稳定时区语义，必须拒绝。
+	if err != nil {
+		return nil, err
+	}
+	utc := parsed.UTC()
+
+	// >>> 数据演变示例
+	// 1. "" -> nil,nil。
+	// 2. 2026-07-13T10:00:00+08:00 -> 2026-07-13T02:00:00Z。
+	return &utc, nil
+}
+
+// auditView 将内部审计状态转换成稳定 API 模型。
+// @param state：管理服务审计状态。
+// @returns JSON 快照为 null 或原值的 snake_case 审计响应。
+// ⚠️副作用说明：复制前后 JSON 字节。
+func auditView(state management.AuditState) auditResponse {
+	before := append(json.RawMessage(nil), state.BeforeJSON...)
+	after := append(json.RawMessage(nil), state.AfterJSON...)
+	// [决策理由] 数据库 NULL 快照应编码成 JSON null，而不是省略或破坏响应。
+	if len(before) == 0 {
+		before = json.RawMessage(`null`)
+	}
+	// [决策理由] 数据库 NULL 后快照通常表示删除操作，应明确输出 null。
+	if len(after) == 0 {
+		after = json.RawMessage(`null`)
+	}
+	view := auditResponse{ID: state.ID, ActorID: state.ActorID, ActorRole: state.ActorRole, Channel: state.Channel, Action: state.Action, TargetType: state.TargetType, TargetID: state.TargetID, Before: before, After: after, Success: state.Success, ErrorMessage: state.ErrorMessage, RequestID: state.RequestID, CreatedAt: state.CreatedAt.UTC()}
+
+	// >>> 数据演变示例
+	// 1. update含before/after+东八区时间 -> DTO保留JSON并转UTC。
+	// 2. delete的after为空 -> after:null。
+	return view
+}
+
 // actorFromRequest 将认证身份与请求 ID 转换成管理服务 Actor。
 // @param request：已通过 authenticate 和 middleware 的请求。
 // @returns 认证中间件注入的 WebUI 最高管理员 Actor。
@@ -730,6 +899,16 @@ func writeManagementError(writer http.ResponseWriter, err error) {
 	// [决策理由] 删除不存在的数据库覆盖表示当前设置已经在使用默认值。
 	if errors.Is(err, admin.ErrSettingNotFound) {
 		writeError(writer, http.StatusNotFound, "setting_override_not_found", "系统设置当前没有覆盖值")
+		return
+	}
+	// [决策理由] 审计分页边界或时间区间错误属于客户端查询问题。
+	if errors.Is(err, admin.ErrInvalidAuditQuery) {
+		writeError(writer, http.StatusBadRequest, "invalid_audit_query", "审计查询参数无效")
+		return
+	}
+	// [决策理由] 不存在的审计主键应返回404而非通用服务故障。
+	if errors.Is(err, admin.ErrAuditNotFound) {
+		writeError(writer, http.StatusNotFound, "audit_not_found", "审计日志不存在")
 		return
 	}
 	// [决策理由] 授权失败不得被误报成服务器故障。

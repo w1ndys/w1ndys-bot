@@ -47,6 +47,30 @@ type fakeManagement struct {
 	enabled bool
 }
 
+// ListAuditLogs 满足完整管理契约；QQ 应急插件不调用审计查询。
+// @param ctx：未使用的上下文；actor：操作者；query：审计查询。
+// @returns 空审计页与 nil。
+// ⚠️副作用说明：无。
+func (f *fakeManagement) ListAuditLogs(context.Context, management.Actor, management.AuditQuery) (management.AuditPage, error) {
+	page := management.AuditPage{Items: []management.AuditState{}, Page: 1, PageSize: 20}
+
+	// >>> 数据演变示例
+	// 1. QQ应急插件 -> 不调用 -> 空分页。
+	// 2. WebUI审计查询 -> 由AdminService负责。
+	return page, nil
+}
+
+// GetAuditLog 满足完整管理契约；QQ 应急插件不调用审计详情。
+// @param ctx：未使用的上下文；actor：操作者；id：审计ID。
+// @returns 零值审计记录与 nil。
+// ⚠️副作用说明：无。
+func (f *fakeManagement) GetAuditLog(context.Context, management.Actor, int64) (management.AuditState, error) {
+	// >>> 数据演变示例
+	// 1. QQ应急插件 -> 不调用 -> 零值记录。
+	// 2. WebUI审计详情 -> 由AdminService负责。
+	return management.AuditState{}, nil
+}
+
 // ListPlugins 返回测试插件列表并记录操作者。
 // @param ctx：未使用的上下文；actor：管理操作者。
 // @returns 预设插件列表与nil。

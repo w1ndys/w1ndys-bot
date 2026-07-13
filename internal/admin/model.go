@@ -28,10 +28,15 @@ type PermissionState = management.PermissionState
 type PermissionSet = management.PermissionSet
 type SystemAdmin = management.AdminState
 type SettingState = management.SettingState
+type AuditQuery = management.AuditQuery
+type AuditState = management.AuditState
+type AuditPage = management.AuditPage
 
 var ErrSettingNotFound = errors.New("系统设置不存在")
 var ErrUnknownSetting = errors.New("未知系统设置")
 var ErrInvalidSetting = errors.New("系统设置值无效")
+var ErrAuditNotFound = errors.New("审计日志不存在")
+var ErrInvalidAuditQuery = errors.New("审计查询参数无效")
 
 const ChannelWebUI = management.ChannelWebUI
 const ChannelQQ = management.ChannelQQ

@@ -45,12 +45,13 @@ func URL(cfg config.Database) string {
 		Host:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Path:   cfg.Name,
 		RawQuery: url.Values{
-			"sslmode": []string{cfg.SSLMode},
+			"sslmode":  []string{cfg.SSLMode},
+			"timezone": []string{"UTC"},
 		}.Encode(),
 	}).String()
 
 	// >>> 数据演变示例
-	// 1. host=postgres,port=5432,name=w1ndys_bot -> postgres://...@postgres:5432/w1ndys_bot。
+	// 1. host=postgres,port=5432,name=w1ndys_bot -> PostgreSQL URL + timezone=UTC。
 	// 2. password=a@b -> URL 转义 -> 密码不会破坏连接字符串结构。
 	return result
 }
