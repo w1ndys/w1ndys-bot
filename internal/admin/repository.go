@@ -14,6 +14,7 @@ import (
 
 // Repository 定义管理服务所需的插件持久化能力。
 type Repository interface {
+	ListSystemAdmins(context.Context) ([]SystemAdmin, error)
 	ListPlugins(context.Context) ([]PluginState, error)
 	UpdatePlugin(context.Context, Actor, string, PluginPatch) (PluginState, error)
 	ListCommands(context.Context) ([]CommandState, error)
@@ -23,6 +24,9 @@ type Repository interface {
 	ListPermissions(context.Context) ([]PermissionState, error)
 	SetPermission(context.Context, Actor, PermissionSet) (PermissionState, error)
 	DeletePermission(context.Context, Actor, int64) error
+	CreateSystemAdmin(context.Context, Actor, AdminCreate) (SystemAdmin, error)
+	UpdateSystemAdmin(context.Context, Actor, string, AdminPatch) (SystemAdmin, error)
+	DeleteSystemAdmin(context.Context, Actor, string) error
 }
 
 // SystemAdminRepository 定义最高管理员身份数据的加载能力。
@@ -124,15 +128,15 @@ func (r *PostgresRepository) BootstrapSystemAdmin(ctx context.Context, userID st
 	if !numericUserID(userID) {
 		return fmt.Errorf("最高管理员 QQ 号 %q 格式无效", userID)
 	}
-	_, err := r.pool.Exec(ctx, `INSERT INTO system_admins(user_id,nickname,enabled,created_by) VALUES($1,'环境变量引导',TRUE,$1) ON CONFLICT(user_id) DO NOTHING`, userID)
+	_, err := r.pool.Exec(ctx, `INSERT INTO system_admins(user_id,nickname,enabled,created_by) SELECT $1,'环境变量引导',TRUE,$1 WHERE NOT EXISTS (SELECT 1 FROM system_admins) ON CONFLICT(user_id) DO NOTHING`, userID)
 	// [决策理由] 引导写入失败时管理员权限不可用，必须阻止依赖它的入口启动。
 	if err != nil {
 		return fmt.Errorf("引导最高管理员: %w", err)
 	}
 
 	// >>> 数据演变示例
-	// 1. SUPER_ADMIN_QQ=123且DB无记录 -> INSERT -> 123启用。
-	// 2. DB已有123且已禁用 -> ON CONFLICT DO NOTHING -> 保持数据库禁用状态。
+	// 1. SUPER_ADMIN_QQ=123且管理员表为空 -> INSERT -> 123启用。
+	// 2. 管理员表已有任意账号 -> 跳过引导 -> 完全保持数据库管理结果。
 	return nil
 }
 

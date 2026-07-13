@@ -85,6 +85,7 @@ task migrate-down       # 回滚最近一个版本
 - [x] 最高管理员环境引导、身份缓存与 QQ 插件管理命令
 - [x] 命令别名 CRUD、事务审计与 Command Registry 热刷新服务
 - [x] 权限策略 CRUD、事务审计与 Permission Resolver 热刷新服务
+- [x] 最高管理员 CRUD、最后账号保护、事务审计与授权热刷新
 - [x] 数据库自动迁移及迁移管理任务
 - [x] Dockerfile 与机器人/PostgreSQL Compose 编排
 
@@ -92,7 +93,7 @@ task migrate-down       # 回滚最近一个版本
 
 按以下顺序推进，每一步完成测试并独立提交：
 
-1. 扩展系统设置与管理员 Repository，统一写入、缓存和审计。
+1. 扩展系统设置 Repository，统一写入、缓存和审计。
 2. 建设 WebUI 后端，包括认证、审计及管理 REST API。
 3. 建设 Vue 3 WebUI，按 Manifest 配置描述渲染开关、表单和 CRUD 页面。
 

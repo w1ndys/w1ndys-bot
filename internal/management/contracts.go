@@ -70,6 +70,25 @@ type PermissionSet struct {
 	Effect      string
 }
 
+// AdminState 表示最高管理员账号状态。
+type AdminState struct {
+	UserID   string
+	Nickname string
+	Enabled  bool
+}
+
+// AdminCreate 描述新增最高管理员所需字段。
+type AdminCreate struct {
+	UserID   string
+	Nickname string
+}
+
+// AdminPatch 描述管理员可选修改字段；nil 表示保持原值。
+type AdminPatch struct {
+	Nickname *string
+	Enabled  *bool
+}
+
 // Controller 定义 QQ 管理插件与未来 WebUI 共用的管理能力。
 type Controller interface {
 	ListPlugins(context.Context, Actor) ([]PluginState, error)
@@ -82,4 +101,8 @@ type Controller interface {
 	ListPermissions(context.Context, Actor) ([]PermissionState, error)
 	SetPermission(context.Context, Actor, PermissionSet) (PermissionState, error)
 	DeletePermission(context.Context, Actor, int64) error
+	ListAdmins(context.Context, Actor) ([]AdminState, error)
+	CreateAdmin(context.Context, Actor, AdminCreate) (AdminState, error)
+	UpdateAdmin(context.Context, Actor, string, AdminPatch) (AdminState, error)
+	DeleteAdmin(context.Context, Actor, string) error
 }
