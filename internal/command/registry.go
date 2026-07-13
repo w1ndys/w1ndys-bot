@@ -4,7 +4,9 @@ package command
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync/atomic"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -118,18 +120,52 @@ func (r *Registry) Resolve(groupID string, input string, prefix string) (Binding
 		return Binding{}, false
 	}
 	current := r.snapshot.Load()
-	// [决策理由] 具体群配置应覆盖全局同名命令。
+	// [决策理由] 具体群配置应覆盖全局同名命令或带参数命令。
 	if groupID != "" {
-		if binding, exists := (*current)[snapshotKey(ScopeGroup, groupID, normalized)]; exists {
+		if binding, exists := resolveScope(*current, ScopeGroup, groupID, normalized); exists {
 			return binding, true
 		}
 	}
-	binding, exists := (*current)[snapshotKey(ScopeGlobal, "0", normalized)]
+	binding, exists := resolveScope(*current, ScopeGlobal, "0", normalized)
 
 	// >>> 数据演变示例
 	// 1. 群123和全局都有签到 -> 返回群123 Binding。
 	// 2. 群123无打卡、全局有打卡 -> 返回全局 Binding。
 	return binding, exists
+}
+
+// resolveScope 在指定作用域按最长命令前缀匹配，允许命令后携带空格参数。
+// @param snapshot：命令快照；scopeType：作用域；scopeID：作用域 ID；normalized：标准化输入。
+// @returns 最长匹配 Binding 与是否找到。
+// ⚠️副作用说明：无；仅读取不可变快照。
+func resolveScope(snapshot map[string]Binding, scopeType ScopeType, scopeID string, normalized string) (Binding, bool) {
+	// [决策理由] 精确命令是最常见路径，优先 O(1) 查询避免遍历。
+	if binding, exists := snapshot[snapshotKey(scopeType, scopeID, normalized)]; exists {
+		return binding, true
+	}
+	var matched Binding
+	matchedLength := -1
+	for _, binding := range snapshot {
+		// [决策理由] 只比较目标作用域，避免群命令或全局命令串扰。
+		if binding.ScopeType != scopeType || binding.ScopeID != scopeID {
+			continue
+		}
+		// [决策理由] 参数必须由空格分隔，避免命令“启用”误匹配普通文本“启用插件”。
+		if !strings.HasPrefix(normalized, binding.NormalizedCommand+" ") {
+			continue
+		}
+		length := utf8.RuneCountInString(binding.NormalizedCommand)
+		// [决策理由] 多个命令均为前缀时选择最长者，使“插件”和“插件 列表”路由确定。
+		if length > matchedLength {
+			matched = binding
+			matchedLength = length
+		}
+	}
+
+	// >>> 数据演变示例
+	// 1. 命令“启用插件”+输入“启用插件 ping” -> 前缀匹配 -> 返回对应Binding。
+	// 2. 命令“插件”和“插件 设置”+输入“插件 设置 ping” -> 最长匹配 -> 返回“插件 设置”。
+	return matched, matchedLength >= 0
 }
 
 // snapshotKey 生成不可碰撞的作用域内存键。

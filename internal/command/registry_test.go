@@ -24,6 +24,31 @@ func TestNormalize(t *testing.T) {
 	// 2. " PING " -> "ping"。
 }
 
+// TestResolveMatchesLongestParameterizedCommand 验证带参数输入按最长命令前缀路由。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：可能终止当前测试。
+func TestResolveMatchesLongestParameterizedCommand(t *testing.T) {
+	registry := NewRegistry(nil)
+	err := registry.Replace([]Binding{
+		{ScopeType: ScopeGlobal, ScopeID: "0", PluginName: "admin", FeatureKey: "plugin", Command: "插件", NormalizedCommand: "插件", Enabled: true},
+		{ScopeType: ScopeGlobal, ScopeID: "0", PluginName: "admin", FeatureKey: "enable", Command: "插件 启用", NormalizedCommand: "插件 启用", Enabled: true},
+	})
+	// [决策理由] 测试快照必须先成功发布才能验证匹配行为。
+	if err != nil {
+		t.Fatalf("Replace() error = %v", err)
+	}
+	binding, found := registry.Resolve("123", "/插件 启用 ping", "/")
+	// [决策理由] 参数化命令必须识别且选择更具体的最长前缀。
+	if !found || binding.FeatureKey != "enable" {
+		t.Fatalf("Resolve() = %+v,%v", binding, found)
+	}
+
+	// >>> 数据演变示例
+	// 1. /插件 启用 ping -> 候选“插件”“插件 启用” -> enable。
+	// 2. 最长前缀胜出 -> 参数ping不参与命令唯一键。
+}
+
 // TestRegistryResolveScopePriority 验证群级覆盖全局及重复检测。
 // @param testing.T：Go 测试上下文。
 // @returns 无。

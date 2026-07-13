@@ -72,3 +72,54 @@ func TestSendMessageReturnsActionFailure(t *testing.T) {
 	// 1. status=failed -> response.OK=false -> 返回错误。
 	// 2. status=ok -> 解析 data -> 返回 message_id。
 }
+
+// TestReplyToMessageBuildsQuotedSegments 验证引用回复自动构造 reply 与 text 消息段。
+// @param testing.T：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：修改 fakeCaller 请求记录。
+func TestReplyToMessageBuildsQuotedSegments(t *testing.T) {
+	caller := &fakeCaller{result: ws.ActionResponse{Status: "ok", Data: json.RawMessage(`{"message_id":99}`)}}
+	api := New(caller)
+	event := &ws.MessageEvent{MessageType: "group", GroupID: 123, MessageID: 88}
+	messageID, err := api.ReplyToMessage(context.Background(), event, event.MessageID, "操作成功")
+	// [决策理由] 引用回复必须使用原群目标并返回 NapCat 新消息 ID。
+	if err != nil || messageID != 99 || caller.action != "send_group_msg" {
+		t.Fatalf("ReplyToMessage() id=%d action=%s err=%v", messageID, caller.action, err)
+	}
+	encoded, err := json.Marshal(caller.params)
+	// [决策理由] 测试需要检查最终传给 ActionCaller 的 JSON 协议形态。
+	if err != nil {
+		t.Fatalf("Marshal(params) error = %v", err)
+	}
+	want := `{"group_id":123,"message":[{"type":"reply","data":{"id":"88"}},{"type":"text","data":{"text":"操作成功"}}]}`
+	// [决策理由] reply 必须位于文本前，且引用 ID 按 OneBot 字符串字段编码。
+	if string(encoded) != want {
+		t.Fatalf("params = %s, want %s", encoded, want)
+	}
+
+	// >>> 数据演变示例
+	// 1. event.message_id=88 + 操作成功 -> reply{id:"88"}+text -> send_group_msg。
+	// 2. NapCat message_id=99 -> ReplyToMessage返回99。
+}
+
+// TestReplyToMessageRejectsInvalidReference 验证无效引用 ID 不会发送 Action。
+// @param testing.T：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：读取 fakeCaller 请求记录并可能终止测试。
+func TestReplyToMessageRejectsInvalidReference(t *testing.T) {
+	caller := &fakeCaller{}
+	api := New(caller)
+	_, err := api.ReplyToMessage(context.Background(), &ws.MessageEvent{MessageType: "group", GroupID: 123}, 0, "失败")
+	// [决策理由] 无效消息 ID 必须返回参数错误。
+	if err == nil {
+		t.Fatal("ReplyToMessage() error = nil")
+	}
+	// [决策理由] 本地校验失败不得产生任何 NapCat Action。
+	if caller.action != "" {
+		t.Fatalf("unexpected action = %s", caller.action)
+	}
+
+	// >>> 数据演变示例
+	// 1. id=0 -> 校验失败 -> error且action为空。
+	// 2. id=-1 -> 同样拒绝 -> 不发送消息。
+}

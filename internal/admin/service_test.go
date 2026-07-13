@@ -193,3 +193,26 @@ func TestSetPluginEnabledRejectsUntrustedRole(t *testing.T) {
 	// 1. actor.Role=super_admin但Resolver=false -> ErrForbidden。
 	// 2. 拒绝发生在Repository前 -> 无数据库写入和热刷新。
 }
+
+// TestSetPluginEnabledRejectsDisablingAdmin 验证系统管理入口不能关闭自身。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行内存替身并可能终止当前测试。
+func TestSetPluginEnabledRejectsDisablingAdmin(t *testing.T) {
+	repository := &fakeRepository{}
+	runtime := &fakeRuntime{}
+	service := NewService(repository, runtime, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
+	_, err := service.SetPluginEnabled(context.Background(), Actor{ID: "100", Channel: ChannelQQ}, "admin", false)
+	// [决策理由] 关闭唯一 QQ 恢复入口必须返回稳定保护错误。
+	if !errors.Is(err, ErrProtectedPlugin) {
+		t.Fatalf("error = %v, want ErrProtectedPlugin", err)
+	}
+	// [决策理由] 保护判断必须在数据库事务前完成。
+	if repository.updateName != "" {
+		t.Fatalf("repository unexpectedly called for %q", repository.updateName)
+	}
+
+	// >>> 数据演变示例
+	// 1. /禁用插件 admin -> ErrProtectedPlugin -> admin保持启用。
+	// 2. 最高管理员请求关闭admin -> 仍拒绝 -> 无数据库写入。
+}

@@ -37,10 +37,14 @@ func NewService(repository Repository, runtime RuntimeRefresher, authorizer Admi
 }
 
 // ListPlugins 返回管理端插件列表。
-// @param ctx：查询生命周期。
+// @param ctx：查询生命周期；actor：操作者。
 // @returns 插件快照或仓库错误。
 // ⚠️副作用说明：调用 Repository 执行只读查询。
-func (s *Service) ListPlugins(ctx context.Context) ([]PluginState, error) {
+func (s *Service) ListPlugins(ctx context.Context, actor Actor) ([]PluginState, error) {
+	// [决策理由] 插件状态属于管理信息，读取也必须验证最高管理员身份。
+	if err := s.authorize(actor); err != nil {
+		return nil, err
+	}
 	states, err := s.repository.ListPlugins(ctx)
 	// [决策理由] 管理端需要明确区分空列表和查询失败。
 	if err != nil {
@@ -58,6 +62,10 @@ func (s *Service) ListPlugins(ctx context.Context) ([]PluginState, error) {
 // @returns 更新后的插件快照或校验、仓库、刷新错误。
 // ⚠️副作用说明：更新数据库、写审计，并可能触发插件启用或禁用回调。
 func (s *Service) SetPluginEnabled(ctx context.Context, actor Actor, name string, enabled bool) (PluginState, error) {
+	// [决策理由] admin 是恢复其他插件的唯一 QQ 控制入口，禁止通过自身接口关闭造成管理锁死。
+	if name == "admin" && !enabled {
+		return PluginState{}, ErrProtectedPlugin
+	}
 	state, err := s.updatePlugin(ctx, actor, name, PluginPatch{Enabled: &enabled})
 
 	// >>> 数据演变示例
@@ -84,17 +92,9 @@ func (s *Service) SetPluginPriority(ctx context.Context, actor Actor, name strin
 // @returns 更新后的插件快照或业务错误。
 // ⚠️副作用说明：调用 Repository 写事务，并可能刷新插件运行状态。
 func (s *Service) updatePlugin(ctx context.Context, actor Actor, name string, patch PluginPatch) (PluginState, error) {
-	// [决策理由] 审计记录必须能定位真实操作者，空 ID 不允许进入仓库。
-	if actor.ID == "" {
-		return PluginState{}, ErrInvalidActor
-	}
-	// [决策理由] 数据库约束只允许已定义的双控制通道和系统操作。
-	if !validChannel(actor.Channel) {
-		return PluginState{}, ErrInvalidChannel
-	}
-	// [决策理由] QQ 与 WebUI 输入不可信，必须以服务端管理员快照重新校验，不能信任 actor.Role。
-	if actor.Channel != ChannelSystem && (s.authorizer == nil || !s.authorizer.IsSuperAdmin(actor.ID)) {
-		return PluginState{}, ErrForbidden
+	// [决策理由] 所有管理读写共享同一身份校验，防止入口间授权规则漂移。
+	if err := s.authorize(actor); err != nil {
+		return PluginState{}, err
 	}
 	// [决策理由] 空插件名不能稳定定位配置与审计目标。
 	if name == "" {
@@ -118,6 +118,30 @@ func (s *Service) updatePlugin(ctx context.Context, actor Actor, name string, pa
 	// 1. qq管理员 + ping启用 -> Repository事务 -> Runtime.Load -> 返回新状态。
 	// 2. 非法channel -> 校验拒绝 -> Repository不调用。
 	return state, nil
+}
+
+// authorize 使用服务端身份快照校验管理操作来源和操作者。
+// @param actor：待校验操作者。
+// @returns 身份有效且获授权时返回 nil，否则返回稳定领域错误。
+// ⚠️副作用说明：读取最高管理员内存快照。
+func (s *Service) authorize(actor Actor) error {
+	// [决策理由] 审计记录必须能定位真实操作者，空 ID 不允许进入管理服务。
+	if actor.ID == "" {
+		return ErrInvalidActor
+	}
+	// [决策理由] 数据库约束只允许已定义的双控制通道和系统操作。
+	if !validChannel(actor.Channel) {
+		return ErrInvalidChannel
+	}
+	// [决策理由] QQ 与 WebUI 输入不可信，必须以服务端管理员快照重新校验，不能信任 actor.Role。
+	if actor.Channel != ChannelSystem && (s.authorizer == nil || !s.authorizer.IsSuperAdmin(actor.ID)) {
+		return ErrForbidden
+	}
+
+	// >>> 数据演变示例
+	// 1. QQ用户100 + Resolver允许 -> nil。
+	// 2. actor.Role伪造super_admin + Resolver拒绝 -> ErrForbidden。
+	return nil
 }
 
 // validChannel 判断管理来源是否可写入审计表。

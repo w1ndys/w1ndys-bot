@@ -20,6 +20,7 @@ import (
 	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 	projectlogger "github.com/w1ndys/w1ndys-bot/pkg/logger"
+	_ "github.com/w1ndys/w1ndys-bot/plugins/admin"
 	_ "github.com/w1ndys/w1ndys-bot/plugins/ping"
 )
 
@@ -101,6 +102,7 @@ func main() {
 		return
 	}
 	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool))
+	adminService := admin.NewService(adminRepository, pluginManager, adminResolver)
 	wsServer := ws.NewServer(cfg.NapCatToken, func(_ context.Context, event ws.Event) error {
 		logEvent(event)
 		message, isMessage := event.(*ws.MessageEvent)
@@ -119,6 +121,10 @@ func main() {
 			return fmt.Errorf("命令目标 %s 不存在", binding.Target())
 		}
 		role := messageRole(message)
+		// [决策理由] NapCat 群角色不包含系统最高管理员，必须用服务端身份快照提升对应 QQ 权限角色。
+		if adminResolver.IsSuperAdmin(strconv.FormatInt(message.UserID, 10)) {
+			role = permission.RoleSuperAdmin
+		}
 		// [决策理由] 权限拒绝时不得调用插件实现。
 		if !permissions.Allowed(strconv.FormatInt(message.GroupID, 10), binding.PluginName, binding.FeatureKey, role, defaults) {
 			projectlogger.Warn("命令权限不足", "target", binding.Target(), "user_id", message.UserID, "role", role)
@@ -134,7 +140,7 @@ func main() {
 	})
 	botAPI := onebot.New(wsServer.Actions())
 	for _, registration := range registrations {
-		implementation, err := registration.Factory(plugin.Runtime{Messenger: botAPI})
+		implementation, err := registration.Factory(plugin.Runtime{Messenger: botAPI, Management: adminService})
 		// [决策理由] 工厂失败或返回错误实现时该插件不能进入运行路由。
 		if err != nil {
 			projectlogger.Error("创建插件运行实例失败", "plugin", registration.Manifest.Name, "error", err)

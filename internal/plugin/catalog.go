@@ -7,17 +7,20 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/w1ndys/w1ndys-bot/internal/management"
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 )
 
 // Messenger 是插件发送回复所需的最小 BotAPI 能力。
 type Messenger interface {
 	Reply(context.Context, *ws.MessageEvent, any) (int64, error)
+	ReplyToMessage(context.Context, *ws.MessageEvent, int64, string) (int64, error)
 }
 
 // Runtime 提供插件实例化所需的运行时依赖。
 type Runtime struct {
-	Messenger Messenger
+	Messenger  Messenger
+	Management management.Controller
 }
 
 // Factory 使用运行时依赖创建插件实例。

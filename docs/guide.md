@@ -37,6 +37,7 @@ internal/permission/     多级权限解析
 internal/migration/      迁移执行器与 SQL 文件
 pkg/logger/              zap 结构化日志适配层
 plugins/ping/            ping 示例插件
+plugins/admin/           不可关闭的 QQ 系统管理插件
 docs/                    设计与开发文档
 ```
 
@@ -80,6 +81,7 @@ task migrate-down       # 回滚最近一个版本
 - [x] PluginManager、Manifest + Factory 注册及元数据同步
 - [x] 多作用域命令匹配、重复检测和五级权限解析
 - [x] `ping` 插件端到端命令回复链路
+- [x] 最高管理员环境引导、身份缓存与 QQ 插件管理命令
 - [x] 数据库自动迁移及迁移管理任务
 - [x] Dockerfile 与机器人/PostgreSQL Compose 编排
 
@@ -87,14 +89,13 @@ task migrate-down       # 回滚最近一个版本
 
 按以下顺序推进，每一步完成测试并独立提交：
 
-1. 实现 AdminService 与数据库 repositories，统一插件、命令、权限和系统设置写入口。
-2. 实现最高管理员解析与缓存，明确 QQ 号身份和授权边界。
-3. 实现命令、权限、插件开关的运行时刷新与管理接口。
-4. 实现 QQ 管理命令，使管理员可在聊天中执行查询和变更。
-5. 建设 WebUI 后端，包括认证、审计及管理 REST API。
-6. 建设 Vue 3 WebUI，按 Manifest 配置描述渲染开关、表单和 CRUD 页面。
+1. 扩展命令与权限策略 CRUD，并在事务提交后原子热刷新对应快照。
+2. 扩展系统设置与管理员 Repository，统一写入、缓存和审计。
+3. 扩展 QQ 管理命令，使管理员可维护命令别名与群级权限。
+4. 建设 WebUI 后端，包括认证、审计及管理 REST API。
+5. 建设 Vue 3 WebUI，按 Manifest 配置描述渲染开关、表单和 CRUD 页面。
 
-当前尚未实现 Admin Console；`ping` 可通过数据库启用用于验证已有链路。所有管理变更最终必须同时经过授权校验、重复检测、热更新和审计记录。
+当前尚未实现 WebUI Admin Console；最高管理员可使用 `/插件列表`、`/启用插件 <名称>`、`/禁用插件 <名称>` 和 `/设置插件优先级 <名称> <整数>`。系统 `admin` 插件不可通过管理服务禁用。所有管理变更最终必须同时经过授权校验、重复检测、热更新和审计记录。
 
 ## 8. 阶段验收
 

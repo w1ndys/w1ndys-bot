@@ -40,14 +40,14 @@ func (p *implementation) Handle(ctx context.Context, event ws.Event) error {
 	if !ok {
 		return fmt.Errorf("ping 收到非消息事件 %T", event)
 	}
-	_, err := p.messenger.Reply(ctx, message, "pong")
+	_, err := p.messenger.ReplyToMessage(ctx, message, message.MessageID, "pong")
 	// [决策理由] 回复失败必须返回给事件链路记录，不可静默吞掉。
 	if err != nil {
 		return fmt.Errorf("回复 pong: %w", err)
 	}
 
 	// >>> 数据演变示例
-	// 1. feature=ping + group message -> Reply(group,pong) -> nil。
+	// 1. feature=ping + group message -> ReplyToMessage(message_id,pong) -> nil。
 	// 2. feature="" + message -> 不回复 -> nil。
 	return plugin.ErrStopPropagation
 }

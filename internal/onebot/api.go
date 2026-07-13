@@ -37,6 +37,12 @@ type SendMessageResult struct {
 	MessageID int64 `json:"message_id"`
 }
 
+// MessageSegment 表示一个 OneBot 11 数组消息段。
+type MessageSegment struct {
+	Type string `json:"type"`
+	Data any    `json:"data"`
+}
+
 // SendGroupMessage 向指定 QQ 群发送消息。
 // @param ctx：控制请求超时；groupID：目标群号；message：OneBot 消息内容。
 // @returns 新消息 ID 或 Action、业务、解析错误。
@@ -100,6 +106,31 @@ func (a *API) Reply(ctx context.Context, event *ws.MessageEvent, message any) (i
 	// >>> 数据演变示例
 	// 1. message.group group_id=123 -> SendGroupMessage(123)。
 	// 2. message.private user_id=456 -> SendPrivateMessage(456)。
+}
+
+// ReplyToMessage 向原会话发送带引用的文本回复。
+// @param ctx：控制请求超时；event：用于确定群聊或私聊目标的命令事件；commandMessageID：被引用的命令消息 ID；content：回复文本。
+// @returns 新消息 ID 或参数、Action、业务、解析错误。
+// ⚠️副作用说明：通过 NapCat 向原会话发送 reply 与 text 消息段。
+func (a *API) ReplyToMessage(ctx context.Context, event *ws.MessageEvent, commandMessageID int64, content string) (int64, error) {
+	// [决策理由] OneBot reply 段必须引用有效的正数消息 ID。
+	if commandMessageID <= 0 {
+		return 0, fmt.Errorf("被引用消息 ID 必须大于 0")
+	}
+	message := []MessageSegment{
+		{Type: "reply", Data: struct {
+			ID string `json:"id"`
+		}{ID: fmt.Sprintf("%d", commandMessageID)}},
+		{Type: "text", Data: struct {
+			Text string `json:"text"`
+		}{Text: content}},
+	}
+	result, err := a.Reply(ctx, event, message)
+
+	// >>> 数据演变示例
+	// 1. group event + id=88 + "成功" -> [reply{id:"88"},text{"成功"}] -> send_group_msg。
+	// 2. id=0 -> 参数校验失败 -> 不调用 NapCat。
+	return result, err
 }
 
 // callAndDecode 执行发送消息 Action 并解析统一结果。

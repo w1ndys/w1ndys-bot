@@ -35,6 +35,7 @@ type Manifest struct {
 	Version       string
 	SchemaVersion int
 	Priority      int
+	System        bool
 	Features      []FeatureManifest
 }
 

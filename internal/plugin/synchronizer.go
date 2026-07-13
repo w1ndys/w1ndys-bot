@@ -97,8 +97,11 @@ func syncManifest(ctx context.Context, transaction pgx.Tx, manifest Manifest) er
 	}
 	_, err = transaction.Exec(ctx, `
         INSERT INTO plugin_config (plugin_name, enabled, priority)
-        VALUES ($1, FALSE, $2)
-        ON CONFLICT (plugin_name) DO UPDATE SET priority = EXCLUDED.priority, updated_at = NOW()`, manifest.Name, manifest.Priority)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (plugin_name) DO UPDATE SET
+			enabled = CASE WHEN $2 THEN TRUE ELSE plugin_config.enabled END,
+			priority = EXCLUDED.priority,
+			updated_at = NOW()`, manifest.Name, manifest.System, manifest.Priority)
 	// [决策理由] 运行状态表必须为新插件创建默认关闭记录。
 	if err != nil {
 		return fmt.Errorf("同步插件 %s 运行状态: %w", manifest.Name, err)
