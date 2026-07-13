@@ -49,6 +49,27 @@ type CommandCreate struct {
 	Command    string
 }
 
+// PermissionState 表示一条角色权限覆盖策略。
+type PermissionState struct {
+	ID          int64
+	ScopeType   string
+	ScopeID     string
+	PluginName  string
+	FeatureKey  string
+	SubjectRole string
+	Effect      string
+}
+
+// PermissionSet 描述新增或更新权限策略的唯一维度和效果。
+type PermissionSet struct {
+	ScopeType   string
+	ScopeID     string
+	PluginName  string
+	FeatureKey  string
+	SubjectRole string
+	Effect      string
+}
+
 // Controller 定义 QQ 管理插件与未来 WebUI 共用的管理能力。
 type Controller interface {
 	ListPlugins(context.Context, Actor) ([]PluginState, error)
@@ -58,4 +79,7 @@ type Controller interface {
 	CreateCommand(context.Context, Actor, CommandCreate) (CommandState, error)
 	RenameCommand(context.Context, Actor, int64, string) (CommandState, error)
 	DeleteCommand(context.Context, Actor, int64) error
+	ListPermissions(context.Context, Actor) ([]PermissionState, error)
+	SetPermission(context.Context, Actor, PermissionSet) (PermissionState, error)
+	DeletePermission(context.Context, Actor, int64) error
 }

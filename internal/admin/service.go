@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	commandregistry "github.com/w1ndys/w1ndys-bot/internal/command"
+	"github.com/w1ndys/w1ndys-bot/internal/permission"
 )
 
 // RuntimeRefresher 定义数据库管理变更后的运行时刷新能力。
@@ -20,18 +21,19 @@ type AdminAuthorizer interface {
 
 // Service 是 QQ 管理命令与 WebUI 共用的管理业务入口。
 type Service struct {
-	repository Repository
-	runtime    RuntimeRefresher
-	commands   RuntimeRefresher
-	authorizer AdminAuthorizer
+	repository  Repository
+	runtime     RuntimeRefresher
+	commands    RuntimeRefresher
+	permissions RuntimeRefresher
+	authorizer  AdminAuthorizer
 }
 
 // NewService 创建管理服务。
-// @param repository：管理仓库；runtime：插件运行时刷新器；commands：命令快照刷新器；authorizer：最高管理员解析器。
+// @param repository：管理仓库；runtime：插件刷新器；commands：命令刷新器；permissions：权限刷新器；authorizer：最高管理员解析器。
 // @returns 可复用的管理服务。
 // ⚠️副作用说明：无；仅保存依赖引用。
-func NewService(repository Repository, runtime RuntimeRefresher, commands RuntimeRefresher, authorizer AdminAuthorizer) *Service {
-	service := &Service{repository: repository, runtime: runtime, commands: commands, authorizer: authorizer}
+func NewService(repository Repository, runtime RuntimeRefresher, commands RuntimeRefresher, permissions RuntimeRefresher, authorizer AdminAuthorizer) *Service {
+	service := &Service{repository: repository, runtime: runtime, commands: commands, permissions: permissions, authorizer: authorizer}
 
 	// >>> 数据演变示例
 	// 1. Repository + Manager + CommandRegistry + Resolver -> Service -> 支持授权、持久化与热刷新。
@@ -194,6 +196,142 @@ func (s *Service) reloadCommands(ctx context.Context) error {
 	// >>> 数据演变示例
 	// 1. DB新增测试 -> Load -> 内存立即可匹配测试。
 	// 2. Load失败 -> 返回错误 -> Registry保留旧不可变快照。
+	return nil
+}
+
+// ListPermissions 返回管理端权限策略列表。
+// @param ctx：查询生命周期；actor：操作者。
+// @returns 权限策略快照或授权、仓库错误。
+// ⚠️副作用说明：读取权限 Repository 和管理员快照。
+func (s *Service) ListPermissions(ctx context.Context, actor Actor) ([]PermissionState, error) {
+	// [决策理由] 权限配置属于敏感管理信息，读取前必须鉴权。
+	if err := s.authorize(actor); err != nil {
+		return nil, err
+	}
+	policies, err := s.repository.ListPermissions(ctx)
+	// [决策理由] 查询失败和空策略列表必须明确区分。
+	if err != nil {
+		return nil, fmt.Errorf("列出权限策略: %w", err)
+	}
+
+	// >>> 数据演变示例
+	// 1. 管理员 + Repository[member:deny] -> 返回策略列表。
+	// 2. 非管理员 -> ErrForbidden -> 不查询数据库。
+	return policies, nil
+}
+
+// SetPermission 新增或更新权限覆盖并热刷新权限快照。
+// @param ctx：操作生命周期；actor：操作者；input：权限唯一维度和效果。
+// @returns 保存后策略或授权、校验、事务、刷新错误。
+// ⚠️副作用说明：写入权限与审计表，并可能替换 Permission Resolver 快照。
+func (s *Service) SetPermission(ctx context.Context, actor Actor, input PermissionSet) (PermissionState, error) {
+	// [决策理由] 权限变更必须验证最高管理员身份。
+	if err := s.authorize(actor); err != nil {
+		return PermissionState{}, err
+	}
+	// [决策理由] 作用域规则必须在进入数据库前统一验证。
+	if err := validatePermission(input); err != nil {
+		return PermissionState{}, err
+	}
+	saved, err := s.repository.SetPermission(ctx, actor, input)
+	// [决策理由] 事务失败时不应刷新运行时快照。
+	if err != nil {
+		return PermissionState{}, fmt.Errorf("保存权限策略: %w", err)
+	}
+	// [决策理由] 写入提交后必须立即让新权限参与命令判断。
+	if err := s.reloadPermissions(ctx); err != nil {
+		return saved, err
+	}
+
+	// >>> 数据演变示例
+	// 1. global:ping:member:deny -> upsert+audit -> Resolver.Load -> deny生效。
+	// 2. role=unknown -> 校验失败 -> 不写数据库。
+	return saved, nil
+}
+
+// DeletePermission 删除权限覆盖并回退到下一层策略。
+// @param ctx：操作生命周期；actor：操作者；id：权限策略 ID。
+// @returns 授权、未找到、事务或刷新错误。
+// ⚠️副作用说明：删除权限、写入审计并可能替换 Permission Resolver 快照。
+func (s *Service) DeletePermission(ctx context.Context, actor Actor, id int64) error {
+	// [决策理由] 权限删除必须验证最高管理员身份。
+	if err := s.authorize(actor); err != nil {
+		return err
+	}
+	// [决策理由] 非正数 ID 不可能对应数据库策略。
+	if id <= 0 {
+		return fmt.Errorf("%w: %d", ErrPermissionNotFound, id)
+	}
+	// [决策理由] 删除失败时保持旧权限快照。
+	if err := s.repository.DeletePermission(ctx, actor, id); err != nil {
+		return fmt.Errorf("删除权限策略: %w", err)
+	}
+	// [决策理由] 删除提交后必须立即按下一层策略重新解析权限。
+	if err := s.reloadPermissions(ctx); err != nil {
+		return err
+	}
+
+	// >>> 数据演变示例
+	// 1. 删除群功能deny -> Resolver.Load -> 回退群插件或全局策略。
+	// 2. id=0 -> ErrPermissionNotFound -> 不访问数据库。
+	return nil
+}
+
+// validatePermission 校验权限策略的作用域、角色和效果。
+// @param input：待校验权限策略。
+// @returns 合法时 nil，否则返回字段错误。
+// ⚠️副作用说明：无。
+func validatePermission(input PermissionSet) error {
+	// [决策理由] 全局权限固定使用 scope_id=0。
+	if input.ScopeType == "global" && input.ScopeID != "0" {
+		return fmt.Errorf("全局权限 scope_id 必须为 0")
+	}
+	// [决策理由] 群级权限必须指向具体群号。
+	if input.ScopeType == "group" && (input.ScopeID == "" || input.ScopeID == "0") {
+		return fmt.Errorf("群级权限必须提供群号")
+	}
+	// [决策理由] 未知作用域不能进入固定五级覆盖链。
+	if input.ScopeType != "global" && input.ScopeType != "group" {
+		return fmt.Errorf("权限作用域 %q 无效", input.ScopeType)
+	}
+	role := permission.Role(input.SubjectRole)
+	// [决策理由] 角色必须与 Permission Resolver 支持集合一致。
+	if role != permission.RoleSuperAdmin && role != permission.RoleGroupOwner && role != permission.RoleGroupAdmin && role != permission.RoleMember {
+		return fmt.Errorf("权限角色 %q 无效", input.SubjectRole)
+	}
+	effect := permission.Effect(input.Effect)
+	// [决策理由] 权限效果只允许明确 allow 或 deny。
+	if effect != permission.EffectAllow && effect != permission.EffectDeny {
+		return fmt.Errorf("权限效果 %q 无效", input.Effect)
+	}
+	// [决策理由] 插件名为空会形成无法匹配的孤立策略。
+	if input.PluginName == "" {
+		return fmt.Errorf("权限插件名不能为空")
+	}
+
+	// >>> 数据演变示例
+	// 1. group,123,ping,ping,member,deny -> nil。
+	// 2. global,123或role=unknown -> error。
+	return nil
+}
+
+// reloadPermissions 在权限事务提交后刷新运行时快照。
+// @param ctx：刷新生命周期。
+// @returns 刷新器错误；未配置刷新器时返回 nil。
+// ⚠️副作用说明：可能从数据库重载并替换 Permission Resolver 快照。
+func (s *Service) reloadPermissions(ctx context.Context) error {
+	// [决策理由] nil 刷新器支持离线管理进程只修改数据库。
+	if s.permissions == nil {
+		return nil
+	}
+	// [决策理由] 刷新失败需要明确告知数据库已提交但运行时仍使用旧快照。
+	if err := s.permissions.Load(ctx); err != nil {
+		return fmt.Errorf("刷新权限运行快照: %w", err)
+	}
+
+	// >>> 数据演变示例
+	// 1. DB新增deny -> Load -> 内存立即拒绝对应角色。
+	// 2. Load失败 -> 返回错误 -> Resolver保留旧不可变快照。
 	return nil
 }
 

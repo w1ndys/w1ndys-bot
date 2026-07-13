@@ -102,7 +102,7 @@ func main() {
 		return
 	}
 	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool))
-	adminService := admin.NewService(adminRepository, pluginManager, commands, adminResolver)
+	adminService := admin.NewService(adminRepository, pluginManager, commands, permissions, adminResolver)
 	wsServer := ws.NewServer(cfg.NapCatToken, func(_ context.Context, event ws.Event) error {
 		logEvent(event)
 		message, isMessage := event.(*ws.MessageEvent)

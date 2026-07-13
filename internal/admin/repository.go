@@ -20,6 +20,9 @@ type Repository interface {
 	CreateCommand(context.Context, Actor, CommandCreate, string) (CommandState, error)
 	RenameCommand(context.Context, Actor, int64, string, string) (CommandState, error)
 	DeleteCommand(context.Context, Actor, int64) error
+	ListPermissions(context.Context) ([]PermissionState, error)
+	SetPermission(context.Context, Actor, PermissionSet) (PermissionState, error)
+	DeletePermission(context.Context, Actor, int64) error
 }
 
 // SystemAdminRepository 定义最高管理员身份数据的加载能力。
