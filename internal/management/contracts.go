@@ -52,14 +52,15 @@ type CommandCreate struct {
 	Command    string
 }
 
-// PermissionState 表示一条角色权限覆盖策略。
+// PermissionState 表示一条角色或指定用户权限覆盖策略。
 type PermissionState struct {
 	ID          int64
 	ScopeType   string
 	ScopeID     string
 	PluginName  string
 	FeatureKey  string
-	SubjectRole string
+	SubjectType string
+	SubjectID   string
 	Effect      string
 }
 
@@ -69,7 +70,8 @@ type PermissionSet struct {
 	ScopeID     string
 	PluginName  string
 	FeatureKey  string
-	SubjectRole string
+	SubjectType string
+	SubjectID   string
 	Effect      string
 }
 
@@ -78,18 +80,6 @@ type AdminState struct {
 	UserID   string
 	Nickname string
 	Enabled  bool
-}
-
-// AdminCreate 描述新增最高管理员所需字段。
-type AdminCreate struct {
-	UserID   string
-	Nickname string
-}
-
-// AdminPatch 描述管理员可选修改字段；nil 表示保持原值。
-type AdminPatch struct {
-	Nickname *string
-	Enabled  *bool
 }
 
 // SettingState 表示一项数据库系统业务设置。
@@ -111,10 +101,6 @@ type Controller interface {
 	ListPermissions(context.Context, Actor) ([]PermissionState, error)
 	SetPermission(context.Context, Actor, PermissionSet) (PermissionState, error)
 	DeletePermission(context.Context, Actor, int64) error
-	ListAdmins(context.Context, Actor) ([]AdminState, error)
-	CreateAdmin(context.Context, Actor, AdminCreate) (AdminState, error)
-	UpdateAdmin(context.Context, Actor, string, AdminPatch) (AdminState, error)
-	DeleteAdmin(context.Context, Actor, string) error
 	ListSettings(context.Context, Actor) ([]SettingState, error)
 	SetSetting(context.Context, Actor, string, json.RawMessage) (SettingState, error)
 	DeleteSetting(context.Context, Actor, string) error

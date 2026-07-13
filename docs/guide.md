@@ -17,10 +17,12 @@ Action Client 使用唯一 `echo` 关联请求与响应。WebSocket 读取循环
 
 插件以 `Manifest + Factory` 注册：Manifest 描述插件、功能、默认命令及默认权限；Factory 在运行时接收 `Messenger` 等依赖并创建实例。插件默认关闭，Manifest 同步不会替管理员覆盖现有配置。
 
-权限按以下优先级取首个匹配项：
+权限按以下优先级取首个匹配项，指定用户策略整体优先于角色策略：
 
 ```text
-群级功能 > 群级插件 > 全局功能 > 全局插件 > Manifest 默认值
+用户：群级功能 > 群级插件 > 全局功能 > 全局插件
+角色：群级功能 > 群级插件 > 全局功能 > 全局插件
+最终回退：Manifest 默认值
 ```
 
 ## 3. 目录结构
@@ -43,14 +45,16 @@ docs/                    设计与开发文档
 
 ## 4. 数据库迁移
 
-程序启动时自动向上迁移。当前迁移版本为 6：
+程序启动时自动向上迁移。当前迁移版本为 8：
 
 1. `plugin_config`：插件开关、优先级和 JSON 配置。
 2. `system_settings`、`system_admins`、`admin_audit_logs`：系统管理基础表。
 3. `plugin_definitions`、`plugin_features`：Manifest 元数据。
 4. `plugin_commands`：全局及群级自定义命令。
-5. `permission_policies`：插件或功能的角色权限覆盖。
+5. `permission_policies`：插件或功能的角色及指定用户权限覆盖。
 6. 将插件及功能的 `installed` 字段重命名为语义更准确的 `available`。
+7. 单管理员模式改由 `SUPER_ADMIN_QQ` 作为唯一权限根，删除废弃的 `system_admins` 表及动态 WebUI 标题设置。
+8. 权限主体扩展为角色或指定 QQ 用户，支持全局/群级功能和插件全功能授权。
 
 每个版本同时提供 `up.sql` 与 `down.sql`，分别用于应用和回滚。不得修改已部署的迁移；结构变化应新增版本。
 
@@ -72,7 +76,9 @@ task migrate-up         # 应用待执行迁移
 task migrate-down       # 回滚最近一个版本
 ```
 
-敏感值仅写入未跟踪的 `.env`。首次部署应设置 `SUPER_ADMIN_QQ=你的QQ号` 和至少 12 字符的 `WEBUI_PASSWORD`。WebUI 登录同时校验启用管理员 QQ 与共享环境密码；密码不入库、不支持页面修改，轮换后需重启容器。Compose 内数据库名统一为 `w1ndys_bot`；删除容器不会删除具名卷，若需清空数据库必须明确移除卷。
+敏感值仅写入未跟踪的 `.env`。首次部署应设置 `SUPER_ADMIN_QQ=你的QQ号`、至少 12 字符的 `WEBUI_PASSWORD` 和至少 32 字节的 `JWT_SECRET`。系统采用单管理员模式，QQ 与 WebUI 仅信任 `SUPER_ADMIN_QQ`；管理员账号和密码均不入库、不支持页面修改，轮换后需重启容器。Compose 内数据库名统一为 `w1ndys_bot`；删除容器不会删除具名卷，若需清空数据库必须明确移除卷。
+
+WebUI 产品名称固定为 `w1ndys-bot-webui`，不作为系统设置开放修改。
 
 ## 6. 已完成能力
 
@@ -80,12 +86,12 @@ task migrate-down       # 回滚最近一个版本
 - [x] Token 鉴权反向 WebSocket 与强类型事件模型
 - [x] Action Client、类型化 BotAPI 和响应关联
 - [x] PluginManager、Manifest + Factory 注册及元数据同步
-- [x] 多作用域命令匹配、重复检测和五级权限解析
+- [x] 多作用域命令匹配、重复检测和用户优先的八级权限解析
 - [x] `ping` 插件端到端命令回复链路
 - [x] 最高管理员环境引导、身份缓存与 QQ 插件管理命令
 - [x] 命令别名 CRUD、事务审计与 Command Registry 热刷新服务
 - [x] 权限策略 CRUD、事务审计与 Permission Resolver 热刷新服务
-- [x] 最高管理员 CRUD、最后账号保护、事务审计与授权热刷新
+- [x] `SUPER_ADMIN_QQ` 单管理员授权及 WebUI 环境密码认证
 - [x] 受控系统设置、JSONB 审计、原子快照与命令前缀热更新
 - [x] 数据库自动迁移及迁移管理任务
 - [x] Dockerfile 与机器人/PostgreSQL Compose 编排

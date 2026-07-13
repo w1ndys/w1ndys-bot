@@ -15,7 +15,7 @@ import (
 // @returns 按作用域和目标排序的权限策略，或数据库错误。
 // ⚠️副作用说明：执行 PostgreSQL 只读查询。
 func (r *PostgresRepository) ListPermissions(ctx context.Context) ([]PermissionState, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id,scope_type,scope_id,plugin_name,COALESCE(feature_key,''),subject_role,effect FROM permission_policies ORDER BY scope_type,scope_id,plugin_name,feature_key,subject_role`)
+	rows, err := r.pool.Query(ctx, `SELECT id,scope_type,scope_id,plugin_name,COALESCE(feature_key,''),subject_type,subject_id,effect FROM permission_policies ORDER BY scope_type,scope_id,plugin_name,feature_key,subject_type,subject_id`)
 	// [决策理由] 查询失败时无法提供完整权限快照。
 	if err != nil {
 		return nil, fmt.Errorf("查询权限策略: %w", err)
@@ -25,7 +25,7 @@ func (r *PostgresRepository) ListPermissions(ctx context.Context) ([]PermissionS
 	for rows.Next() {
 		var current PermissionState
 		// [决策理由] 任一行异常都会使管理视图不完整。
-		if err := rows.Scan(&current.ID, &current.ScopeType, &current.ScopeID, &current.PluginName, &current.FeatureKey, &current.SubjectRole, &current.Effect); err != nil {
+		if err := rows.Scan(&current.ID, &current.ScopeType, &current.ScopeID, &current.PluginName, &current.FeatureKey, &current.SubjectType, &current.SubjectID, &current.Effect); err != nil {
 			return nil, fmt.Errorf("扫描权限策略: %w", err)
 		}
 		policies = append(policies, current)
@@ -60,9 +60,9 @@ func (r *PostgresRepository) SetPermission(ctx context.Context, actor Actor, inp
 	var after PermissionState
 	// [决策理由] 已有唯一维度策略应更新效果，避免制造重复规则。
 	if found {
-		err = tx.QueryRow(ctx, `UPDATE permission_policies SET effect=$2,updated_by=$3,updated_at=NOW() WHERE id=$1 RETURNING id,scope_type,scope_id,plugin_name,COALESCE(feature_key,''),subject_role,effect`, before.ID, input.Effect, actor.ID).Scan(&after.ID, &after.ScopeType, &after.ScopeID, &after.PluginName, &after.FeatureKey, &after.SubjectRole, &after.Effect)
+		err = tx.QueryRow(ctx, `UPDATE permission_policies SET effect=$2,updated_by=$3,updated_at=NOW() WHERE id=$1 RETURNING id,scope_type,scope_id,plugin_name,COALESCE(feature_key,''),subject_type,subject_id,effect`, before.ID, input.Effect, actor.ID).Scan(&after.ID, &after.ScopeType, &after.ScopeID, &after.PluginName, &after.FeatureKey, &after.SubjectType, &after.SubjectID, &after.Effect)
 	} else {
-		err = tx.QueryRow(ctx, `INSERT INTO permission_policies(scope_type,scope_id,plugin_name,feature_key,subject_role,effect,updated_by) VALUES($1,$2,$3,NULLIF($4,''),$5,$6,$7) RETURNING id,scope_type,scope_id,plugin_name,COALESCE(feature_key,''),subject_role,effect`, input.ScopeType, input.ScopeID, input.PluginName, input.FeatureKey, input.SubjectRole, input.Effect, actor.ID).Scan(&after.ID, &after.ScopeType, &after.ScopeID, &after.PluginName, &after.FeatureKey, &after.SubjectRole, &after.Effect)
+		err = tx.QueryRow(ctx, `INSERT INTO permission_policies(scope_type,scope_id,plugin_name,feature_key,subject_type,subject_id,effect,updated_by) VALUES($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8) RETURNING id,scope_type,scope_id,plugin_name,COALESCE(feature_key,''),subject_type,subject_id,effect`, input.ScopeType, input.ScopeID, input.PluginName, input.FeatureKey, input.SubjectType, input.SubjectID, input.Effect, actor.ID).Scan(&after.ID, &after.ScopeType, &after.ScopeID, &after.PluginName, &after.FeatureKey, &after.SubjectType, &after.SubjectID, &after.Effect)
 	}
 	// [决策理由] 数据库约束或外键失败时不得写入成功审计。
 	if err != nil {
@@ -130,7 +130,7 @@ func (r *PostgresRepository) DeletePermission(ctx context.Context, actor Actor, 
 // ⚠️副作用说明：存在时对目标行加锁至事务结束。
 func selectPermissionByKey(ctx context.Context, tx pgx.Tx, input PermissionSet) (PermissionState, bool, error) {
 	var current PermissionState
-	err := tx.QueryRow(ctx, `SELECT id,scope_type,scope_id,plugin_name,COALESCE(feature_key,''),subject_role,effect FROM permission_policies WHERE scope_type=$1 AND scope_id=$2 AND plugin_name=$3 AND feature_key IS NOT DISTINCT FROM NULLIF($4,'') AND subject_role=$5 FOR UPDATE`, input.ScopeType, input.ScopeID, input.PluginName, input.FeatureKey, input.SubjectRole).Scan(&current.ID, &current.ScopeType, &current.ScopeID, &current.PluginName, &current.FeatureKey, &current.SubjectRole, &current.Effect)
+	err := tx.QueryRow(ctx, `SELECT id,scope_type,scope_id,plugin_name,COALESCE(feature_key,''),subject_type,subject_id,effect FROM permission_policies WHERE scope_type=$1 AND scope_id=$2 AND plugin_name=$3 AND feature_key IS NOT DISTINCT FROM NULLIF($4,'') AND subject_type=$5 AND subject_id=$6 FOR UPDATE`, input.ScopeType, input.ScopeID, input.PluginName, input.FeatureKey, input.SubjectType, input.SubjectID).Scan(&current.ID, &current.ScopeType, &current.ScopeID, &current.PluginName, &current.FeatureKey, &current.SubjectType, &current.SubjectID, &current.Effect)
 	// [决策理由] 无行表示本次操作应创建新策略，不属于错误。
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PermissionState{}, false, nil
@@ -152,7 +152,7 @@ func selectPermissionByKey(ctx context.Context, tx pgx.Tx, input PermissionSet) 
 // ⚠️副作用说明：对目标行加锁至事务结束。
 func selectPermissionByID(ctx context.Context, tx pgx.Tx, id int64) (PermissionState, error) {
 	var current PermissionState
-	err := tx.QueryRow(ctx, `SELECT id,scope_type,scope_id,plugin_name,COALESCE(feature_key,''),subject_role,effect FROM permission_policies WHERE id=$1 FOR UPDATE`, id).Scan(&current.ID, &current.ScopeType, &current.ScopeID, &current.PluginName, &current.FeatureKey, &current.SubjectRole, &current.Effect)
+	err := tx.QueryRow(ctx, `SELECT id,scope_type,scope_id,plugin_name,COALESCE(feature_key,''),subject_type,subject_id,effect FROM permission_policies WHERE id=$1 FOR UPDATE`, id).Scan(&current.ID, &current.ScopeType, &current.ScopeID, &current.PluginName, &current.FeatureKey, &current.SubjectType, &current.SubjectID, &current.Effect)
 	// [决策理由] 无行错误应转换为稳定领域错误。
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PermissionState{}, fmt.Errorf("%w: %d", ErrPermissionNotFound, id)

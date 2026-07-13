@@ -14,9 +14,17 @@ const (
 // Effect 表示显式允许或拒绝。
 type Effect string
 
+// SubjectType 表示权限主体是角色还是指定 QQ 用户。
+type SubjectType string
+
 const (
 	EffectAllow Effect = "allow"
 	EffectDeny  Effect = "deny"
+)
+
+const (
+	SubjectRole SubjectType = "role"
+	SubjectUser SubjectType = "user"
 )
 
 // Defaults 表示 Manifest 声明的最终回退权限。
@@ -57,6 +65,7 @@ type Policy struct {
 	ScopeID     string
 	PluginName  string
 	FeatureKey  string
-	SubjectRole Role
+	SubjectType SubjectType
+	SubjectID   string
 	Effect      Effect
 }

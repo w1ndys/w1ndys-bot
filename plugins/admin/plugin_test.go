@@ -161,50 +161,6 @@ func (f *fakeManagement) DeletePermission(context.Context, management.Actor, int
 	return nil
 }
 
-// ListAdmins 满足完整 WebUI 管理契约；QQ 插件不调用。
-// @param ctx：未使用的上下文；actor：操作者。
-// @returns 空列表与 nil。
-// ⚠️副作用说明：无。
-func (f *fakeManagement) ListAdmins(context.Context, management.Actor) ([]management.AdminState, error) {
-	// >>> 数据演变示例
-	// 1. QQ应急插件 -> 不调用 -> 空列表。
-	// 2. WebUI管理员查询由AdminService负责。
-	return nil, nil
-}
-
-// CreateAdmin 满足完整 WebUI 管理契约；QQ 插件不调用。
-// @param ctx：未使用的上下文；actor：操作者；input：管理员输入。
-// @returns 零值管理员与 nil。
-// ⚠️副作用说明：无。
-func (f *fakeManagement) CreateAdmin(context.Context, management.Actor, management.AdminCreate) (management.AdminState, error) {
-	// >>> 数据演变示例
-	// 1. QQ应急插件 -> 不调用 -> 零值。
-	// 2. WebUI创建管理员由AdminService负责。
-	return management.AdminState{}, nil
-}
-
-// UpdateAdmin 满足完整 WebUI 管理契约；QQ 插件不调用。
-// @param ctx：未使用的上下文；actor：操作者；userID：目标 QQ；patch：变更。
-// @returns 零值管理员与 nil。
-// ⚠️副作用说明：无。
-func (f *fakeManagement) UpdateAdmin(context.Context, management.Actor, string, management.AdminPatch) (management.AdminState, error) {
-	// >>> 数据演变示例
-	// 1. QQ应急插件 -> 不调用 -> 零值。
-	// 2. WebUI修改管理员由AdminService负责。
-	return management.AdminState{}, nil
-}
-
-// DeleteAdmin 满足完整 WebUI 管理契约；QQ 插件不调用。
-// @param ctx：未使用的上下文；actor：操作者；userID：目标 QQ。
-// @returns nil。
-// ⚠️副作用说明：无。
-func (f *fakeManagement) DeleteAdmin(context.Context, management.Actor, string) error {
-	// >>> 数据演变示例
-	// 1. QQ应急插件 -> 不调用 -> nil。
-	// 2. WebUI删除管理员由AdminService负责。
-	return nil
-}
-
 // ListSettings 满足完整 WebUI 管理契约；QQ 插件不调用。
 // @param ctx：未使用的上下文；actor：操作者。
 // @returns 空列表与 nil。

@@ -15,11 +15,6 @@ var ErrProtectedPlugin = errors.New("系统管理插件不可禁用")
 var ErrCommandNotFound = errors.New("命令不存在")
 var ErrCommandConflict = errors.New("命令在作用域内重复")
 var ErrPermissionNotFound = errors.New("权限策略不存在")
-var ErrAdminNotFound = errors.New("最高管理员不存在")
-var ErrAdminConflict = errors.New("最高管理员已存在")
-var ErrLastEnabledAdmin = errors.New("不能禁用或删除最后一个最高管理员")
-var ErrSelfAdminMutation = errors.New("不能禁用或删除当前操作者")
-var ErrNoAdminChanges = errors.New("管理员修改内容为空")
 
 type Channel = management.Channel
 type Actor = management.Actor
@@ -29,8 +24,6 @@ type CommandCreate = management.CommandCreate
 type PermissionState = management.PermissionState
 type PermissionSet = management.PermissionSet
 type SystemAdmin = management.AdminState
-type AdminCreate = management.AdminCreate
-type AdminPatch = management.AdminPatch
 type SettingState = management.SettingState
 
 var ErrSettingNotFound = errors.New("系统设置不存在")

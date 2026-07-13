@@ -19,7 +19,6 @@ type SettingDefinition struct {
 
 var settingDefinitions = map[string]SettingDefinition{
 	"command_prefix":       {Key: "command_prefix", Description: "机器人命令前缀", Default: json.RawMessage(`"/"`)},
-	"webui_title":          {Key: "webui_title", Description: "WebUI 页面标题", Default: json.RawMessage(`"W1ndys Bot"`)},
 	"audit_retention_days": {Key: "audit_retention_days", Description: "审计日志保留天数", Default: json.RawMessage(`90`)},
 	"default_page_size":    {Key: "default_page_size", Description: "管理列表默认分页大小", Default: json.RawMessage(`20`)},
 }
@@ -117,7 +116,7 @@ func Definitions() map[string]SettingDefinition {
 	}
 
 	// >>> 数据演变示例
-	// 1. 内部4项定义 -> 返回4项副本。
+	// 1. 内部3项定义 -> 返回3项副本。
 	// 2. 调用方修改Default -> 内部定义不变。
 	return result
 }
@@ -157,16 +156,6 @@ func validateSetting(key string, value json.RawMessage) error {
 		// [决策理由] 空白、空值或过长前缀会造成误匹配或难以使用。
 		if strings.TrimSpace(prefix) != prefix || utf8.RuneCountInString(prefix) < 1 || utf8.RuneCountInString(prefix) > 4 {
 			return fmt.Errorf("命令前缀必须为1至4个非空白字符")
-		}
-	case "webui_title":
-		var title string
-		// [决策理由] 页面标题必须是字符串。
-		if err := json.Unmarshal(value, &title); err != nil {
-			return fmt.Errorf("WebUI标题必须是字符串")
-		}
-		// [决策理由] 空标题或超长标题不适合作为管理页面标识。
-		if strings.TrimSpace(title) == "" || utf8.RuneCountInString(title) > 64 {
-			return fmt.Errorf("WebUI标题必须为1至64个字符")
 		}
 	case "audit_retention_days":
 		return validateIntegerRange(value, 1, 3650, "审计保留天数")

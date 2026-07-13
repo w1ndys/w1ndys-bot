@@ -18,6 +18,7 @@ import (
 	"github.com/w1ndys/w1ndys-bot/internal/onebot"
 	"github.com/w1ndys/w1ndys-bot/internal/permission"
 	"github.com/w1ndys/w1ndys-bot/internal/plugin"
+	"github.com/w1ndys/w1ndys-bot/internal/webapi"
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 	projectlogger "github.com/w1ndys/w1ndys-bot/pkg/logger"
 	_ "github.com/w1ndys/w1ndys-bot/plugins/admin"
@@ -86,21 +87,11 @@ func main() {
 		return
 	}
 	adminRepository := admin.NewPostgresRepository(pool)
-	// [决策理由] WebUI 尚未实现时需要用环境变量完成首位最高管理员的数据库引导。
-	if err := adminRepository.BootstrapSystemAdmin(ctx, cfg.SuperAdminQQ); err != nil {
-		projectlogger.Error("引导最高管理员失败", "error", err)
-		return
-	}
-	// [决策理由] 空引导值允许纯事件模式启动，但需要明确提示管理命令暂不可用。
+	// [决策理由] 空配置允许纯事件模式启动，但需要明确提示所有管理入口均不可用。
 	if cfg.SuperAdminQQ == "" {
 		projectlogger.Warn("未配置 SUPER_ADMIN_QQ，QQ 与 WebUI 管理操作将无可用最高管理员")
 	}
-	adminResolver := admin.NewAdminResolver(adminRepository)
-	// [决策理由] 管理员身份属于管理入口的授权根，启动时加载失败不能以空权限继续运行。
-	if err := adminResolver.Load(ctx); err != nil {
-		projectlogger.Error("加载最高管理员失败", "error", err)
-		return
-	}
+	adminResolver := admin.NewAdminResolver(cfg.SuperAdminQQ)
 	settingsResolver := admin.NewSettingsResolver(adminRepository)
 	// [决策理由] 系统业务设置必须在消息路由启动前完成校验和快照发布。
 	if err := settingsResolver.Load(ctx); err != nil {
@@ -108,7 +99,13 @@ func main() {
 		return
 	}
 	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool))
-	adminService := admin.NewService(adminRepository, pluginManager, commands, permissions, adminResolver, settingsResolver, adminResolver)
+	adminService := admin.NewService(adminRepository, pluginManager, commands, permissions, settingsResolver, adminResolver)
+	webServer, err := webapi.New(cfg.WebUIPassword, cfg.JWTSecret, adminResolver)
+	// [决策理由] WebUI 认证配置不安全时不得开放包含管理能力的 HTTP 服务。
+	if err != nil {
+		projectlogger.Error("初始化WebAPI失败", "error", err)
+		return
+	}
 	wsServer := ws.NewServer(cfg.NapCatToken, func(_ context.Context, event ws.Event) error {
 		logEvent(event)
 		message, isMessage := event.(*ws.MessageEvent)
@@ -132,7 +129,7 @@ func main() {
 			role = permission.RoleSuperAdmin
 		}
 		// [决策理由] 权限拒绝时不得调用插件实现。
-		if !permissions.Allowed(strconv.FormatInt(message.GroupID, 10), binding.PluginName, binding.FeatureKey, role, defaults) {
+		if !permissions.Allowed(strconv.FormatInt(message.GroupID, 10), binding.PluginName, binding.FeatureKey, strconv.FormatInt(message.UserID, 10), role, defaults) {
 			projectlogger.Warn("命令权限不足", "target", binding.Target(), "user_id", message.UserID, "role", role)
 			return nil
 		}
@@ -163,9 +160,12 @@ func main() {
 		projectlogger.Error("加载插件状态失败", "error", err)
 		return
 	}
+	rootMux := http.NewServeMux()
+	rootMux.Handle("/onebot/v11/ws", wsServer.Handler())
+	rootMux.Handle("/", webServer.Handler())
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf("0.0.0.0:%d", cfg.WSPort),
-		Handler: wsServer.Handler(),
+		Handler: rootMux,
 	}
 	go func() {
 		err := httpServer.ListenAndServe()
@@ -180,7 +180,7 @@ func main() {
 		// 2. 端口被占用 -> ListenAndServe 错误 -> 记录日志 -> 通知主流程退出。
 	}()
 
-	projectlogger.Info("基础框架已启动", "ws_port", cfg.WSPort, "log_level", cfg.LogLevel, "log_format", cfg.LogFormat)
+	projectlogger.Info("基础框架已启动", "http_port", cfg.WSPort, "webapi", "/api", "onebot_ws", "/onebot/v11/ws", "log_level", cfg.LogLevel, "log_format", cfg.LogFormat)
 	<-ctx.Done()
 	// [决策理由] 收到退出信号后停止接受新连接，并等待活跃请求结束。
 	if err := httpServer.Shutdown(context.Background()); err != nil {

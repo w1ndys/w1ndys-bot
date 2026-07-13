@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 
 	commandregistry "github.com/w1ndys/w1ndys-bot/internal/command"
 	"github.com/w1ndys/w1ndys-bot/internal/permission"
@@ -27,17 +28,16 @@ type Service struct {
 	runtime     RuntimeRefresher
 	commands    RuntimeRefresher
 	permissions RuntimeRefresher
-	admins      RuntimeRefresher
 	settings    RuntimeRefresher
 	authorizer  AdminAuthorizer
 }
 
 // NewService 创建管理服务。
-// @param repository：管理仓库；runtime：插件刷新器；commands：命令刷新器；permissions：权限刷新器；admins：管理员刷新器；settings：设置刷新器；authorizer：最高管理员解析器。
+// @param repository：管理仓库；runtime：插件刷新器；commands：命令刷新器；permissions：权限刷新器；settings：设置刷新器；authorizer：最高管理员解析器。
 // @returns 可复用的管理服务。
 // ⚠️副作用说明：无；仅保存依赖引用。
-func NewService(repository Repository, runtime RuntimeRefresher, commands RuntimeRefresher, permissions RuntimeRefresher, admins RuntimeRefresher, settings RuntimeRefresher, authorizer AdminAuthorizer) *Service {
-	service := &Service{repository: repository, runtime: runtime, commands: commands, permissions: permissions, admins: admins, settings: settings, authorizer: authorizer}
+func NewService(repository Repository, runtime RuntimeRefresher, commands RuntimeRefresher, permissions RuntimeRefresher, settings RuntimeRefresher, authorizer AdminAuthorizer) *Service {
+	service := &Service{repository: repository, runtime: runtime, commands: commands, permissions: permissions, settings: settings, authorizer: authorizer}
 
 	// >>> 数据演变示例
 	// 1. Repository + Manager + CommandRegistry + Resolver -> Service -> 支持授权、持久化与热刷新。
@@ -298,10 +298,26 @@ func validatePermission(input PermissionSet) error {
 	if input.ScopeType != "global" && input.ScopeType != "group" {
 		return fmt.Errorf("权限作用域 %q 无效", input.ScopeType)
 	}
-	role := permission.Role(input.SubjectRole)
-	// [决策理由] 角色必须与 Permission Resolver 支持集合一致。
-	if role != permission.RoleSuperAdmin && role != permission.RoleGroupOwner && role != permission.RoleGroupAdmin && role != permission.RoleMember {
-		return fmt.Errorf("权限角色 %q 无效", input.SubjectRole)
+	subjectType := permission.SubjectType(input.SubjectType)
+	// [决策理由] 主体类型只允许角色或指定用户，不能隐式推断输入含义。
+	if subjectType != permission.SubjectRole && subjectType != permission.SubjectUser {
+		return fmt.Errorf("权限主体类型 %q 无效", input.SubjectType)
+	}
+	// [决策理由] 角色主体必须与 Permission Resolver 支持集合一致。
+	if subjectType == permission.SubjectRole {
+		role := permission.Role(input.SubjectID)
+		// [决策理由] 未知角色无法映射 NapCat 群身份，必须拒绝。
+		if role != permission.RoleSuperAdmin && role != permission.RoleGroupOwner && role != permission.RoleGroupAdmin && role != permission.RoleMember {
+			return fmt.Errorf("权限角色 %q 无效", input.SubjectID)
+		}
+	}
+	// [决策理由] 用户主体必须是正十进制 QQ 号，避免永远无法匹配的策略。
+	if subjectType == permission.SubjectUser {
+		userID, err := strconv.ParseUint(input.SubjectID, 10, 64)
+		// [决策理由] 解析失败或零值都不是有效 QQ 身份。
+		if err != nil || userID == 0 {
+			return fmt.Errorf("权限用户 QQ %q 格式无效", input.SubjectID)
+		}
 	}
 	effect := permission.Effect(input.Effect)
 	// [决策理由] 权限效果只允许明确 allow 或 deny。
@@ -314,8 +330,8 @@ func validatePermission(input PermissionSet) error {
 	}
 
 	// >>> 数据演变示例
-	// 1. group,123,ping,ping,member,deny -> nil。
-	// 2. global,123或role=unknown -> error。
+	// 1. group,123,ping,ping,role,member,deny -> nil。
+	// 2. global,123或user,abc -> error。
 	return nil
 }
 
@@ -335,145 +351,6 @@ func (s *Service) reloadPermissions(ctx context.Context) error {
 
 	// >>> 数据演变示例
 	// 1. DB新增deny -> Load -> 内存立即拒绝对应角色。
-	// 2. Load失败 -> 返回错误 -> Resolver保留旧不可变快照。
-	return nil
-}
-
-// ListAdmins 返回最高管理员账号列表。
-// @param ctx：查询生命周期；actor：操作者。
-// @returns 管理员状态列表或授权、仓库错误。
-// ⚠️副作用说明：读取 system_admins 和管理员授权快照。
-func (s *Service) ListAdmins(ctx context.Context, actor Actor) ([]SystemAdmin, error) {
-	// [决策理由] 管理员清单属于敏感信息，读取前必须验证最高权限。
-	if err := s.authorize(actor); err != nil {
-		return nil, err
-	}
-	admins, err := s.repository.ListSystemAdmins(ctx)
-	// [决策理由] 查询失败和空列表必须明确区分。
-	if err != nil {
-		return nil, fmt.Errorf("列出最高管理员: %w", err)
-	}
-
-	// >>> 数据演变示例
-	// 1. 管理员100查询 -> Repository[100,200] -> 返回列表。
-	// 2. 非管理员查询 -> ErrForbidden -> 不访问数据库。
-	return admins, nil
-}
-
-// CreateAdmin 新增最高管理员并刷新授权快照。
-// @param ctx：操作生命周期；actor：操作者；input：新管理员 QQ 和备注。
-// @returns 新管理员状态或授权、校验、事务、刷新错误。
-// ⚠️副作用说明：写入管理员与审计表，并可能替换 AdminResolver 快照。
-func (s *Service) CreateAdmin(ctx context.Context, actor Actor, input AdminCreate) (SystemAdmin, error) {
-	// [决策理由] 只有当前最高管理员可以扩展授权根。
-	if err := s.authorize(actor); err != nil {
-		return SystemAdmin{}, err
-	}
-	// [决策理由] 管理员 QQ 必须使用与环境引导一致的纯数字格式。
-	if !numericUserID(input.UserID) {
-		return SystemAdmin{}, fmt.Errorf("最高管理员 QQ 号 %q 格式无效", input.UserID)
-	}
-	created, err := s.repository.CreateSystemAdmin(ctx, actor, input)
-	// [决策理由] 事务失败时不应刷新授权快照。
-	if err != nil {
-		return SystemAdmin{}, fmt.Errorf("新增最高管理员: %w", err)
-	}
-	// [决策理由] 新管理员提交后必须立即获得授权。
-	if err := s.reloadAdmins(ctx); err != nil {
-		return created, err
-	}
-
-	// >>> 数据演变示例
-	// 1. actor=100新增200 -> INSERT+audit -> Resolver.Load -> 200可授权。
-	// 2. userID=abc -> 格式错误 -> 不访问Repository。
-	return created, nil
-}
-
-// UpdateAdmin 修改管理员备注或启用状态并刷新授权快照。
-// @param ctx：操作生命周期；actor：操作者；userID：目标 QQ；patch：可选变更。
-// @returns 更新后状态或授权、自禁用、事务、刷新错误。
-// ⚠️副作用说明：更新管理员与审计表，并可能替换 AdminResolver 快照。
-func (s *Service) UpdateAdmin(ctx context.Context, actor Actor, userID string, patch AdminPatch) (SystemAdmin, error) {
-	// [决策理由] 管理员变更必须验证当前最高权限。
-	if err := s.authorize(actor); err != nil {
-		return SystemAdmin{}, err
-	}
-	// [决策理由] 空 patch 只会制造无意义审计记录，应在事务前拒绝。
-	if patch.Nickname == nil && patch.Enabled == nil {
-		return SystemAdmin{}, ErrNoAdminChanges
-	}
-	// [决策理由] 目标 QQ 必须符合系统管理员主键格式。
-	if !numericUserID(userID) {
-		return SystemAdmin{}, fmt.Errorf("最高管理员 QQ 号 %q 格式无效", userID)
-	}
-	// [决策理由] 操作者直接禁用自己容易立即失去当前会话管理能力，必须由其他管理员执行。
-	if actor.ID == userID && patch.Enabled != nil && !*patch.Enabled {
-		return SystemAdmin{}, ErrSelfAdminMutation
-	}
-	updated, err := s.repository.UpdateSystemAdmin(ctx, actor, userID, patch)
-	// [决策理由] 事务失败时保持旧授权快照。
-	if err != nil {
-		return SystemAdmin{}, fmt.Errorf("修改最高管理员: %w", err)
-	}
-	// [决策理由] 启用状态提交后必须立即同步授权结果。
-	if err := s.reloadAdmins(ctx); err != nil {
-		return updated, err
-	}
-
-	// >>> 数据演变示例
-	// 1. actor=100禁用200 -> UPDATE+audit -> Resolver移除200。
-	// 2. actor=100禁用100 -> ErrSelfAdminMutation -> 不写数据库。
-	return updated, nil
-}
-
-// DeleteAdmin 删除最高管理员并刷新授权快照。
-// @param ctx：操作生命周期；actor：操作者；userID：目标 QQ。
-// @returns 授权、自删除、最后管理员、事务或刷新错误。
-// ⚠️副作用说明：删除管理员、写审计并可能替换 AdminResolver 快照。
-func (s *Service) DeleteAdmin(ctx context.Context, actor Actor, userID string) error {
-	// [决策理由] 管理员删除必须验证当前最高权限。
-	if err := s.authorize(actor); err != nil {
-		return err
-	}
-	// [决策理由] 目标 QQ 必须符合系统管理员主键格式。
-	if !numericUserID(userID) {
-		return fmt.Errorf("最高管理员 QQ 号 %q 格式无效", userID)
-	}
-	// [决策理由] 禁止操作者直接删除自己，避免误操作断开当前授权链。
-	if actor.ID == userID {
-		return ErrSelfAdminMutation
-	}
-	// [决策理由] 删除事务失败时保持旧授权快照。
-	if err := s.repository.DeleteSystemAdmin(ctx, actor, userID); err != nil {
-		return fmt.Errorf("删除最高管理员: %w", err)
-	}
-	// [决策理由] 删除提交后必须立即撤销目标账号授权。
-	if err := s.reloadAdmins(ctx); err != nil {
-		return err
-	}
-
-	// >>> 数据演变示例
-	// 1. actor=100删除200 -> DELETE+audit -> Resolver移除200。
-	// 2. actor=100删除100 -> ErrSelfAdminMutation -> 不写数据库。
-	return nil
-}
-
-// reloadAdmins 在管理员事务提交后刷新授权快照。
-// @param ctx：刷新生命周期。
-// @returns 刷新器错误；未配置刷新器时返回 nil。
-// ⚠️副作用说明：可能从数据库重载并替换 AdminResolver 快照。
-func (s *Service) reloadAdmins(ctx context.Context) error {
-	// [决策理由] nil 刷新器支持离线管理进程只修改数据库。
-	if s.admins == nil {
-		return nil
-	}
-	// [决策理由] 刷新失败需要明确告知数据库已提交但授权快照仍为旧版本。
-	if err := s.admins.Load(ctx); err != nil {
-		return fmt.Errorf("刷新最高管理员授权快照: %w", err)
-	}
-
-	// >>> 数据演变示例
-	// 1. DB新增200 -> Load -> 200立即成为最高管理员。
 	// 2. Load失败 -> 返回错误 -> Resolver保留旧不可变快照。
 	return nil
 }
@@ -508,7 +385,7 @@ func (s *Service) ListSettings(ctx context.Context, actor Actor) ([]SettingState
 	}
 	sort.Slice(result, func(i int, j int) bool {
 		// >>> 数据演变示例
-		// 1. webui_title,command_prefix -> command_prefix排前。
+		// 1. default_page_size,command_prefix -> command_prefix排前。
 		// 2. 单项列表 -> 顺序不变。
 		return result[i].Key < result[j].Key
 	})

@@ -71,3 +71,24 @@ func TestValidateSettingRejectsOutOfRangeInteger(t *testing.T) {
 	// 1. page_size=20 -> 范围10..200 -> nil。
 	// 2. page_size=500 -> 超范围 -> error。
 }
+
+// TestDefinitionsExcludeWebUITitle 验证网站名称不再作为动态系统设置暴露。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：可能终止当前测试。
+func TestDefinitionsExcludeWebUITitle(t *testing.T) {
+	definitions := Definitions()
+	_, exists := definitions["webui_title"]
+	// [决策理由] 固定产品名称不能被管理 API 重新开放为可修改字段。
+	if exists {
+		t.Fatal("Definitions contains webui_title")
+	}
+	// [决策理由] 移除标题后仍应保留三个实际运行设置。
+	if len(definitions) != 3 {
+		t.Fatalf("Definitions length = %d, want 3", len(definitions))
+	}
+
+	// >>> 数据演变示例
+	// 1. Definitions -> 查找webui_title -> 不存在。
+	// 2. Definitions -> command_prefix等三项 -> 长度3。
+}

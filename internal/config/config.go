@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -71,6 +73,15 @@ func Load() (Config, error) {
 	// [决策理由] 密码缺失时数据库必然无法鉴权，提前返回可提供更明确的诊断。
 	if cfg.Database.Password == "" {
 		return Config{}, errors.New("DB_PASSWORD 不能为空")
+	}
+	cfg.SuperAdminQQ = strings.TrimSpace(cfg.SuperAdminQQ)
+	// [决策理由] 单管理员权限完全来自环境变量，非数字或零值会造成不可登录且难以诊断。
+	if cfg.SuperAdminQQ != "" {
+		value, err := strconv.ParseUint(cfg.SuperAdminQQ, 10, 64)
+		// [决策理由] QQ 号必须是正十进制整数，拒绝符号、空格和溢出配置。
+		if err != nil || value == 0 {
+			return Config{}, fmt.Errorf("SUPER_ADMIN_QQ %q 格式无效", cfg.SuperAdminQQ)
+		}
 	}
 
 	// >>> 数据演变示例
