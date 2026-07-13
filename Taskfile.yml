@@ -1,4 +1,4 @@
-# 📌 影响范围：调用 Go 工具链并读写 Go 构建缓存。
+# 📌 影响范围：调用 Go、Node、Docker 工具链并读写本地构建缓存与 WebUI 产物。
 version: "3"
 
 dotenv:
@@ -28,7 +28,8 @@ tasks:
       - npm --prefix web run typecheck
 
   run:
-    desc: 启动本地机器人基础框架
+    desc: 构建 WebUI 并启动本地机器人基础框架
+    deps: [web-build]
     cmds:
       - go run ./cmd/bot
 

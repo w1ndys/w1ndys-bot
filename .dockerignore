@@ -6,4 +6,5 @@
 bin
 coverage.out
 docs
-web
+web/node_modules
+web/dist

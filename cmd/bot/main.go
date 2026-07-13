@@ -1,4 +1,4 @@
-// 📌 影响范围：读取进程环境变量和命令行参数；连接 PostgreSQL；监听 TCP 端口；写入标准日志；监听进程信号。
+// 📌 影响范围：读取进程环境变量、命令行参数和 web/dist；连接 PostgreSQL；监听 TCP 端口；写入标准日志；监听进程信号。
 package main
 
 import (
@@ -20,6 +20,7 @@ import (
 	"github.com/w1ndys/w1ndys-bot/internal/permission"
 	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 	"github.com/w1ndys/w1ndys-bot/internal/webapi"
+	"github.com/w1ndys/w1ndys-bot/internal/webui"
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 	projectlogger "github.com/w1ndys/w1ndys-bot/pkg/logger"
 	_ "github.com/w1ndys/w1ndys-bot/plugins/admin"
@@ -162,8 +163,17 @@ func main() {
 		return
 	}
 	rootMux := http.NewServeMux()
+	webUIHandler, err := webui.New("web/dist")
+	// [决策理由] 生产镜像缺少 WebUI 入口文件表示构建不完整，应在开放管理端口前终止。
+	if err != nil {
+		projectlogger.Error("初始化WebUI静态资源失败", "error", err)
+		return
+	}
 	rootMux.Handle("/onebot/v11/ws", wsServer.Handler())
-	rootMux.Handle("/", http.TimeoutHandler(webServer.Handler(), 30*time.Second, `{"code":"request_timeout","message":"请求处理超时","data":null}`))
+	apiHandler := http.TimeoutHandler(webServer.Handler(), 30*time.Second, `{"code":"request_timeout","message":"请求处理超时","data":null}`)
+	rootMux.Handle("/api", apiHandler)
+	rootMux.Handle("/api/", apiHandler)
+	rootMux.Handle("/", webUIHandler)
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf("0.0.0.0:%d", cfg.WSPort),
 		Handler:           rootMux,
@@ -184,7 +194,7 @@ func main() {
 		// 2. 端口被占用 -> ListenAndServe 错误 -> 记录日志 -> 通知主流程退出。
 	}()
 
-	projectlogger.Info("基础框架已启动", "http_port", cfg.WSPort, "webapi", "/api", "onebot_ws", "/onebot/v11/ws", "log_level", cfg.LogLevel, "log_format", cfg.LogFormat)
+	projectlogger.Info("基础框架已启动", "http_port", cfg.WSPort, "webui", "/", "webapi", "/api", "onebot_ws", "/onebot/v11/ws", "log_level", cfg.LogLevel, "log_format", cfg.LogFormat)
 	<-ctx.Done()
 	// [决策理由] 收到退出信号后停止接受新连接，并等待活跃请求结束。
 	if err := httpServer.Shutdown(context.Background()); err != nil {
