@@ -4,6 +4,7 @@ package ws
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -157,20 +158,22 @@ func (s *Server) handleEvent(ctx context.Context, payload []byte) {
 // dispatch 解析并分发一条 OneBot 11 上报事件。
 // @param ctx：请求上下文；payload：WebSocket JSON 消息。
 // @returns JSON、事件类型或处理器返回的错误。
-// ⚠️副作用说明：成功时调用注入的消息处理器。
+// ⚠️副作用说明：解析成功时可能写入 debug 原始事件日志，并调用注入的消息处理器。
 func (s *Server) dispatch(ctx context.Context, payload []byte) error {
 	event, err := ParseEvent(payload)
 	// [决策理由] 非法 JSON 无法可靠识别事件字段，必须拒绝分发。
 	if err != nil {
 		return errors.New("解析 OneBot JSON 失败")
 	}
+	// [决策理由] 原始事件可能包含聊天内容，仅使用 debug 级别按结构化 JSON 输出。
+	logger.Debug("收到 OneBot 原始事件", "payload", json.RawMessage(payload))
 	// [决策理由] 处理器缺失表示服务组装错误，返回明确错误避免空指针调用。
 	if s.handler == nil {
 		return errors.New("消息处理器未配置")
 	}
 
 	// >>> 数据演变示例
-	// 1. {post_type:message,group_id:1} -> MessageEvent -> handler(event) -> 返回处理结果。
+	// 1. {post_type:message,group_id:1} -> debug payload -> MessageEvent -> handler(event)。
 	// 2. {post_type:notice,notice_type:friend_add} -> MessageEvent -> handler(event) -> 返回处理结果。
 	return s.handler(ctx, event)
 }
