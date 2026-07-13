@@ -36,6 +36,17 @@ type PluginState struct {
 	ConfigJSON  json.RawMessage
 }
 
+// FeatureState 表示插件 Manifest 同步后的功能元数据。
+type FeatureState struct {
+	PluginName         string
+	Key                string
+	DisplayName        string
+	Description        string
+	Available          bool
+	DefaultCommands    []string
+	DefaultPermissions json.RawMessage
+}
+
 // CommandState 表示一条可管理的插件功能命令。
 type CommandState struct {
 	ID                int64
@@ -137,6 +148,7 @@ type Controller interface {
 	ListPlugins(context.Context, Actor) ([]PluginState, error)
 	SetPluginEnabled(context.Context, Actor, string, bool) (PluginState, error)
 	SetPluginPriority(context.Context, Actor, string, int) (PluginState, error)
+	ListPluginFeatures(context.Context, Actor, string) ([]FeatureState, error)
 	ListCommands(context.Context, Actor) ([]CommandState, error)
 	CreateCommand(context.Context, Actor, CommandCreate) (CommandState, error)
 	RenameCommand(context.Context, Actor, int64, string) (CommandState, error)

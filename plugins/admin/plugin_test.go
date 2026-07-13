@@ -47,6 +47,17 @@ type fakeManagement struct {
 	enabled bool
 }
 
+// ListPluginFeatures 满足完整管理契约；QQ 应急插件不调用功能元数据。
+// @param ctx：未使用的上下文；actor：操作者；pluginName：插件名。
+// @returns 空功能列表与 nil。
+// ⚠️副作用说明：无。
+func (f *fakeManagement) ListPluginFeatures(context.Context, management.Actor, string) ([]management.FeatureState, error) {
+	// >>> 数据演变示例
+	// 1. QQ应急插件 -> 不调用 -> 空列表。
+	// 2. WebUI功能查询 -> 由AdminService负责。
+	return []management.FeatureState{}, nil
+}
+
 // ListAuditLogs 满足完整管理契约；QQ 应急插件不调用审计查询。
 // @param ctx：未使用的上下文；actor：操作者；query：审计查询。
 // @returns 空审计页与 nil。

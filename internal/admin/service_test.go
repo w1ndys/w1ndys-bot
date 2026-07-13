@@ -25,6 +25,17 @@ type fakeRepository struct {
 	err             error
 }
 
+// ListPluginFeatures 返回空功能列表以满足管理仓库契约。
+// @param ctx：未使用的上下文；pluginName：插件名。
+// @returns 空功能列表或预设错误。
+// ⚠️副作用说明：无。
+func (f *fakeRepository) ListPluginFeatures(_ context.Context, _ string) ([]FeatureState, error) {
+	// >>> 数据演变示例
+	// 1. ping -> []FeatureState{},nil。
+	// 2. err=boom -> 空列表,boom。
+	return []FeatureState{}, f.err
+}
+
 // ListAuditLogs 返回空测试审计页以满足管理仓库契约。
 // @param ctx：未使用的上下文；query：审计查询条件。
 // @returns 空分页或预设错误。

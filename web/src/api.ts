@@ -23,6 +23,35 @@ export interface PluginState {
   config: Record<string, unknown>
 }
 
+export interface FeatureState {
+  plugin_name: string
+  key: string
+  display_name: string
+  description: string
+  available: boolean
+  default_commands: string[]
+  default_permissions: Record<string, boolean>
+}
+
+export interface CommandState {
+  id: number
+  scope_type: 'global' | 'group'
+  scope_id: string
+  plugin_name: string
+  feature_key: string
+  command: string
+  normalized_command: string
+  enabled: boolean
+}
+
+export interface CommandCreate {
+  scope_type: 'global' | 'group'
+  scope_id: string
+  plugin_name: string
+  feature_key: string
+  command: string
+}
+
 // apiRequest 执行统一鉴权请求并解析 code/message/data 响应。
 // @param path：以 /api 开头的接口路径；options：Fetch 请求参数。
 // @returns 成功响应中的 data，失败时抛出包含后端 message 的 Error。
@@ -98,5 +127,70 @@ export function patchPlugin(name: string, patch: { enabled: boolean } | { priori
   // >>> 数据演变示例
   // 1. ping+enabled=true -> PATCH -> 返回启用状态。
   // 2. admin+enabled=false -> 409 -> 抛出保护错误。
+  return result
+}
+
+// listPluginFeatures 获取指定插件的 Manifest 功能元数据。
+// @param pluginName：插件稳定名称。
+// @returns 功能列表及默认触发词、默认权限。
+// ⚠️副作用说明：发起鉴权网络请求。
+export function listPluginFeatures(pluginName: string): Promise<FeatureState[]> {
+  const result = apiRequest<FeatureState[]>(`/api/plugins/${encodeURIComponent(pluginName)}/features`)
+
+  // >>> 数据演变示例
+  // 1. ping -> GET features -> [ping功能]。
+  // 2. missing -> 404 -> 抛出插件不存在。
+  return result
+}
+
+// listCommands 获取全部功能触发词。
+// @param 无。
+// @returns 全局与群级触发词列表。
+// ⚠️副作用说明：发起鉴权网络请求。
+export function listCommands(): Promise<CommandState[]> {
+  const result = apiRequest<CommandState[]>('/api/commands')
+
+  // >>> 数据演变示例
+  // 1. 有效Token -> GET commands -> CommandState[]。
+  // 2. Token失效 -> 清会话并抛错。
+  return result
+}
+
+// createCommand 为插件功能新增触发词。
+// @param input：作用域、功能目标与触发词。
+// @returns 保存并热刷新后的触发词状态。
+// ⚠️副作用说明：新增数据库命令、审计记录并刷新后端命令快照。
+export function createCommand(input: CommandCreate): Promise<CommandState> {
+  const result = apiRequest<CommandState>('/api/commands', { method: 'POST', body: JSON.stringify(input) })
+
+  // >>> 数据演变示例
+  // 1. ping.ping+测试 -> POST -> 新CommandState。
+  // 2. 同作用域重复 -> 409 command_conflict -> 抛错。
+  return result
+}
+
+// renameCommand 修改已有触发词文本。
+// @param id：命令ID；command：新触发词。
+// @returns 保存后的触发词状态。
+// ⚠️副作用说明：更新数据库命令、审计记录并刷新后端命令快照。
+export function renameCommand(id: number, command: string): Promise<CommandState> {
+  const result = apiRequest<CommandState>(`/api/commands/${id}`, { method: 'PATCH', body: JSON.stringify({ command }) })
+
+  // >>> 数据演变示例
+  // 1. id1+延迟 -> PATCH -> 更新状态。
+  // 2. 重复文本 -> 409 -> 抛错。
+  return result
+}
+
+// deleteCommand 删除功能触发词。
+// @param id：命令ID。
+// @returns 删除成功后的空数据。
+// ⚠️副作用说明：删除数据库命令、写审计并刷新后端命令快照。
+export function deleteCommand(id: number): Promise<null> {
+  const result = apiRequest<null>(`/api/commands/${id}`, { method: 'DELETE' })
+
+  // >>> 数据演变示例
+  // 1. id1 -> DELETE -> null。
+  // 2. id404 -> 404 -> 抛错。
   return result
 }

@@ -22,6 +22,7 @@ var ErrFeatureNotFound = errors.New("插件功能不存在")
 type Channel = management.Channel
 type Actor = management.Actor
 type PluginState = management.PluginState
+type FeatureState = management.FeatureState
 type CommandState = management.CommandState
 type CommandCreate = management.CommandCreate
 type PermissionState = management.PermissionState

@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/w1ndys/w1ndys-bot/internal/admin"
 	commandregistry "github.com/w1ndys/w1ndys-bot/internal/command"
@@ -162,10 +163,13 @@ func main() {
 	}
 	rootMux := http.NewServeMux()
 	rootMux.Handle("/onebot/v11/ws", wsServer.Handler())
-	rootMux.Handle("/", webServer.Handler())
+	rootMux.Handle("/", http.TimeoutHandler(webServer.Handler(), 30*time.Second, `{"code":"request_timeout","message":"请求处理超时","data":null}`))
 	httpServer := &http.Server{
-		Addr:    fmt.Sprintf("0.0.0.0:%d", cfg.WSPort),
-		Handler: rootMux,
+		Addr:              fmt.Sprintf("0.0.0.0:%d", cfg.WSPort),
+		Handler:           rootMux,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    32 * 1024,
 	}
 	go func() {
 		err := httpServer.ListenAndServe()

@@ -53,6 +53,11 @@ func (r *PostgresRepository) SetPermission(ctx context.Context, actor Actor, inp
 		return PermissionState{}, fmt.Errorf("开启权限管理事务: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	lockKey := input.ScopeType + "\x00" + input.ScopeID + "\x00" + input.PluginName + "\x00" + input.FeatureKey + "\x00" + input.SubjectType + "\x00" + input.SubjectID
+	// [决策理由] 不存在行无法被 FOR UPDATE 锁定，维度级 advisory lock 防止并发新增撞唯一索引。
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, lockKey); err != nil {
+		return PermissionState{}, fmt.Errorf("锁定权限策略维度: %w", err)
+	}
 	before, found, err := selectPermissionByKey(ctx, tx, input)
 	// [决策理由] 查询现状失败时不能安全决定新增或更新。
 	if err != nil {

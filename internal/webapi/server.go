@@ -11,9 +11,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/w1ndys/w1ndys-bot/internal/admin"
@@ -23,6 +26,9 @@ import (
 )
 
 const tokenLifetime = 12 * time.Hour
+const loginWindow = time.Minute
+const loginAttemptLimit = 5
+const loginAttemptCapacity = 4096
 
 // ApplicationName 是 WebUI 固定展示名称，不开放运行时修改。
 const ApplicationName = "w1ndys-bot-webui"
@@ -43,6 +49,7 @@ type ManagementController interface {
 	ListPlugins(context.Context, management.Actor) ([]management.PluginState, error)
 	SetPluginEnabled(context.Context, management.Actor, string, bool) (management.PluginState, error)
 	SetPluginPriority(context.Context, management.Actor, string, int) (management.PluginState, error)
+	ListPluginFeatures(context.Context, management.Actor, string) ([]management.FeatureState, error)
 	ListCommands(context.Context, management.Actor) ([]management.CommandState, error)
 	CreateCommand(context.Context, management.Actor, management.CommandCreate) (management.CommandState, error)
 	RenameCommand(context.Context, management.Actor, int64, string) (management.CommandState, error)
@@ -59,11 +66,19 @@ type ManagementController interface {
 
 // Server 提供 WebUI 认证 HTTP 接口。
 type Server struct {
-	passwordHash string
-	jwtSecret    []byte
-	admins       AdminResolver
-	management   ManagementController
-	now          func() time.Time
+	passwordHash  string
+	jwtSecret     []byte
+	admins        AdminResolver
+	management    ManagementController
+	now           func() time.Time
+	loginMu       sync.Mutex
+	loginAttempts map[string]loginAttempt
+	loginSlots    chan struct{}
+}
+
+type loginAttempt struct {
+	Count       int
+	WindowStart time.Time
 }
 
 type loginRequest struct {
@@ -97,6 +112,16 @@ type pluginResponse struct {
 	Enabled     bool            `json:"enabled"`
 	Priority    int             `json:"priority"`
 	Config      json.RawMessage `json:"config"`
+}
+
+type featureResponse struct {
+	PluginName         string          `json:"plugin_name"`
+	Key                string          `json:"key"`
+	DisplayName        string          `json:"display_name"`
+	Description        string          `json:"description"`
+	Available          bool            `json:"available"`
+	DefaultCommands    []string        `json:"default_commands"`
+	DefaultPermissions json.RawMessage `json:"default_permissions"`
 }
 
 type commandCreateRequest struct {
@@ -199,7 +224,7 @@ func New(password string, jwtSecret string, admins AdminResolver, controller Man
 	if err != nil {
 		return nil, fmt.Errorf("准备 WebUI 密码: %w", err)
 	}
-	server := &Server{passwordHash: passwordHash, jwtSecret: []byte(jwtSecret), admins: admins, management: controller, now: time.Now}
+	server := &Server{passwordHash: passwordHash, jwtSecret: []byte(jwtSecret), admins: admins, management: controller, now: time.Now, loginAttempts: make(map[string]loginAttempt), loginSlots: make(chan struct{}, 2)}
 
 	// >>> 数据演变示例
 	// 1. 强密码+32字节密钥+Resolver -> Argon2id哈希 -> Server,nil。
@@ -217,6 +242,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/auth/me", s.authenticate(http.HandlerFunc(s.me)))
 	mux.Handle("GET /api/plugins", s.authenticate(http.HandlerFunc(s.listPlugins)))
 	mux.Handle("PATCH /api/plugins/{plugin_name}", s.authenticate(http.HandlerFunc(s.patchPlugin)))
+	mux.Handle("GET /api/plugins/{plugin_name}/features", s.authenticate(http.HandlerFunc(s.listPluginFeatures)))
 	mux.Handle("GET /api/commands", s.authenticate(http.HandlerFunc(s.listCommands)))
 	mux.Handle("POST /api/commands", s.authenticate(http.HandlerFunc(s.createCommand)))
 	mux.Handle("PATCH /api/commands/{command_id}", s.authenticate(http.HandlerFunc(s.renameCommand)))
@@ -243,13 +269,18 @@ func (s *Server) Handler() http.Handler {
 // ⚠️副作用说明：读取请求体、执行 Argon2id 校验并写入 JSON 响应。
 func (s *Server) login(writer http.ResponseWriter, request *http.Request) {
 	var input loginRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
-	decoder.DisallowUnknownFields()
 	// [决策理由] 登录载荷必须是单个、字段明确的 JSON 对象，避免歧义输入。
-	if err := decoder.Decode(&input); err != nil {
+	if err := decodeJSON(writer, request, &input); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_request", "登录参数格式无效")
 		return
 	}
+	release, allowed := s.beginLogin(request)
+	// [决策理由] 超过失败窗口或 Argon2 并发上限时必须在高成本哈希前拒绝。
+	if !allowed {
+		writeError(writer, http.StatusTooManyRequests, "login_rate_limited", "登录尝试过于频繁，请稍后重试")
+		return
+	}
+	defer release()
 	account, exists := s.admins.Resolve(input.QQ)
 	matched, verifyErr := projectauth.VerifyPassword(input.Password, s.passwordHash)
 	// [决策理由] QQ 与密码使用同一模糊错误，避免暴露管理员账号是否存在。
@@ -257,6 +288,7 @@ func (s *Server) login(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusUnauthorized, "invalid_credentials", "QQ号或密码错误")
 		return
 	}
+	s.clearLoginAttempts(request)
 	token, err := s.sign(input.QQ)
 	// [决策理由] 签名失败表示服务器无法建立可信会话，不能返回部分登录结果。
 	if err != nil {
@@ -268,6 +300,105 @@ func (s *Server) login(writer http.ResponseWriter, request *http.Request) {
 	// >>> 数据演变示例
 	// 1. 启用管理员+正确密码 -> JWT -> 200及管理员信息。
 	// 2. 非管理员+正确密码 -> 固定认证失败响应 -> 401。
+}
+
+// beginLogin 对客户端 IP 执行固定窗口限流和 Argon2 并发保护。
+// @param request：登录请求。
+// @returns 释放并发槽函数，以及是否允许继续验证。
+// ⚠️副作用说明：修改进程内登录尝试计数，并可能占用 Argon2 并发槽。
+func (s *Server) beginLogin(request *http.Request) (func(), bool) {
+	key := loginKey(request)
+	now := s.now()
+	s.loginMu.Lock()
+	// [决策理由] 达到容量前先淘汰过期窗口，防止大量来源永久增长内存。
+	if len(s.loginAttempts) >= loginAttemptCapacity {
+		s.cleanupLoginAttemptsLocked(now)
+	}
+	_, known := s.loginAttempts[key]
+	// [决策理由] 清理后仍满载时拒绝新来源，保证 map 具有硬容量上限。
+	if !known && len(s.loginAttempts) >= loginAttemptCapacity {
+		s.loginMu.Unlock()
+		return func() {}, false
+	}
+	attempt := s.loginAttempts[key]
+	// [决策理由] 新窗口应重置历史失败次数，避免永久锁定管理员。
+	if attempt.WindowStart.IsZero() || now.Sub(attempt.WindowStart) >= loginWindow {
+		attempt = loginAttempt{WindowStart: now}
+	}
+	// [决策理由] 固定窗口最多允许五次高成本密码验证。
+	if attempt.Count >= loginAttemptLimit {
+		s.loginMu.Unlock()
+		return func() {}, false
+	}
+	select {
+	case s.loginSlots <- struct{}{}:
+		attempt.Count++
+		s.loginAttempts[key] = attempt
+		s.loginMu.Unlock()
+		release := func() {
+			<-s.loginSlots
+
+			// >>> 数据演变示例
+			// 1. 已占用槽 -> release -> 槽位归还。
+			// 2. defer调用 -> Argon2结束后释放。
+		}
+
+		// >>> 数据演变示例
+		// 1. IP首次登录且有槽 -> 计数1 -> release,true。
+		// 2. 窗口内第六次 -> 不占槽 -> false。
+		return release, true
+	default:
+		s.loginMu.Unlock()
+		return func() {}, false
+	}
+}
+
+// clearLoginAttempts 在成功登录后清除对应限流窗口。
+// @param request：成功登录请求。
+// @returns 无。
+// ⚠️副作用说明：删除进程内登录尝试计数。
+func (s *Server) clearLoginAttempts(request *http.Request) {
+	s.loginMu.Lock()
+	delete(s.loginAttempts, loginKey(request))
+	s.loginMu.Unlock()
+
+	// >>> 数据演变示例
+	// 1. key计数3+登录成功 -> delete -> 下次从0开始。
+	// 2. key不存在 -> delete无影响。
+}
+
+// cleanupLoginAttemptsLocked 删除当前窗口前已经过期的登录计数。
+// @param now：当前服务时间。
+// @returns 无。
+// ⚠️副作用说明：要求调用方持有 loginMu，并删除过期 map 项。
+func (s *Server) cleanupLoginAttemptsLocked(now time.Time) {
+	for key, attempt := range s.loginAttempts {
+		// [决策理由] 只删除完整窗口外记录，当前限流语义保持不变。
+		if now.Sub(attempt.WindowStart) >= loginWindow {
+			delete(s.loginAttempts, key)
+		}
+	}
+
+	// >>> 数据演变示例
+	// 1. [旧IP:2,当前IP:3] -> 删除旧IP -> 保留当前IP。
+	// 2. 所有记录过期 -> map清空。
+}
+
+// loginKey 构造不信任代理头的 IP 限流键。
+// @param request：登录请求。
+// @returns TCP RemoteAddr 中的 IP；非标准地址回退原文。
+// ⚠️副作用说明：无。
+func loginKey(request *http.Request) string {
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	// [决策理由] 测试或非标准服务器可能没有端口，应回退完整 RemoteAddr。
+	if err != nil {
+		host = request.RemoteAddr
+	}
+
+	// >>> 数据演变示例
+	// 1. 1.2.3.4:5000 -> 1.2.3.4。
+	// 2. RemoteAddr=test -> test。
+	return host
 }
 
 // me 返回 JWT 对应的当前启用管理员身份。
@@ -311,6 +442,30 @@ func (s *Server) listPlugins(writer http.ResponseWriter, request *http.Request) 
 	// 2. Repository失败 -> management error -> 500统一错误。
 }
 
+// listPluginFeatures 返回指定插件的 Manifest 功能元数据。
+// @param writer：响应写入器；request：携带插件名的已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：读取 PostgreSQL 插件功能元数据并写入 JSON 响应。
+func (s *Server) listPluginFeatures(writer http.ResponseWriter, request *http.Request) {
+	actor := actorFromRequest(request)
+	pluginName := request.PathValue("plugin_name")
+	states, err := s.management.ListPluginFeatures(request.Context(), actor, pluginName)
+	// [决策理由] 插件未找到或元数据查询失败时不能返回空列表冒充合法插件。
+	if err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	result := make([]featureResponse, 0, len(states))
+	for _, state := range states {
+		result = append(result, featureView(state))
+	}
+	writeSuccess(writer, result)
+
+	// >>> 数据演变示例
+	// 1. GET ping/features -> [ping功能DTO] -> 200。
+	// 2. GET missing/features -> ErrPluginNotFound -> 404。
+}
+
 // patchPlugin 修改一个插件的启用状态或优先级。
 // @param writer：响应写入器；request：携带插件名和单字段 JSON Patch 的已鉴权请求。
 // @returns 无。
@@ -319,10 +474,8 @@ func (s *Server) patchPlugin(writer http.ResponseWriter, request *http.Request) 
 	actor := actorFromRequest(request)
 	name := request.PathValue("plugin_name")
 	var input pluginPatchRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
-	decoder.DisallowUnknownFields()
 	// [决策理由] 插件变更只接受字段明确且尺寸受限的 JSON 对象。
-	if err := decoder.Decode(&input); err != nil {
+	if err := decodeJSON(writer, request, &input); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_request", "插件修改参数格式无效")
 		return
 	}
@@ -386,10 +539,8 @@ func (s *Server) listCommands(writer http.ResponseWriter, request *http.Request)
 func (s *Server) createCommand(writer http.ResponseWriter, request *http.Request) {
 	actor := actorFromRequest(request)
 	var input commandCreateRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
-	decoder.DisallowUnknownFields()
 	// [决策理由] 未知字段或非法 JSON 可能表示前后端版本不一致，必须明确拒绝。
-	if err := decoder.Decode(&input); err != nil {
+	if err := decodeJSON(writer, request, &input); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_request", "命令新增参数格式无效")
 		return
 	}
@@ -419,10 +570,8 @@ func (s *Server) renameCommand(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	var input commandPatchRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
-	decoder.DisallowUnknownFields()
 	// [决策理由] 改名接口只接受 command 字段，避免产生未实现的部分更新语义。
-	if err := decoder.Decode(&input); err != nil {
+	if err := decodeJSON(writer, request, &input); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_request", "命令修改参数格式无效")
 		return
 	}
@@ -523,10 +672,8 @@ func (s *Server) listPermissions(writer http.ResponseWriter, request *http.Reque
 func (s *Server) setPermission(writer http.ResponseWriter, request *http.Request) {
 	actor := actorFromRequest(request)
 	var input permissionSetRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
-	decoder.DisallowUnknownFields()
 	// [决策理由] 权限维度必须来源于结构明确且尺寸受限的 JSON 请求。
-	if err := decoder.Decode(&input); err != nil {
+	if err := decodeJSON(writer, request, &input); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_request", "权限策略参数格式无效")
 		return
 	}
@@ -611,10 +758,8 @@ func (s *Server) setSetting(writer http.ResponseWriter, request *http.Request) {
 	actor := actorFromRequest(request)
 	key := request.PathValue("setting_key")
 	var input settingSetRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
-	decoder.DisallowUnknownFields()
 	// [决策理由] value 必须保持原始 JSON 类型，未知包装字段应明确拒绝。
-	if err := decoder.Decode(&input); err != nil || len(input.Value) == 0 {
+	if err := decodeJSON(writer, request, &input); err != nil || len(input.Value) == 0 {
 		writeError(writer, http.StatusBadRequest, "invalid_request", "系统设置参数格式无效")
 		return
 	}
@@ -841,6 +986,25 @@ func pluginView(state management.PluginState) pluginResponse {
 	return view
 }
 
+// featureView 将内部功能元数据转换成稳定 API 模型。
+// @param state：管理服务功能状态。
+// @returns 包含默认触发词和权限 JSON 的 snake_case 响应。
+// ⚠️副作用说明：复制切片和 JSON 字节。
+func featureView(state management.FeatureState) featureResponse {
+	commands := append([]string(nil), state.DefaultCommands...)
+	permissions := append(json.RawMessage(nil), state.DefaultPermissions...)
+	// [决策理由] 空默认权限不是合法 JSON，API 应稳定返回空对象。
+	if len(permissions) == 0 {
+		permissions = json.RawMessage(`{}`)
+	}
+	view := featureResponse{PluginName: state.PluginName, Key: state.Key, DisplayName: state.DisplayName, Description: state.Description, Available: state.Available, DefaultCommands: commands, DefaultPermissions: permissions}
+
+	// >>> 数据演变示例
+	// 1. ping功能+[ping]+权限JSON -> 独立DTO副本。
+	// 2. 空权限 -> default_permissions={}。
+	return view
+}
+
 // writeManagementError 将管理领域错误映射为稳定 HTTP 状态和错误码。
 // @param writer：响应写入器；err：管理服务返回错误。
 // @returns 无。
@@ -922,6 +1086,28 @@ func writeManagementError(writer http.ResponseWriter, err error) {
 	// >>> 数据演变示例
 	// 1. ErrCommandConflict -> 409 command_conflict。
 	// 2. 数据库连接错误 -> 记录内部错误 -> 500通用消息。
+}
+
+// decodeJSON 解码单个、字段严格且大小受限的 JSON 请求体。
+// @param writer：用于 MaxBytesReader；request：HTTP 请求；target：目标结构体指针。
+// @returns 首次解码、未知字段、超限或尾随内容错误。
+// ⚠️副作用说明：读取并消费请求体。
+func decodeJSON(writer http.ResponseWriter, request *http.Request, target any) error {
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
+	decoder.DisallowUnknownFields()
+	// [决策理由] 第一个 JSON 值必须完整匹配目标结构。
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	// [决策理由] 第二次解码必须到达 EOF，拒绝 `{...}{...}` 等尾随 JSON。
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("请求体只能包含一个 JSON 值")
+	}
+
+	// >>> 数据演变示例
+	// 1. {"enabled":true} -> 首次成功+EOF -> nil。
+	// 2. {"enabled":true}{} -> 第二次有值 -> error。
+	return nil
 }
 
 // authenticate 验证 Bearer JWT 并再次确认管理员仍处于启用状态。
@@ -1057,6 +1243,10 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		started := time.Now()
 		requestID := request.Header.Get("X-Request-ID")
+		// [决策理由] 客户端请求ID必须适合审计 VARCHAR(128)，否则改由服务端生成。
+		if !validRequestID(requestID) {
+			requestID = ""
+		}
 		// [决策理由] 客户端未提供追踪标识时生成本地随机ID，便于关联审计和故障日志。
 		if requestID == "" {
 			buffer := make([]byte, 12)
@@ -1071,6 +1261,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
 		writer.Header().Set("X-Frame-Options", "DENY")
 		writer.Header().Set("Referrer-Policy", "no-referrer")
+		writer.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		ctx := context.WithValue(request.Context(), requestIDContextKey, requestID)
 		next.ServeHTTP(writer, request.WithContext(ctx))
 		projectlogger.Info("WebAPI请求", "method", request.Method, "path", request.URL.Path, "request_id", requestID, "duration", time.Since(started))
@@ -1084,6 +1275,33 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 	// 1. mux -> middleware包装 -> 带安全头处理器。
 	// 2. login请求 -> 包装器 -> mux -> login -> 日志。
 	return handler
+}
+
+// validRequestID 校验客户端追踪标识的长度和安全字符集。
+// @param value：X-Request-ID 原文。
+// @returns 空值或由字母、数字、点、下划线、冒号、短横线组成且不超过128字符时 true。
+// ⚠️副作用说明：无。
+func validRequestID(value string) bool {
+	// [决策理由] 空值表示需要服务端生成，不属于非法输入。
+	if value == "" {
+		return true
+	}
+	// [决策理由] 数据库审计列上限为128，按字节限制可保证写入安全。
+	if len(value) > 128 {
+		return false
+	}
+	for _, current := range value {
+		allowed := current >= 'a' && current <= 'z' || current >= 'A' && current <= 'Z' || current >= '0' && current <= '9' || current == '.' || current == '_' || current == ':' || current == '-'
+		// [决策理由] 拒绝控制字符、空白和日志分隔符，防止审计与日志注入。
+		if !allowed {
+			return false
+		}
+	}
+
+	// >>> 数据演变示例
+	// 1. req-123:web -> 合法字符且长度内 -> true。
+	// 2. 129字符或含换行 -> false并改用服务端ID。
+	return true
 }
 
 // writeJSON 写入统一 JSON 响应。

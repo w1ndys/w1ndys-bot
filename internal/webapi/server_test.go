@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ type fakeAdmins struct {
 
 type fakePlugins struct {
 	states          []management.PluginState
+	features        []management.FeatureState
 	updated         management.PluginState
 	actor           management.Actor
 	name            string
@@ -43,6 +45,19 @@ type fakePlugins struct {
 	audit           management.AuditState
 	auditQuery      management.AuditQuery
 	auditID         int64
+}
+
+// ListPluginFeatures 返回测试功能元数据并记录 Actor 与插件名。
+// @param ctx：未使用的上下文；actor：操作者；pluginName：插件名。
+// @returns 预设功能列表或错误。
+// ⚠️副作用说明：记录 Actor 和插件名。
+func (f *fakePlugins) ListPluginFeatures(_ context.Context, actor management.Actor, pluginName string) ([]management.FeatureState, error) {
+	f.actor, f.name = actor, pluginName
+
+	// >>> 数据演变示例
+	// 1. ping -> 记录目标 -> features,nil。
+	// 2. missing+error -> 记录 -> error。
+	return f.features, f.err
 }
 
 // ListAuditLogs 返回测试审计分页并记录 Actor 与查询条件。
@@ -792,6 +807,169 @@ func TestAuditRoutesRejectInvalidQueryAndMapNotFound(t *testing.T) {
 	// >>> 数据演变示例
 	// 1. start_time=bad -> 400 invalid_audit_query零控制器调用。
 	// 2. id404+ErrAuditNotFound -> 404 audit_not_found。
+}
+
+// TestLoginRateLimitRejectsSixthAttempt 验证高成本密码校验具有固定窗口限流。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行多次 Argon2id 校验并创建内存 HTTP 请求。
+func TestLoginRateLimitRejectsSixthAttempt(t *testing.T) {
+	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{})
+	// [决策理由] 限流测试需要合法服务实例。
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	for index := 0; index < loginAttemptLimit; index++ {
+		response := requestLogin(server, "100", "wrong-password-value")
+		// [决策理由] 窗口内前五次应完成密码验证并返回普通认证失败。
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status=%d", index+1, response.Code)
+		}
+	}
+	limited := requestLogin(server, "100", "wrong-password-value")
+	// [决策理由] 第六次必须在 Argon2 前返回429稳定业务码。
+	if limited.Code != http.StatusTooManyRequests || !strings.Contains(limited.Body.String(), `"code":"login_rate_limited"`) {
+		t.Fatalf("limited status=%d body=%s", limited.Code, limited.Body.String())
+	}
+
+	// >>> 数据演变示例
+	// 1. 同IP前5次 -> 401 invalid_credentials。
+	// 2. 第6次 -> 429 login_rate_limited。
+}
+
+// TestLoginRateLimitCannotBypassWithDifferentQQ 验证轮换伪造 QQ 仍共享 IP 限流窗口。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行多次 Argon2id 校验并创建内存 HTTP 请求。
+func TestLoginRateLimitCannotBypassWithDifferentQQ(t *testing.T) {
+	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{})
+	// [决策理由] 限流绕过测试需要合法服务实例。
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	for index := 0; index < loginAttemptLimit; index++ {
+		requestLogin(server, strconv.Itoa(200+index), "wrong-password-value")
+	}
+	limited := requestLogin(server, "999", "wrong-password-value")
+	// [决策理由] 同IP更换QQ后第六次仍必须被429拒绝。
+	if limited.Code != http.StatusTooManyRequests {
+		t.Fatalf("rotated QQ status=%d body=%s", limited.Code, limited.Body.String())
+	}
+
+	// >>> 数据演变示例
+	// 1. 同IP依次QQ200..204 -> 共用计数5。
+	// 2. 同IP切换QQ999 -> 第6次 -> 429。
+}
+
+// TestLoginAttemptMapHasBoundedCleanup 验证登录限流表会淘汰过期记录并保持容量上限。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：直接填充并清理测试服务的内存限流表。
+func TestLoginAttemptMapHasBoundedCleanup(t *testing.T) {
+	server := &Server{loginAttempts: make(map[string]loginAttempt), loginSlots: make(chan struct{}, 2), now: time.Now}
+	now := time.Unix(1_700_000_000, 0)
+	for index := 0; index < loginAttemptCapacity; index++ {
+		server.loginAttempts[strconv.Itoa(index)] = loginAttempt{Count: 1, WindowStart: now.Add(-2 * loginWindow)}
+	}
+	server.loginMu.Lock()
+	server.cleanupLoginAttemptsLocked(now)
+	server.loginMu.Unlock()
+	// [决策理由] 所有过期窗口必须被清理，释放固定容量。
+	if len(server.loginAttempts) != 0 {
+		t.Fatalf("loginAttempts length=%d, want 0", len(server.loginAttempts))
+	}
+
+	// >>> 数据演变示例
+	// 1. 4096条过期记录 -> cleanup -> 0条。
+	// 2. 新来源随后可创建窗口且map不超过4096。
+}
+
+// TestStrictJSONAndRequestIDSanitization 验证尾随 JSON 被拒绝且非法请求ID被替换。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：创建并执行内存 HTTP 请求。
+func TestStrictJSONAndRequestIDSanitization(t *testing.T) {
+	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
+	controller := &fakePlugins{}
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller)
+	// [决策理由] 请求安全测试需要完整服务依赖。
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	token, err := server.sign("100")
+	// [决策理由] 需要有效 Token 到达管理请求解码流程。
+	if err != nil {
+		t.Fatalf("sign() error = %v", err)
+	}
+	trailing := requestAPI(server, token, http.MethodPatch, "/api/plugins/ping", `{"enabled":true}{}`, "")
+	// [决策理由] 多个 JSON 值必须返回400且不调用控制器。
+	if trailing.Code != http.StatusBadRequest || controller.enabled != nil {
+		t.Fatalf("trailing status=%d enabled=%v", trailing.Code, controller.enabled)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/plugins", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("X-Request-ID", strings.Repeat("x", 129))
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	// [决策理由] 超长客户端ID必须替换为服务端24位十六进制ID再进入Actor。
+	if recorder.Code != http.StatusOK || len(controller.actor.RequestID) != 24 || controller.actor.RequestID == strings.Repeat("x", 129) {
+		t.Fatalf("status=%d requestID=%q", recorder.Code, controller.actor.RequestID)
+	}
+
+	// >>> 数据演变示例
+	// 1. JSON对象后追加{} -> 400 invalid_request。
+	// 2. 129字符Request-ID -> 服务端随机ID -> 审计字段安全。
+}
+
+// TestPluginFeatureRouteReturnsMetadata 验证功能元数据 API 返回默认触发词与权限。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行 Argon2id 哈希并创建内存 HTTP 请求。
+func TestPluginFeatureRouteReturnsMetadata(t *testing.T) {
+	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
+	controller := &fakePlugins{features: []management.FeatureState{{PluginName: "ping", Key: "ping", DisplayName: "Ping", Available: true, DefaultCommands: []string{"ping"}, DefaultPermissions: json.RawMessage(`{"member":true}`)}}}
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller)
+	// [决策理由] 功能路由测试需要完整服务依赖。
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	token, err := server.sign("100")
+	// [决策理由] 功能元数据仅允许已登录管理员读取。
+	if err != nil {
+		t.Fatalf("sign() error = %v", err)
+	}
+	response := requestAPI(server, token, http.MethodGet, "/api/plugins/ping/features", "", "req-features")
+	// [决策理由] 路由必须传递插件名并返回结构化默认值。
+	if response.Code != http.StatusOK || controller.name != "ping" || !strings.Contains(response.Body.String(), `"default_commands":["ping"]`) || !strings.Contains(response.Body.String(), `"default_permissions":{"member":true}`) {
+		t.Fatalf("status=%d name=%s body=%s", response.Code, controller.name, response.Body.String())
+	}
+
+	// >>> 数据演变示例
+	// 1. GET ping/features -> [ping默认命令和权限] -> 200。
+	// 2. 控制器收到pluginName=ping -> 精确查询对应功能。
+}
+
+// requestLogin 使用固定测试远端地址执行登录请求。
+// @param server：测试服务；qq：登录QQ；password：登录密码。
+// @returns 已完成的登录响应记录器。
+// ⚠️副作用说明：执行内存 HTTP 请求并可能运行 Argon2id。
+func requestLogin(server *Server, qq string, password string) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(map[string]string{"qq": qq, "password": password})
+	request := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(string(body)))
+	request.RemoteAddr = "192.0.2.1:12345"
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+
+	// >>> 数据演变示例
+	// 1. QQ100+正确密码 -> 200记录器。
+	// 2. QQ100+错误密码 -> 401或限流429记录器。
+	return recorder
 }
 
 // requestAPI 执行携带管理员 Token 的通用内存 API 请求。

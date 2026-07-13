@@ -26,6 +26,10 @@ async function logout(): Promise<void> {
         <span class="brand-mark">W</span>
         <span>w1ndys-bot-webui</span>
       </RouterLink>
+      <nav v-if="sessionToken" class="main-nav">
+        <RouterLink to="/plugins">插件</RouterLink>
+        <RouterLink to="/commands">功能触发词</RouterLink>
+      </nav>
       <button v-if="sessionToken" class="ghost-button" type="button" @click="logout">退出登录</button>
     </header>
     <main class="page-container">

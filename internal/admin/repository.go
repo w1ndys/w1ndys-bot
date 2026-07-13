@@ -15,6 +15,7 @@ import (
 type Repository interface {
 	ListPlugins(context.Context) ([]PluginState, error)
 	UpdatePlugin(context.Context, Actor, string, PluginPatch) (PluginState, error)
+	ListPluginFeatures(context.Context, string) ([]FeatureState, error)
 	ListCommands(context.Context) ([]CommandState, error)
 	CreateCommand(context.Context, Actor, CommandCreate, string) (CommandState, error)
 	RenameCommand(context.Context, Actor, int64, string, string) (CommandState, error)

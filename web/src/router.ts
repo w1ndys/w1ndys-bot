@@ -3,6 +3,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { sessionToken } from './session'
 import LoginView from './views/LoginView.vue'
 import PluginsView from './views/PluginsView.vue'
+import CommandsView from './views/CommandsView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -10,6 +11,7 @@ const router = createRouter({
     { path: '/login', name: 'login', component: LoginView },
     { path: '/', redirect: '/plugins' },
     { path: '/plugins', name: 'plugins', component: PluginsView, meta: { requiresAuth: true } },
+    { path: '/commands', name: 'commands', component: CommandsView, meta: { requiresAuth: true } },
   ],
 })
 
