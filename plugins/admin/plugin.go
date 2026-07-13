@@ -35,16 +35,20 @@ func (p *implementation) Name() string {
 
 // Handle 执行最高管理员的插件查询和紧急启停命令。
 // @param ctx：包含功能键的上下文；event：OneBot消息事件。
-// @returns 参数、管理服务或回复错误。
+// @returns 非目标事件返回 nil；目标消息返回参数、管理服务或回复错误。
 // ⚠️副作用说明：可能修改插件状态、刷新运行时并引用回复 QQ 消息。
 func (p *implementation) Handle(ctx context.Context, event ws.Event) error {
+	feature := plugin.FeatureFromContext(ctx)
+	// [决策理由] 广播事件没有 admin 功能键，不属于本插件处理范围，应安静忽略。
+	if feature != featureList && feature != featureEnable && feature != featureDisable {
+		return nil
+	}
 	message, ok := event.(*ws.MessageEvent)
-	// [决策理由] 管理功能只接受具有明确操作者 QQ 号的消息事件。
+	// [决策理由] 即使上层错误地把非消息事件定向到 admin，也应忽略而非污染事件错误日志。
 	if !ok {
-		return fmt.Errorf("admin收到非消息事件 %T", event)
+		return nil
 	}
 	actor := management.Actor{ID: strconv.FormatInt(message.UserID, 10), Role: "super_admin", Channel: management.ChannelQQ, RequestID: strconv.FormatInt(message.MessageID, 10)}
-	feature := plugin.FeatureFromContext(ctx)
 	var response string
 	var err error
 	switch feature {

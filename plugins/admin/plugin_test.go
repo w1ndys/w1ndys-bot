@@ -274,3 +274,20 @@ func TestHandleListPlugins(t *testing.T) {
 	// 1. ping:true -> /插件列表 -> 显示启用。
 	// 2. message_id=9 -> 引用回复列表。
 }
+
+// TestHandleIgnoresHeartbeatEvent 验证广播元事件不会被 admin 当作处理错误。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：构造内存插件并可能终止当前测试。
+func TestHandleIgnoresHeartbeatEvent(t *testing.T) {
+	current := &implementation{}
+	err := current.Handle(context.Background(), &ws.HeartbeatEvent{})
+	// [决策理由] 心跳没有 admin 功能键且不属于消息命令，必须安静忽略。
+	if err != nil {
+		t.Fatalf("Handle(HeartbeatEvent) error = %v", err)
+	}
+
+	// >>> 数据演变示例
+	// 1. HeartbeatEvent+空feature -> 非目标事件 -> nil。
+	// 2. NoticeEvent+空feature -> 同样忽略 -> 不产生error日志。
+}
