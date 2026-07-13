@@ -1,4 +1,4 @@
-// 📌 影响范围：读取 DB_HOST、DB_PORT、DB_USER、DB_NAME、DB_PASSWORD、DB_SSLMODE、NAPCAT_TOKEN、WS_PORT、JWT_SECRET、SUPER_ADMIN_QQ、LOG_LEVEL、LOG_FORMAT 及对应 CLI 参数。
+// 📌 影响范围：读取 DB_HOST、DB_PORT、DB_USER、DB_NAME、DB_PASSWORD、DB_SSLMODE、NAPCAT_TOKEN、WS_PORT、JWT_SECRET、SUPER_ADMIN_QQ、WEBUI_PASSWORD、LOG_LEVEL、LOG_FORMAT 及对应 CLI 参数。
 package config
 
 import (
@@ -12,13 +12,14 @@ import (
 
 // Config 表示基础设施配置。
 type Config struct {
-	Database     Database
-	NapCatToken  string
-	WSPort       int
-	JWTSecret    string
-	SuperAdminQQ string
-	LogLevel     string
-	LogFormat    string
+	Database      Database
+	NapCatToken   string
+	WSPort        int
+	JWTSecret     string
+	SuperAdminQQ  string
+	WebUIPassword string
+	LogLevel      string
+	LogFormat     string
 }
 
 // Database 表示 PostgreSQL 连接配置。
@@ -59,12 +60,13 @@ func Load() (Config, error) {
 			Password: v.GetString("DB_PASSWORD"),
 			SSLMode:  v.GetString("DB_SSLMODE"),
 		},
-		NapCatToken:  v.GetString("NAPCAT_TOKEN"),
-		WSPort:       v.GetInt("WS_PORT"),
-		JWTSecret:    v.GetString("JWT_SECRET"),
-		SuperAdminQQ: v.GetString("SUPER_ADMIN_QQ"),
-		LogLevel:     v.GetString("LOG_LEVEL"),
-		LogFormat:    v.GetString("LOG_FORMAT"),
+		NapCatToken:   v.GetString("NAPCAT_TOKEN"),
+		WSPort:        v.GetInt("WS_PORT"),
+		JWTSecret:     v.GetString("JWT_SECRET"),
+		SuperAdminQQ:  v.GetString("SUPER_ADMIN_QQ"),
+		WebUIPassword: v.GetString("WEBUI_PASSWORD"),
+		LogLevel:      v.GetString("LOG_LEVEL"),
+		LogFormat:     v.GetString("LOG_FORMAT"),
 	}
 	// [决策理由] 密码缺失时数据库必然无法鉴权，提前返回可提供更明确的诊断。
 	if cfg.Database.Password == "" {
@@ -92,6 +94,7 @@ func defineFlags(flags *pflag.FlagSet) {
 	flags.Int("ws-port", 0, "反向 WebSocket 监听端口")
 	flags.String("jwt-secret", "", "WebUI JWT 密钥")
 	flags.String("super-admin-qq", "", "首次引导的最高管理员 QQ 号")
+	flags.String("webui-password", "", "WebUI 共享管理员密码")
 	flags.String("log-level", "", "日志级别")
 	flags.String("log-format", "", "日志格式")
 
@@ -110,7 +113,8 @@ func bindFlags(v *viper.Viper, flags *pflag.FlagSet) {
 		"DB_NAME": "db-name", "DB_PASSWORD": "db-password", "NAPCAT_TOKEN": "napcat-token",
 		"DB_SSLMODE": "db-sslmode",
 		"WS_PORT":    "ws-port", "JWT_SECRET": "jwt-secret", "LOG_LEVEL": "log-level",
-		"SUPER_ADMIN_QQ": "super-admin-qq", "LOG_FORMAT": "log-format",
+		"SUPER_ADMIN_QQ": "super-admin-qq", "WEBUI_PASSWORD": "webui-password",
+		"LOG_FORMAT": "log-format",
 	}
 	for key, name := range bindings {
 		flag := flags.Lookup(name)

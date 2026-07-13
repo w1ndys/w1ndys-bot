@@ -72,7 +72,7 @@ task migrate-up         # 应用待执行迁移
 task migrate-down       # 回滚最近一个版本
 ```
 
-敏感值仅写入未跟踪的 `.env`。首次部署应设置 `SUPER_ADMIN_QQ=你的QQ号`：启动时仅在数据库不存在该账号时写入 `system_admins`，以后以数据库启停状态为准，环境变量不会覆盖已有记录。Compose 内数据库名统一为 `w1ndys_bot`；删除容器不会删除具名卷，若需清空数据库必须明确移除卷。
+敏感值仅写入未跟踪的 `.env`。首次部署应设置 `SUPER_ADMIN_QQ=你的QQ号` 和至少 12 字符的 `WEBUI_PASSWORD`。WebUI 登录同时校验启用管理员 QQ 与共享环境密码；密码不入库、不支持页面修改，轮换后需重启容器。Compose 内数据库名统一为 `w1ndys_bot`；删除容器不会删除具名卷，若需清空数据库必须明确移除卷。
 
 ## 6. 已完成能力
 
