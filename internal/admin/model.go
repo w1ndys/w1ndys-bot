@@ -16,6 +16,8 @@ var ErrCommandNotFound = errors.New("命令不存在")
 var ErrCommandConflict = errors.New("命令在作用域内重复")
 var ErrInvalidCommand = errors.New("命令参数无效")
 var ErrPermissionNotFound = errors.New("权限策略不存在")
+var ErrInvalidPermission = errors.New("权限策略参数无效")
+var ErrFeatureNotFound = errors.New("插件功能不存在")
 
 type Channel = management.Channel
 type Actor = management.Actor

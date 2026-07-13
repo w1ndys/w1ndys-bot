@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // ListPermissions 查询全部权限覆盖策略。
@@ -66,6 +67,16 @@ func (r *PostgresRepository) SetPermission(ctx context.Context, actor Actor, inp
 	}
 	// [决策理由] 数据库约束或外键失败时不得写入成功审计。
 	if err != nil {
+		var databaseError *pgconn.PgError
+		// [决策理由] 插件或功能外键错误应转换为稳定领域错误供 WebUI 精确提示。
+		if errors.As(err, &databaseError) {
+			switch databaseError.ConstraintName {
+			case "fk_permission_plugin":
+				return PermissionState{}, ErrPluginNotFound
+			case "fk_permission_feature":
+				return PermissionState{}, ErrFeatureNotFound
+			}
+		}
 		return PermissionState{}, fmt.Errorf("保存权限策略: %w", err)
 	}
 	var beforeValue any

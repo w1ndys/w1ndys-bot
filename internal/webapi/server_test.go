@@ -19,18 +19,61 @@ type fakeAdmins struct {
 }
 
 type fakePlugins struct {
-	states       []management.PluginState
-	updated      management.PluginState
-	actor        management.Actor
-	name         string
-	enabled      *bool
-	priority     *int
-	err          error
-	commands     []management.CommandState
-	command      management.CommandState
-	commandInput management.CommandCreate
-	commandID    int64
-	commandName  string
+	states          []management.PluginState
+	updated         management.PluginState
+	actor           management.Actor
+	name            string
+	enabled         *bool
+	priority        *int
+	err             error
+	commands        []management.CommandState
+	command         management.CommandState
+	commandInput    management.CommandCreate
+	commandID       int64
+	commandName     string
+	permissions     []management.PermissionState
+	permission      management.PermissionState
+	permissionInput management.PermissionSet
+	permissionID    int64
+}
+
+// ListPermissions 返回测试权限列表并记录 Actor。
+// @param ctx：未使用的请求上下文；actor：WebUI 操作者。
+// @returns 预设权限列表或错误。
+// ⚠️副作用说明：记录最近一次 Actor。
+func (f *fakePlugins) ListPermissions(_ context.Context, actor management.Actor) ([]management.PermissionState, error) {
+	f.actor = actor
+
+	// >>> 数据演变示例
+	// 1. permissions=[user200 allow]+actor100 -> 记录actor -> 返回列表。
+	// 2. err=boom -> 返回预设错误。
+	return f.permissions, f.err
+}
+
+// SetPermission 记录权限新增或更新操作。
+// @param ctx：未使用的上下文；actor：操作者；input：权限唯一维度与效果。
+// @returns 预设权限状态或错误。
+// ⚠️副作用说明：记录 Actor 和权限输入。
+func (f *fakePlugins) SetPermission(_ context.Context, actor management.Actor, input management.PermissionSet) (management.PermissionState, error) {
+	f.actor, f.permissionInput = actor, input
+
+	// >>> 数据演变示例
+	// 1. group123+user200+allow -> 记录 -> permission,nil。
+	// 2. user=abc+ErrInvalidPermission -> 记录 -> error。
+	return f.permission, f.err
+}
+
+// DeletePermission 记录权限删除操作。
+// @param ctx：未使用的上下文；actor：操作者；id：权限ID。
+// @returns 预设错误。
+// ⚠️副作用说明：记录 Actor 和权限ID。
+func (f *fakePlugins) DeletePermission(_ context.Context, actor management.Actor, id int64) error {
+	f.actor, f.permissionID = actor, id
+
+	// >>> 数据演变示例
+	// 1. id8 -> 记录 -> nil。
+	// 2. id404 -> 记录 -> ErrPermissionNotFound。
+	return f.err
 }
 
 // ListCommands 返回测试命令列表并记录 Actor。
@@ -443,6 +486,81 @@ func TestCommandRoutesMapValidationAndConflict(t *testing.T) {
 	// >>> 数据演变示例
 	// 1. DELETE abc -> ID解析失败 -> 400零调用。
 	// 2. POST重复命令 -> ErrCommandConflict -> 409 command_conflict。
+}
+
+// TestPermissionRoutesListSetAndDelete 验证权限 REST 接口的列表、幂等保存与删除链路。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行 Argon2id 哈希并创建内存 HTTP 请求。
+func TestPermissionRoutesListSetAndDelete(t *testing.T) {
+	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
+	controller := &fakePlugins{permission: management.PermissionState{ID: 8, ScopeType: "group", ScopeID: "123", PluginName: "ping", SubjectType: "user", SubjectID: "200", Effect: "allow"}}
+	controller.permissions = []management.PermissionState{controller.permission}
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller)
+	// [决策理由] 完整管理控制器必须成功构造权限 API 服务。
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	token, err := server.sign("100")
+	// [决策理由] 权限接口均要求有效管理员 Token。
+	if err != nil {
+		t.Fatalf("sign() error = %v", err)
+	}
+	list := requestAPI(server, token, http.MethodGet, "/api/permissions", "", "req-list-permission")
+	// [决策理由] 列表必须返回主体类型、QQ 和效果字段。
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"subject_type":"user"`) || !strings.Contains(list.Body.String(), `"subject_id":"200"`) {
+		t.Fatalf("list status=%d body=%s", list.Code, list.Body.String())
+	}
+	set := requestAPI(server, token, http.MethodPost, "/api/permissions", `{"scope_type":"group","scope_id":"123","plugin_name":"ping","feature_key":"","subject_type":"user","subject_id":"200","effect":"allow"}`, "req-set-permission")
+	// [决策理由] 插件级空功能键、用户主体和审计请求ID必须完整传入服务。
+	if set.Code != http.StatusOK || controller.permissionInput.FeatureKey != "" || controller.permissionInput.SubjectID != "200" || controller.actor.RequestID != "req-set-permission" {
+		t.Fatalf("set status=%d input=%+v actor=%+v", set.Code, controller.permissionInput, controller.actor)
+	}
+	deleted := requestAPI(server, token, http.MethodDelete, "/api/permissions/8", "", "req-delete-permission")
+	// [决策理由] 删除应传递正整数ID并返回统一空数据成功响应。
+	if deleted.Code != http.StatusOK || controller.permissionID != 8 || !strings.Contains(deleted.Body.String(), `"data":null`) {
+		t.Fatalf("delete status=%d id=%d body=%s", deleted.Code, controller.permissionID, deleted.Body.String())
+	}
+
+	// >>> 数据演变示例
+	// 1. POST群级插件用户权限 -> UPSERT+审计Actor -> 200权限DTO。
+	// 2. DELETE id8 -> 删除+热刷新 -> 200 data:null。
+}
+
+// TestPermissionRoutesMapInvalidAndNotFound 验证权限校验与未找到错误映射。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行 Argon2id 哈希并创建内存 HTTP 请求。
+func TestPermissionRoutesMapInvalidAndNotFound(t *testing.T) {
+	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
+	controller := &fakePlugins{err: admin.ErrInvalidPermission}
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller)
+	// [决策理由] 错误映射测试需要完整服务依赖。
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	token, err := server.sign("100")
+	// [决策理由] 需要通过认证后才能到达领域错误映射。
+	if err != nil {
+		t.Fatalf("sign() error = %v", err)
+	}
+	invalid := requestAPI(server, token, http.MethodPost, "/api/permissions", `{"scope_type":"group","scope_id":"123","plugin_name":"ping","feature_key":"","subject_type":"user","subject_id":"abc","effect":"allow"}`, "")
+	// [决策理由] 无效主体应返回400稳定业务码。
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `"code":"invalid_permission"`) {
+		t.Fatalf("invalid status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+	controller.err = admin.ErrPermissionNotFound
+	notFound := requestAPI(server, token, http.MethodDelete, "/api/permissions/404", "", "")
+	// [决策理由] 不存在的权限策略应映射为404。
+	if notFound.Code != http.StatusNotFound || !strings.Contains(notFound.Body.String(), `"code":"permission_not_found"`) {
+		t.Fatalf("not found status=%d body=%s", notFound.Code, notFound.Body.String())
+	}
+
+	// >>> 数据演变示例
+	// 1. user=abc -> ErrInvalidPermission -> 400 invalid_permission。
+	// 2. DELETE id404 -> ErrPermissionNotFound -> 404 permission_not_found。
 }
 
 // requestAPI 执行携带管理员 Token 的通用内存 API 请求。

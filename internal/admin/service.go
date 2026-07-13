@@ -235,7 +235,7 @@ func (s *Service) SetPermission(ctx context.Context, actor Actor, input Permissi
 	}
 	// [决策理由] 作用域规则必须在进入数据库前统一验证。
 	if err := validatePermission(input); err != nil {
-		return PermissionState{}, err
+		return PermissionState{}, fmt.Errorf("%w: %v", ErrInvalidPermission, err)
 	}
 	saved, err := s.repository.SetPermission(ctx, actor, input)
 	// [决策理由] 事务失败时不应刷新运行时快照。

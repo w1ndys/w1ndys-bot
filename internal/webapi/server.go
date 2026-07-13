@@ -38,7 +38,7 @@ type AdminResolver interface {
 	Resolve(string) (admin.SystemAdmin, bool)
 }
 
-// ManagementController 定义 WebUI 当前开放的插件与命令管理能力。
+// ManagementController 定义 WebUI 当前开放的插件、触发词与权限管理能力。
 type ManagementController interface {
 	ListPlugins(context.Context, management.Actor) ([]management.PluginState, error)
 	SetPluginEnabled(context.Context, management.Actor, string, bool) (management.PluginState, error)
@@ -47,6 +47,9 @@ type ManagementController interface {
 	CreateCommand(context.Context, management.Actor, management.CommandCreate) (management.CommandState, error)
 	RenameCommand(context.Context, management.Actor, int64, string) (management.CommandState, error)
 	DeleteCommand(context.Context, management.Actor, int64) error
+	ListPermissions(context.Context, management.Actor) ([]management.PermissionState, error)
+	SetPermission(context.Context, management.Actor, management.PermissionSet) (management.PermissionState, error)
+	DeletePermission(context.Context, management.Actor, int64) error
 }
 
 // Server 提供 WebUI 认证 HTTP 接口。
@@ -114,6 +117,27 @@ type commandResponse struct {
 	Enabled           bool   `json:"enabled"`
 }
 
+type permissionSetRequest struct {
+	ScopeType   string `json:"scope_type"`
+	ScopeID     string `json:"scope_id"`
+	PluginName  string `json:"plugin_name"`
+	FeatureKey  string `json:"feature_key"`
+	SubjectType string `json:"subject_type"`
+	SubjectID   string `json:"subject_id"`
+	Effect      string `json:"effect"`
+}
+
+type permissionResponse struct {
+	ID          int64  `json:"id"`
+	ScopeType   string `json:"scope_type"`
+	ScopeID     string `json:"scope_id"`
+	PluginName  string `json:"plugin_name"`
+	FeatureKey  string `json:"feature_key"`
+	SubjectType string `json:"subject_type"`
+	SubjectID   string `json:"subject_id"`
+	Effect      string `json:"effect"`
+}
+
 // New 创建 WebUI API 服务并在内存中准备环境密码哈希。
 // @param password：环境变量中的共享密码；jwtSecret：JWT 签名密钥；admins：管理员快照解析器；controller：管理业务服务。
 // @returns 可注册到 HTTP 路由的 Server，或配置强度错误。
@@ -158,6 +182,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/commands", s.authenticate(http.HandlerFunc(s.createCommand)))
 	mux.Handle("PATCH /api/commands/{command_id}", s.authenticate(http.HandlerFunc(s.renameCommand)))
 	mux.Handle("DELETE /api/commands/{command_id}", s.authenticate(http.HandlerFunc(s.deleteCommand)))
+	mux.Handle("GET /api/permissions", s.authenticate(http.HandlerFunc(s.listPermissions)))
+	mux.Handle("POST /api/permissions", s.authenticate(http.HandlerFunc(s.setPermission)))
+	mux.Handle("DELETE /api/permissions/{permission_id}", s.authenticate(http.HandlerFunc(s.deletePermission)))
 	handler := s.middleware(mux)
 
 	// >>> 数据演变示例
@@ -422,6 +449,93 @@ func parsePositiveID(value string) (int64, error) {
 	return id, nil
 }
 
+// listPermissions 返回全部显式权限覆盖策略。
+// @param writer：响应写入器；request：已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：读取 PostgreSQL 权限策略并写入 JSON 响应。
+func (s *Server) listPermissions(writer http.ResponseWriter, request *http.Request) {
+	actor := actorFromRequest(request)
+	states, err := s.management.ListPermissions(request.Context(), actor)
+	// [决策理由] 权限列表必须完整返回，查询失败时不能展示部分策略。
+	if err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	result := make([]permissionResponse, 0, len(states))
+	for _, state := range states {
+		result = append(result, permissionView(state))
+	}
+	writeSuccess(writer, result)
+
+	// >>> 数据演变示例
+	// 1. Service[群用户allow,全局角色deny] -> DTO数组 -> 200。
+	// 2. Repository失败 -> 500统一错误且不泄露部分数据。
+}
+
+// setPermission 新增权限策略或更新同一唯一维度的效果。
+// @param writer：响应写入器；request：已鉴权 JSON 请求。
+// @returns 无。
+// ⚠️副作用说明：可能新增或更新权限、写入审计并热刷新 Permission Resolver。
+func (s *Server) setPermission(writer http.ResponseWriter, request *http.Request) {
+	actor := actorFromRequest(request)
+	var input permissionSetRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
+	decoder.DisallowUnknownFields()
+	// [决策理由] 权限维度必须来源于结构明确且尺寸受限的 JSON 请求。
+	if err := decoder.Decode(&input); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "权限策略参数格式无效")
+		return
+	}
+	state, err := s.management.SetPermission(request.Context(), actor, management.PermissionSet{ScopeType: input.ScopeType, ScopeID: input.ScopeID, PluginName: input.PluginName, FeatureKey: input.FeatureKey, SubjectType: input.SubjectType, SubjectID: input.SubjectID, Effect: input.Effect})
+	// [决策理由] 字段、目标或持久化错误必须映射为稳定业务响应。
+	if err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	writeSuccess(writer, permissionView(state))
+
+	// >>> 数据演变示例
+	// 1. group123+ping插件+user200+allow -> UPSERT+审计+热刷新 -> 200。
+	// 2. subject_type=user+subject_id=abc -> invalid_permission -> 400。
+}
+
+// deletePermission 删除显式权限策略并恢复后续回退链。
+// @param writer：响应写入器；request：携带权限 ID 的已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：可能删除权限、写入审计并热刷新 Permission Resolver。
+func (s *Server) deletePermission(writer http.ResponseWriter, request *http.Request) {
+	actor := actorFromRequest(request)
+	id, err := parsePositiveID(request.PathValue("permission_id"))
+	// [决策理由] 非正整数 ID 无法定位权限主键，应在事务前拒绝。
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "权限策略 ID 格式无效")
+		return
+	}
+	// [决策理由] 删除失败时不能返回虚假成功，否则前端会误判权限已回退。
+	if err := s.management.DeletePermission(request.Context(), actor, id); err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	writeSuccess(writer, nil)
+
+	// >>> 数据演变示例
+	// 1. id=8存在 -> DELETE+审计+Resolver.Load -> 200 data:null。
+	// 2. id=404不存在 -> permission_not_found -> 404。
+}
+
+// permissionView 将内部权限状态转换成稳定 API 模型。
+// @param state：管理服务权限状态。
+// @returns snake_case 权限响应。
+// ⚠️副作用说明：无。
+func permissionView(state management.PermissionState) permissionResponse {
+	view := permissionResponse{ID: state.ID, ScopeType: state.ScopeType, ScopeID: state.ScopeID, PluginName: state.PluginName, FeatureKey: state.FeatureKey, SubjectType: state.SubjectType, SubjectID: state.SubjectID, Effect: state.Effect}
+
+	// >>> 数据演变示例
+	// 1. user200+allow -> DTO保留主体与效果字段。
+	// 2. FeatureKey空 -> DTO空字符串，表示插件全部功能。
+	return view
+}
+
 // actorFromRequest 将认证身份与请求 ID 转换成管理服务 Actor。
 // @param request：已通过 authenticate 和 middleware 的请求。
 // @returns 认证中间件注入的 WebUI 最高管理员 Actor。
@@ -481,6 +595,21 @@ func writeManagementError(writer http.ResponseWriter, err error) {
 	// [决策理由] 同作用域标准化命令重复是资源冲突，不是服务器异常。
 	if errors.Is(err, admin.ErrCommandConflict) {
 		writeError(writer, http.StatusConflict, "command_conflict", "命令在当前作用域内重复")
+		return
+	}
+	// [决策理由] 权限维度或主体格式错误属于客户端输入问题。
+	if errors.Is(err, admin.ErrInvalidPermission) {
+		writeError(writer, http.StatusBadRequest, "invalid_permission", "权限策略参数无效")
+		return
+	}
+	// [决策理由] 不存在的权限 ID 应提示前端刷新策略列表。
+	if errors.Is(err, admin.ErrPermissionNotFound) {
+		writeError(writer, http.StatusNotFound, "permission_not_found", "权限策略不存在")
+		return
+	}
+	// [决策理由] 功能外键不存在表示页面提交了陈旧 Manifest 目标。
+	if errors.Is(err, admin.ErrFeatureNotFound) {
+		writeError(writer, http.StatusNotFound, "feature_not_found", "插件功能不存在")
 		return
 	}
 	// [决策理由] 授权失败不得被误报成服务器故障。
