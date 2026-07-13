@@ -25,10 +25,14 @@ type Actor struct {
 
 // PluginState 是管理端使用的插件运行配置快照。
 type PluginState struct {
-	Name       string
-	Enabled    bool
-	Priority   int
-	ConfigJSON []byte
+	Name        string
+	DisplayName string
+	Description string
+	Version     string
+	Available   bool
+	Enabled     bool
+	Priority    int
+	ConfigJSON  json.RawMessage
 }
 
 // CommandState 表示一条可管理的插件功能命令。

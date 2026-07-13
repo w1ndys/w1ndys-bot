@@ -17,6 +17,7 @@ import (
 
 	"github.com/w1ndys/w1ndys-bot/internal/admin"
 	projectauth "github.com/w1ndys/w1ndys-bot/internal/auth"
+	"github.com/w1ndys/w1ndys-bot/internal/management"
 	projectlogger "github.com/w1ndys/w1ndys-bot/pkg/logger"
 )
 
@@ -28,10 +29,18 @@ const ApplicationName = "w1ndys-bot-webui"
 type contextKey string
 
 const actorContextKey contextKey = "webui_actor"
+const requestIDContextKey contextKey = "request_id"
 
 // AdminResolver 定义 WebUI 登录及请求期间所需的管理员快照能力。
 type AdminResolver interface {
 	Resolve(string) (admin.SystemAdmin, bool)
+}
+
+// PluginController 定义 WebUI 插件管理所需的业务能力。
+type PluginController interface {
+	ListPlugins(context.Context, management.Actor) ([]management.PluginState, error)
+	SetPluginEnabled(context.Context, management.Actor, string, bool) (management.PluginState, error)
+	SetPluginPriority(context.Context, management.Actor, string, int) (management.PluginState, error)
 }
 
 // Server 提供 WebUI 认证 HTTP 接口。
@@ -39,6 +48,7 @@ type Server struct {
 	passwordHash string
 	jwtSecret    []byte
 	admins       AdminResolver
+	plugins      PluginController
 	now          func() time.Time
 }
 
@@ -54,20 +64,32 @@ type tokenClaims struct {
 }
 
 type responseEnvelope struct {
-	Data  any       `json:"data,omitempty"`
-	Error *apiError `json:"error,omitempty"`
-}
-
-type apiError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	Data    any    `json:"data"`
+}
+
+type pluginPatchRequest struct {
+	Enabled  *bool `json:"enabled"`
+	Priority *int  `json:"priority"`
+}
+
+type pluginResponse struct {
+	Name        string          `json:"name"`
+	DisplayName string          `json:"display_name"`
+	Description string          `json:"description"`
+	Version     string          `json:"version"`
+	Available   bool            `json:"available"`
+	Enabled     bool            `json:"enabled"`
+	Priority    int             `json:"priority"`
+	Config      json.RawMessage `json:"config"`
 }
 
 // New 创建 WebUI API 服务并在内存中准备环境密码哈希。
-// @param password：环境变量中的共享密码；jwtSecret：JWT 签名密钥；admins：管理员快照解析器。
+// @param password：环境变量中的共享密码；jwtSecret：JWT 签名密钥；admins：管理员快照解析器；plugins：插件管理服务。
 // @returns 可注册到 HTTP 路由的 Server，或配置强度错误。
 // ⚠️副作用说明：读取系统加密随机源并执行 Argon2id 哈希。
-func New(password string, jwtSecret string, admins AdminResolver) (*Server, error) {
+func New(password string, jwtSecret string, admins AdminResolver, plugins PluginController) (*Server, error) {
 	// [决策理由] JWT 密钥过短会降低离线伪造成本，必须在监听端口前拒绝启动。
 	if len([]byte(jwtSecret)) < 32 {
 		return nil, errors.New("JWT_SECRET 不能少于32字节")
@@ -76,12 +98,16 @@ func New(password string, jwtSecret string, admins AdminResolver) (*Server, erro
 	if admins == nil {
 		return nil, errors.New("管理员解析器不能为空")
 	}
+	// [决策理由] 插件控制器缺失时管理路由会在鉴权后崩溃，必须在组装阶段拒绝。
+	if plugins == nil {
+		return nil, errors.New("插件管理服务不能为空")
+	}
 	passwordHash, err := projectauth.HashPassword(password)
 	// [决策理由] 环境密码不符合强度要求或随机源失败时禁止开放登录接口。
 	if err != nil {
 		return nil, fmt.Errorf("准备 WebUI 密码: %w", err)
 	}
-	server := &Server{passwordHash: passwordHash, jwtSecret: []byte(jwtSecret), admins: admins, now: time.Now}
+	server := &Server{passwordHash: passwordHash, jwtSecret: []byte(jwtSecret), admins: admins, plugins: plugins, now: time.Now}
 
 	// >>> 数据演变示例
 	// 1. 强密码+32字节密钥+Resolver -> Argon2id哈希 -> Server,nil。
@@ -97,6 +123,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/auth/login", s.login)
 	mux.Handle("GET /api/auth/me", s.authenticate(http.HandlerFunc(s.me)))
+	mux.Handle("GET /api/plugins", s.authenticate(http.HandlerFunc(s.listPlugins)))
+	mux.Handle("PATCH /api/plugins/{plugin_name}", s.authenticate(http.HandlerFunc(s.patchPlugin)))
 	handler := s.middleware(mux)
 
 	// >>> 数据演变示例
@@ -131,7 +159,7 @@ func (s *Server) login(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusInternalServerError, "internal_error", "签发登录凭证失败")
 		return
 	}
-	writeJSON(writer, http.StatusOK, responseEnvelope{Data: map[string]any{"token": token, "expires_in": int64(tokenLifetime.Seconds()), "admin": account}})
+	writeSuccess(writer, map[string]any{"token": token, "expires_in": int64(tokenLifetime.Seconds()), "admin": account})
 
 	// >>> 数据演变示例
 	// 1. 启用管理员+正确密码 -> JWT -> 200及管理员信息。
@@ -149,11 +177,153 @@ func (s *Server) me(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusUnauthorized, "unauthorized", "登录凭证无效")
 		return
 	}
-	writeJSON(writer, http.StatusOK, responseEnvelope{Data: actor})
+	writeSuccess(writer, actor)
 
 	// >>> 数据演变示例
 	// 1. context含管理员100 -> 200 data{user_id:100}。
 	// 2. context无身份 -> 401 unauthorized。
+}
+
+// listPlugins 返回当前二进制插件元数据和运行配置。
+// @param writer：响应写入器；request：已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：读取 PostgreSQL 插件配置并写入 JSON 响应。
+func (s *Server) listPlugins(writer http.ResponseWriter, request *http.Request) {
+	actor, err := actorFromRequest(request)
+	// [决策理由] 管理服务审计和授权都需要可信 Actor，上下文异常时安全失败。
+	if err != nil {
+		writeError(writer, http.StatusUnauthorized, "unauthorized", "登录凭证无效")
+		return
+	}
+	states, err := s.plugins.ListPlugins(request.Context(), actor)
+	// [决策理由] 业务错误必须映射成稳定 API 响应，不能暴露数据库细节。
+	if err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	result := make([]pluginResponse, 0, len(states))
+	for _, state := range states {
+		result = append(result, pluginView(state))
+	}
+	writeSuccess(writer, result)
+
+	// >>> 数据演变示例
+	// 1. Service[ping,admin] -> DTO转换 -> 200插件数组。
+	// 2. Repository失败 -> management error -> 500统一错误。
+}
+
+// patchPlugin 修改一个插件的启用状态或优先级。
+// @param writer：响应写入器；request：携带插件名和单字段 JSON Patch 的已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：可能更新 PostgreSQL、写入审计并热刷新 PluginManager。
+func (s *Server) patchPlugin(writer http.ResponseWriter, request *http.Request) {
+	actor, err := actorFromRequest(request)
+	// [决策理由] 没有可信 Actor 时不得执行任何管理写操作。
+	if err != nil {
+		writeError(writer, http.StatusUnauthorized, "unauthorized", "登录凭证无效")
+		return
+	}
+	name := request.PathValue("plugin_name")
+	var input pluginPatchRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
+	decoder.DisallowUnknownFields()
+	// [决策理由] 插件变更只接受字段明确且尺寸受限的 JSON 对象。
+	if err := decoder.Decode(&input); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "插件修改参数格式无效")
+		return
+	}
+	// [决策理由] 每次仅允许修改一个字段，避免两个独立业务事务产生半成功状态。
+	if (input.Enabled == nil) == (input.Priority == nil) {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "必须且只能修改 enabled 或 priority")
+		return
+	}
+	var state management.PluginState
+	// [决策理由] 非空 enabled 表示显式启停操作，应走受保护插件校验链路。
+	if input.Enabled != nil {
+		state, err = s.plugins.SetPluginEnabled(request.Context(), actor, name, *input.Enabled)
+	} else {
+		// [决策理由] 优先级限制在可读范围，避免极端整数影响排序和前端输入。
+		if *input.Priority < -10000 || *input.Priority > 10000 {
+			writeError(writer, http.StatusBadRequest, "invalid_request", "priority 必须在 -10000 至 10000 之间")
+			return
+		}
+		state, err = s.plugins.SetPluginPriority(request.Context(), actor, name, *input.Priority)
+	}
+	// [决策理由] 更新或刷新失败时按领域错误返回，不能伪造成功状态。
+	if err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	writeSuccess(writer, pluginView(state))
+
+	// >>> 数据演变示例
+	// 1. ping+enabled=true -> 事务审计+Load -> 200 ping启用状态。
+	// 2. enabled与priority同时出现 -> 参数冲突 -> 400且不写数据库。
+}
+
+// actorFromRequest 将认证身份与请求 ID 转换成管理服务 Actor。
+// @param request：已通过 authenticate 和 middleware 的请求。
+// @returns WebUI 最高管理员 Actor 或上下文错误。
+// ⚠️副作用说明：无；仅读取请求上下文。
+func actorFromRequest(request *http.Request) (management.Actor, error) {
+	account, exists := request.Context().Value(actorContextKey).(admin.SystemAdmin)
+	// [决策理由] Actor ID 只能来自 JWT 复核后的管理员身份，不能读取客户端 JSON。
+	if !exists || account.UserID == "" {
+		return management.Actor{}, errors.New("请求缺少管理员身份")
+	}
+	requestID, _ := request.Context().Value(requestIDContextKey).(string)
+	actor := management.Actor{ID: account.UserID, Role: "super_admin", Channel: management.ChannelWebUI, RequestID: requestID}
+
+	// >>> 数据演变示例
+	// 1. admin100+request abc -> Actor{100,webui,abc}。
+	// 2. 无身份上下文 -> 零值,error。
+	return actor, nil
+}
+
+// pluginView 将内部插件状态转换成稳定的 snake_case API 模型。
+// @param state：管理服务插件状态。
+// @returns 不暴露内部字段命名的插件响应。
+// ⚠️副作用说明：复制 JSON 配置字节，避免响应持有共享切片。
+func pluginView(state management.PluginState) pluginResponse {
+	config := append(json.RawMessage(nil), state.ConfigJSON...)
+	// [决策理由] 数据库历史空值不是合法 JSON，API 应稳定返回空对象。
+	if len(config) == 0 {
+		config = json.RawMessage(`{}`)
+	}
+	view := pluginResponse{Name: state.Name, DisplayName: state.DisplayName, Description: state.Description, Version: state.Version, Available: state.Available, Enabled: state.Enabled, Priority: state.Priority, Config: config}
+
+	// >>> 数据演变示例
+	// 1. ping+config{} -> snake_case DTO+独立JSON副本。
+	// 2. config空 -> 默认{} -> 保持合法JSON响应。
+	return view
+}
+
+// writeManagementError 将管理领域错误映射为稳定 HTTP 状态和错误码。
+// @param writer：响应写入器；err：管理服务返回错误。
+// @returns 无。
+// ⚠️副作用说明：写入 JSON 错误响应，并可能记录服务端错误日志。
+func writeManagementError(writer http.ResponseWriter, err error) {
+	// [决策理由] 领域错误使用 errors.Is 穿透服务层上下文包装。
+	if errors.Is(err, admin.ErrPluginNotFound) {
+		writeError(writer, http.StatusNotFound, "plugin_not_found", "插件不存在")
+		return
+	}
+	// [决策理由] 受保护插件冲突属于可预期业务拒绝。
+	if errors.Is(err, admin.ErrProtectedPlugin) {
+		writeError(writer, http.StatusConflict, "protected_plugin", "系统管理插件不可禁用")
+		return
+	}
+	// [决策理由] 授权失败不得被误报成服务器故障。
+	if errors.Is(err, admin.ErrForbidden) || errors.Is(err, admin.ErrInvalidActor) || errors.Is(err, admin.ErrInvalidChannel) {
+		writeError(writer, http.StatusForbidden, "forbidden", "无权执行该管理操作")
+		return
+	}
+	projectlogger.Error("WebAPI管理操作失败", "error", err)
+	writeError(writer, http.StatusInternalServerError, "internal_error", "管理操作执行失败")
+
+	// >>> 数据演变示例
+	// 1. ErrPluginNotFound -> 404 plugin_not_found。
+	// 2. 数据库连接错误 -> 记录内部错误 -> 500通用消息。
 }
 
 // authenticate 验证 Bearer JWT 并再次确认管理员仍处于启用状态。
@@ -300,7 +470,8 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
 		writer.Header().Set("X-Frame-Options", "DENY")
 		writer.Header().Set("Referrer-Policy", "no-referrer")
-		next.ServeHTTP(writer, request)
+		ctx := context.WithValue(request.Context(), requestIDContextKey, requestID)
+		next.ServeHTTP(writer, request.WithContext(ctx))
 		projectlogger.Info("WebAPI请求", "method", request.Method, "path", request.URL.Path, "request_id", requestID, "duration", time.Since(started))
 
 		// >>> 数据演变示例
@@ -327,8 +498,20 @@ func writeJSON(writer http.ResponseWriter, status int, value responseEnvelope) {
 	}
 
 	// >>> 数据演变示例
-	// 1. status=200+data -> application/json -> 200 JSON。
-	// 2. status=401+error -> application/json -> 401 JSON。
+	// 1. status=200+code=ok -> application/json -> 200统一JSON。
+	// 2. status=401+code=unauthorized -> application/json -> 401统一JSON。
+}
+
+// writeSuccess 写入统一成功响应。
+// @param writer：响应写入器；data：业务响应数据。
+// @returns 无。
+// ⚠️副作用说明：写入状态码200和 JSON HTTP 响应。
+func writeSuccess(writer http.ResponseWriter, data any) {
+	writeJSON(writer, http.StatusOK, responseEnvelope{Code: "ok", Message: "操作成功", Data: data})
+
+	// >>> 数据演变示例
+	// 1. plugin DTO -> code=ok,message=操作成功,data=plugin。
+	// 2. 空列表 -> code=ok,message=操作成功,data=[]。
 }
 
 // writeError 写入统一 API 错误结构。
@@ -336,9 +519,9 @@ func writeJSON(writer http.ResponseWriter, status int, value responseEnvelope) {
 // @returns 无。
 // ⚠️副作用说明：写入 JSON HTTP 响应。
 func writeError(writer http.ResponseWriter, status int, code string, message string) {
-	writeJSON(writer, status, responseEnvelope{Error: &apiError{Code: code, Message: message}})
+	writeJSON(writer, status, responseEnvelope{Code: code, Message: message, Data: nil})
 
 	// >>> 数据演变示例
-	// 1. 401+unauthorized -> error对象 -> JSON响应。
-	// 2. 400+invalid_request -> error对象 -> JSON响应。
+	// 1. 401+unauthorized -> code/message/data:null -> JSON响应。
+	// 2. 400+invalid_request -> code/message/data:null -> JSON响应。
 }

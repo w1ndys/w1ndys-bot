@@ -100,7 +100,7 @@ func main() {
 	}
 	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool))
 	adminService := admin.NewService(adminRepository, pluginManager, commands, permissions, settingsResolver, adminResolver)
-	webServer, err := webapi.New(cfg.WebUIPassword, cfg.JWTSecret, adminResolver)
+	webServer, err := webapi.New(cfg.WebUIPassword, cfg.JWTSecret, adminResolver, adminService)
 	// [决策理由] WebUI 认证配置不安全时不得开放包含管理能力的 HTTP 服务。
 	if err != nil {
 		projectlogger.Error("初始化WebAPI失败", "error", err)
