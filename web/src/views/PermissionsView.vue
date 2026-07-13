@@ -1,6 +1,7 @@
 <!-- 📌 影响范围：调用插件、功能与权限 API；修改后端权限策略、审计记录和运行时权限快照。 -->
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   deletePermission,
   listPermissions,
@@ -12,12 +13,14 @@ import {
   type PluginState,
 } from '../api'
 
+const route = useRoute()
+const fixedPluginName = String(route.params.pluginName ?? '')
 const permissions = ref<PermissionState[]>([])
 const plugins = ref<PluginState[]>([])
 const features = ref<FeatureState[]>([])
 const scopeType = ref<'global' | 'group'>('global')
 const scopeID = ref('0')
-const pluginName = ref('')
+const pluginName = ref(fixedPluginName)
 const featureKey = ref('')
 const subjectType = ref<'role' | 'user'>('role')
 const subjectID = ref('group_admin')
@@ -74,7 +77,13 @@ async function loadPage(): Promise<void> {
   errorMessage.value = ''
   try {
     const [permissionStates, pluginStates] = await Promise.all([listPermissions(), listPlugins()])
-    permissions.value = permissionStates
+    permissions.value = []
+    for (const item of permissionStates) {
+      // [决策理由] 插件工作台只能展示当前插件的权限，防止删除其他插件规则。
+      if (fixedPluginName === '' || item.plugin_name === fixedPluginName) {
+        permissions.value.push(item)
+      }
+    }
     plugins.value = []
     for (const item of pluginStates) {
       // [决策理由] 不可用插件不能成为新权限规则的目标。
@@ -327,7 +336,7 @@ onMounted(loadPage)
         </div>
       </div>
       <label v-if="scopeType === 'group'"><span>群号</span><input v-model="scopeID" inputmode="numeric" required /></label>
-      <label><span>插件</span><select v-model="pluginName" required><option value="" disabled>选择插件</option><option v-for="plugin in plugins" :key="plugin.name" :value="plugin.name">{{ plugin.display_name || plugin.name }}</option></select></label>
+      <label v-if="fixedPluginName === ''"><span>插件</span><select v-model="pluginName" required><option value="" disabled>选择插件</option><option v-for="plugin in plugins" :key="plugin.name" :value="plugin.name">{{ plugin.display_name || plugin.name }}</option></select></label>
       <label><span>功能范围</span><select v-model="featureKey" :disabled="featureLoading || featureLoadFailed"><option value="">{{ featureLoading ? '正在加载功能…' : '插件全部功能' }}</option><option v-for="feature in features" :key="feature.key" :value="feature.key">{{ feature.display_name || feature.key }}</option></select></label>
       <div class="scope-control">
         <span>主体类型</span>
@@ -345,7 +354,7 @@ onMounted(loadPage)
 
     <div class="permission-filters">
       <select v-model="filterScope"><option value="">全部作用域</option><option value="global">全局</option><option value="group">群级</option></select>
-      <select v-model="filterPlugin"><option value="">全部插件</option><option v-for="plugin in plugins" :key="plugin.name" :value="plugin.name">{{ plugin.display_name || plugin.name }}</option></select>
+      <select v-if="fixedPluginName === ''" v-model="filterPlugin"><option value="">全部插件</option><option v-for="plugin in plugins" :key="plugin.name" :value="plugin.name">{{ plugin.display_name || plugin.name }}</option></select>
       <input v-model="filterSubject" placeholder="筛选角色或 QQ" />
       <button class="ghost-button" type="button" @click="filterScope = ''; filterPlugin = ''; filterSubject = ''">清空筛选</button>
     </div>

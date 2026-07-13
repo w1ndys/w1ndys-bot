@@ -1,6 +1,7 @@
 <!-- 📌 影响范围：调用插件、功能与命令 API；修改后端功能触发词、审计记录和命令快照。 -->
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   createCommand,
   deleteCommand,
@@ -13,10 +14,12 @@ import {
   type PluginState,
 } from '../api'
 
+const route = useRoute()
+const fixedPluginName = String(route.params.pluginName ?? '')
 const commands = ref<CommandState[]>([])
 const plugins = ref<PluginState[]>([])
 const features = ref<FeatureState[]>([])
-const selectedPlugin = ref('')
+const selectedPlugin = ref(fixedPluginName)
 const selectedFeature = ref('')
 const scopeType = ref<'global' | 'group'>('global')
 const scopeID = ref('0')
@@ -37,7 +40,13 @@ async function loadPage(): Promise<void> {
   try {
     const [pluginStates, commandStates] = await Promise.all([listPlugins(), listCommands()])
     plugins.value = pluginStates.filter((item) => item.available)
-    commands.value = commandStates
+    commands.value = []
+    for (const item of commandStates) {
+      // [决策理由] 插件工作台只能展示当前插件的命令，防止跨插件误操作。
+      if (fixedPluginName === '' || item.plugin_name === fixedPluginName) {
+        commands.value.push(item)
+      }
+    }
     // [决策理由] 首次进入自动选择第一个可用插件，减少空表单操作。
     if (selectedPlugin.value === '' && plugins.value.length > 0) {
       selectedPlugin.value = plugins.value[0].name
@@ -100,7 +109,7 @@ async function submitCommand(): Promise<void> {
     return
   }
   // [决策理由] 群级触发词必须指向具体群号。
-  if (scopeType.value === 'group' && !/^\d+$/.test(scopeID.value)) {
+  if (scopeType.value === 'group' && !isPositiveUint64(scopeID.value)) {
     errorMessage.value = '群级触发词必须填写数字群号'
     return
   }
@@ -194,6 +203,23 @@ function setScope(value: 'global' | 'group'): void {
   // 2. global切group -> scope_id清空等待输入。
 }
 
+// isPositiveUint64 校验群号是否为Go后端可解析的正uint64十进制数。
+// @param value：待校验群号字符串。
+// @returns 合法且非零、未溢出uint64时为true。
+// ⚠️副作用说明：无。
+function isPositiveUint64(value: string): boolean {
+  // [决策理由] 群号必须使用非零十进制格式，禁止符号、空白和前导零。
+  if (!/^[1-9][0-9]*$/.test(value)) {
+    return false
+  }
+  const valid = BigInt(value) <= 18446744073709551615n
+
+  // >>> 数据演变示例
+  // 1. "123456" -> 正十进制且未溢出 -> true。
+  // 2. "0"或超出uint64 -> false。
+  return valid
+}
+
 // setError 将未知异常转换为稳定页面提示。
 // @param error：捕获值；fallback：非 Error 时的默认消息。
 // @returns 无。
@@ -220,15 +246,15 @@ onMounted(loadPage)
     <div class="page-heading">
       <div>
         <span class="eyebrow">COMMAND ROUTING</span>
-        <h1>功能触发词</h1>
-        <p class="muted">一个功能可以拥有多个全局或群级触发词。</p>
+        <h1>命令管理</h1>
+        <p class="muted">管理当前插件各功能的全局或群级触发词。</p>
       </div>
       <button class="ghost-button" type="button" :disabled="loading" @click="loadPage">刷新</button>
     </div>
     <p v-if="errorMessage" class="error-message banner">{{ errorMessage }}</p>
 
     <form class="panel command-form" @submit.prevent="submitCommand">
-      <label>
+      <label v-if="fixedPluginName === ''">
         <span>插件</span>
         <select v-model="selectedPlugin" required>
           <option value="" disabled>选择插件</option>

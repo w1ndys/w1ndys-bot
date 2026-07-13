@@ -6,6 +6,9 @@ import PluginsView from './views/PluginsView.vue'
 import CommandsView from './views/CommandsView.vue'
 import PermissionsView from './views/PermissionsView.vue'
 import SettingsView from './views/SettingsView.vue'
+import PluginWorkspaceView from './views/PluginWorkspaceView.vue'
+import PluginOverviewView from './views/PluginOverviewView.vue'
+import PluginFeaturesView from './views/PluginFeaturesView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -13,8 +16,18 @@ const router = createRouter({
     { path: '/login', name: 'login', component: LoginView },
     { path: '/', redirect: '/plugins' },
     { path: '/plugins', name: 'plugins', component: PluginsView, meta: { requiresAuth: true } },
-    { path: '/commands', name: 'commands', component: CommandsView, meta: { requiresAuth: true } },
-    { path: '/permissions', name: 'permissions', component: PermissionsView, meta: { requiresAuth: true } },
+    {
+      path: '/plugins/:pluginName',
+      component: PluginWorkspaceView,
+      meta: { requiresAuth: true },
+      children: [
+        { path: '', redirect: 'overview' },
+        { path: 'overview', name: 'plugin-overview', component: PluginOverviewView },
+        { path: 'features', name: 'plugin-features', component: PluginFeaturesView },
+        { path: 'commands', name: 'plugin-commands', component: CommandsView },
+        { path: 'permissions', name: 'plugin-permissions', component: PermissionsView },
+      ],
+    },
     { path: '/settings', name: 'settings', component: SettingsView, meta: { requiresAuth: true } },
   ],
 })

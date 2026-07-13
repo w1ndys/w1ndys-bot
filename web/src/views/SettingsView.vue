@@ -1,5 +1,6 @@
 <!-- 📌 影响范围：调用系统设置 API；修改后端设置覆盖、审计记录和运行时设置快照。 -->
 <script setup lang="ts">
+import { NAlert, NButton, NCard, NEmpty, NInput, NSpin, NTag } from 'naive-ui'
 import { onMounted, reactive, ref } from 'vue'
 import { listSettings, resetSetting, setSetting, type SettingState } from '../api'
 
@@ -191,33 +192,35 @@ onMounted(loadPage)
         <h1>系统设置</h1>
         <p class="muted">仅开放可安全热更新的业务设置；密钥与管理员账号仍由环境变量管理。</p>
       </div>
-      <button class="ghost-button" type="button" :disabled="loading || pendingKey !== ''" @click="loadPage">刷新</button>
+      <NButton secondary type="primary" :disabled="loading || pendingKey !== ''" @click="loadPage">刷新</NButton>
     </div>
-    <p v-if="errorMessage" class="error-message banner">{{ errorMessage }}</p>
+    <NAlert v-if="errorMessage" class="settings-alert" type="error" closable @close="errorMessage = ''">{{ errorMessage }}</NAlert>
 
-    <div v-if="loading" class="empty-state">正在读取系统设置…</div>
-    <div v-else-if="settings.length === 0" class="empty-state">当前版本没有开放可管理的系统设置。</div>
-    <div v-else class="settings-grid">
-      <article v-for="item in settings" :key="item.key" class="panel setting-card">
-        <div>
-          <code>{{ item.key }}</code>
-          <h2>{{ item.description }}</h2>
-          <span class="setting-status" :class="{ overridden: item.overridden }">{{ item.overridden ? '数据库覆盖' : '默认值' }}</span>
-        </div>
-        <label>
-          <span>当前值</span>
-          <input
-            v-model="drafts[item.key]"
-            :type="item.key === 'command_prefix' ? 'text' : 'number'"
-            :min="item.key === 'audit_retention_days' ? 1 : item.key === 'default_page_size' ? 10 : undefined"
-            :max="item.key === 'audit_retention_days' ? 3650 : item.key === 'default_page_size' ? 200 : undefined"
-          />
-        </label>
-        <div class="setting-actions">
-          <button class="primary-button compact" type="button" :disabled="pendingKey !== ''" @click="saveSetting(item)">保存</button>
-          <button class="ghost-button compact" type="button" :disabled="pendingKey !== '' || !item.overridden" @click="restoreSetting(item)">恢复默认</button>
-        </div>
-      </article>
-    </div>
+    <NSpin :show="loading" description="正在读取系统设置…">
+      <NEmpty v-if="!loading && settings.length === 0" description="当前版本没有开放可管理的系统设置" />
+      <div v-else class="settings-grid">
+        <NCard v-for="item in settings" :key="item.key" embedded>
+          <div class="setting-card__content">
+            <div>
+              <code>{{ item.key }}</code>
+              <h2>{{ item.description }}</h2>
+              <NTag :type="item.overridden ? 'warning' : 'default'" size="small" round>{{ item.overridden ? '数据库覆盖' : '默认值' }}</NTag>
+            </div>
+            <label>
+              <span>当前值</span>
+              <NInput
+                v-model:value="drafts[item.key]"
+                :input-props="item.key === 'command_prefix' ? {} : { type: 'number' }"
+                :placeholder="item.description"
+              />
+            </label>
+            <div class="setting-actions">
+              <NButton type="primary" :loading="pendingKey === item.key" :disabled="pendingKey !== ''" @click="saveSetting(item)">保存</NButton>
+              <NButton secondary :disabled="pendingKey !== '' || !item.overridden" @click="restoreSetting(item)">恢复默认</NButton>
+            </div>
+          </div>
+        </NCard>
+      </div>
+    </NSpin>
   </section>
 </template>

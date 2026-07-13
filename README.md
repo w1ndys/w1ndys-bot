@@ -2,7 +2,7 @@
 
 基于 Go、NapCat OneBot 11 和 PostgreSQL 的 QQ 机器人框架，内置插件生命周期、命令路由、多级权限、审计日志与 Web 管理界面。
 
-> 项目仍在积极开发中。后端管理 API 与 Vue WebUI 已可用于开发；当前生产镜像尚未打包 WebUI 静态资源。
+> 项目仍在积极开发中。后端管理 API 与 Vue WebUI 已可用于开发，生产镜像会一并构建并托管 WebUI 静态资源。
 
 ## 功能特性
 
@@ -11,7 +11,7 @@
 - 基于 `Manifest + Factory` 的编译时插件注册与运行时启停
 - 全局/群级命令、角色/指定用户权限策略及热更新
 - 插件、触发词、权限、系统设置和审计日志管理 API
-- Vue 3 + TypeScript WebUI，包含登录、插件与触发词管理
+- Vue 3 + TypeScript + Naive UI 管理界面，采用亮色曲奇棕主题
 - PostgreSQL 自动迁移、Docker Compose 编排和结构化日志
 
 ## 工作原理
@@ -53,6 +53,8 @@ NapCat 事件 → WebSocket → 命令匹配 → 权限解析
    task compose-logs
    ```
 
+   启动后访问 `http://localhost:18800/` 打开 WebUI；远程部署时将 `localhost` 换成机器人主机地址。
+
 3. 在 NapCat 中配置 OneBot 11 反向 WebSocket：
 
    ```text
@@ -83,7 +85,7 @@ task compose-down
 | 命令 | 用途 |
 | --- | --- |
 | `task setup` | 同步 Go 与 WebUI 依赖 |
-| `task run` | 启动本地机器人服务 |
+| `task run` | 构建 WebUI 并启动本地机器人服务 |
 | `task web-dev` | 启动 Vite 开发服务器 |
 | `task test` | 运行全部 Go 测试 |
 | `task lint` | 检查 gofmt、go vet 和前端类型 |
