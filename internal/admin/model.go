@@ -14,6 +14,7 @@ var ErrForbidden = errors.New("无最高管理员权限")
 var ErrProtectedPlugin = errors.New("系统管理插件不可禁用")
 var ErrCommandNotFound = errors.New("命令不存在")
 var ErrCommandConflict = errors.New("命令在作用域内重复")
+var ErrInvalidCommand = errors.New("命令参数无效")
 var ErrPermissionNotFound = errors.New("权限策略不存在")
 
 type Channel = management.Channel

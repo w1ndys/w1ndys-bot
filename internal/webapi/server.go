@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,17 +31,22 @@ type contextKey string
 
 const actorContextKey contextKey = "webui_actor"
 const requestIDContextKey contextKey = "request_id"
+const managementActorContextKey contextKey = "management_actor"
 
 // AdminResolver 定义 WebUI 登录及请求期间所需的管理员快照能力。
 type AdminResolver interface {
 	Resolve(string) (admin.SystemAdmin, bool)
 }
 
-// PluginController 定义 WebUI 插件管理所需的业务能力。
-type PluginController interface {
+// ManagementController 定义 WebUI 当前开放的插件与命令管理能力。
+type ManagementController interface {
 	ListPlugins(context.Context, management.Actor) ([]management.PluginState, error)
 	SetPluginEnabled(context.Context, management.Actor, string, bool) (management.PluginState, error)
 	SetPluginPriority(context.Context, management.Actor, string, int) (management.PluginState, error)
+	ListCommands(context.Context, management.Actor) ([]management.CommandState, error)
+	CreateCommand(context.Context, management.Actor, management.CommandCreate) (management.CommandState, error)
+	RenameCommand(context.Context, management.Actor, int64, string) (management.CommandState, error)
+	DeleteCommand(context.Context, management.Actor, int64) error
 }
 
 // Server 提供 WebUI 认证 HTTP 接口。
@@ -48,7 +54,7 @@ type Server struct {
 	passwordHash string
 	jwtSecret    []byte
 	admins       AdminResolver
-	plugins      PluginController
+	management   ManagementController
 	now          func() time.Time
 }
 
@@ -85,11 +91,34 @@ type pluginResponse struct {
 	Config      json.RawMessage `json:"config"`
 }
 
+type commandCreateRequest struct {
+	ScopeType  string `json:"scope_type"`
+	ScopeID    string `json:"scope_id"`
+	PluginName string `json:"plugin_name"`
+	FeatureKey string `json:"feature_key"`
+	Command    string `json:"command"`
+}
+
+type commandPatchRequest struct {
+	Command string `json:"command"`
+}
+
+type commandResponse struct {
+	ID                int64  `json:"id"`
+	ScopeType         string `json:"scope_type"`
+	ScopeID           string `json:"scope_id"`
+	PluginName        string `json:"plugin_name"`
+	FeatureKey        string `json:"feature_key"`
+	Command           string `json:"command"`
+	NormalizedCommand string `json:"normalized_command"`
+	Enabled           bool   `json:"enabled"`
+}
+
 // New 创建 WebUI API 服务并在内存中准备环境密码哈希。
-// @param password：环境变量中的共享密码；jwtSecret：JWT 签名密钥；admins：管理员快照解析器；plugins：插件管理服务。
+// @param password：环境变量中的共享密码；jwtSecret：JWT 签名密钥；admins：管理员快照解析器；controller：管理业务服务。
 // @returns 可注册到 HTTP 路由的 Server，或配置强度错误。
 // ⚠️副作用说明：读取系统加密随机源并执行 Argon2id 哈希。
-func New(password string, jwtSecret string, admins AdminResolver, plugins PluginController) (*Server, error) {
+func New(password string, jwtSecret string, admins AdminResolver, controller ManagementController) (*Server, error) {
 	// [决策理由] JWT 密钥过短会降低离线伪造成本，必须在监听端口前拒绝启动。
 	if len([]byte(jwtSecret)) < 32 {
 		return nil, errors.New("JWT_SECRET 不能少于32字节")
@@ -99,15 +128,15 @@ func New(password string, jwtSecret string, admins AdminResolver, plugins Plugin
 		return nil, errors.New("管理员解析器不能为空")
 	}
 	// [决策理由] 插件控制器缺失时管理路由会在鉴权后崩溃，必须在组装阶段拒绝。
-	if plugins == nil {
-		return nil, errors.New("插件管理服务不能为空")
+	if controller == nil {
+		return nil, errors.New("管理服务不能为空")
 	}
 	passwordHash, err := projectauth.HashPassword(password)
 	// [决策理由] 环境密码不符合强度要求或随机源失败时禁止开放登录接口。
 	if err != nil {
 		return nil, fmt.Errorf("准备 WebUI 密码: %w", err)
 	}
-	server := &Server{passwordHash: passwordHash, jwtSecret: []byte(jwtSecret), admins: admins, plugins: plugins, now: time.Now}
+	server := &Server{passwordHash: passwordHash, jwtSecret: []byte(jwtSecret), admins: admins, management: controller, now: time.Now}
 
 	// >>> 数据演变示例
 	// 1. 强密码+32字节密钥+Resolver -> Argon2id哈希 -> Server,nil。
@@ -125,6 +154,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/auth/me", s.authenticate(http.HandlerFunc(s.me)))
 	mux.Handle("GET /api/plugins", s.authenticate(http.HandlerFunc(s.listPlugins)))
 	mux.Handle("PATCH /api/plugins/{plugin_name}", s.authenticate(http.HandlerFunc(s.patchPlugin)))
+	mux.Handle("GET /api/commands", s.authenticate(http.HandlerFunc(s.listCommands)))
+	mux.Handle("POST /api/commands", s.authenticate(http.HandlerFunc(s.createCommand)))
+	mux.Handle("PATCH /api/commands/{command_id}", s.authenticate(http.HandlerFunc(s.renameCommand)))
+	mux.Handle("DELETE /api/commands/{command_id}", s.authenticate(http.HandlerFunc(s.deleteCommand)))
 	handler := s.middleware(mux)
 
 	// >>> 数据演变示例
@@ -189,13 +222,8 @@ func (s *Server) me(writer http.ResponseWriter, request *http.Request) {
 // @returns 无。
 // ⚠️副作用说明：读取 PostgreSQL 插件配置并写入 JSON 响应。
 func (s *Server) listPlugins(writer http.ResponseWriter, request *http.Request) {
-	actor, err := actorFromRequest(request)
-	// [决策理由] 管理服务审计和授权都需要可信 Actor，上下文异常时安全失败。
-	if err != nil {
-		writeError(writer, http.StatusUnauthorized, "unauthorized", "登录凭证无效")
-		return
-	}
-	states, err := s.plugins.ListPlugins(request.Context(), actor)
+	actor := actorFromRequest(request)
+	states, err := s.management.ListPlugins(request.Context(), actor)
 	// [决策理由] 业务错误必须映射成稳定 API 响应，不能暴露数据库细节。
 	if err != nil {
 		writeManagementError(writer, err)
@@ -217,12 +245,7 @@ func (s *Server) listPlugins(writer http.ResponseWriter, request *http.Request) 
 // @returns 无。
 // ⚠️副作用说明：可能更新 PostgreSQL、写入审计并热刷新 PluginManager。
 func (s *Server) patchPlugin(writer http.ResponseWriter, request *http.Request) {
-	actor, err := actorFromRequest(request)
-	// [决策理由] 没有可信 Actor 时不得执行任何管理写操作。
-	if err != nil {
-		writeError(writer, http.StatusUnauthorized, "unauthorized", "登录凭证无效")
-		return
-	}
+	actor := actorFromRequest(request)
 	name := request.PathValue("plugin_name")
 	var input pluginPatchRequest
 	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
@@ -238,16 +261,17 @@ func (s *Server) patchPlugin(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	var state management.PluginState
+	var err error
 	// [决策理由] 非空 enabled 表示显式启停操作，应走受保护插件校验链路。
 	if input.Enabled != nil {
-		state, err = s.plugins.SetPluginEnabled(request.Context(), actor, name, *input.Enabled)
+		state, err = s.management.SetPluginEnabled(request.Context(), actor, name, *input.Enabled)
 	} else {
 		// [决策理由] 优先级限制在可读范围，避免极端整数影响排序和前端输入。
 		if *input.Priority < -10000 || *input.Priority > 10000 {
 			writeError(writer, http.StatusBadRequest, "invalid_request", "priority 必须在 -10000 至 10000 之间")
 			return
 		}
-		state, err = s.plugins.SetPluginPriority(request.Context(), actor, name, *input.Priority)
+		state, err = s.management.SetPluginPriority(request.Context(), actor, name, *input.Priority)
 	}
 	// [决策理由] 更新或刷新失败时按领域错误返回，不能伪造成功状态。
 	if err != nil {
@@ -261,23 +285,154 @@ func (s *Server) patchPlugin(writer http.ResponseWriter, request *http.Request) 
 	// 2. enabled与priority同时出现 -> 参数冲突 -> 400且不写数据库。
 }
 
-// actorFromRequest 将认证身份与请求 ID 转换成管理服务 Actor。
-// @param request：已通过 authenticate 和 middleware 的请求。
-// @returns WebUI 最高管理员 Actor 或上下文错误。
-// ⚠️副作用说明：无；仅读取请求上下文。
-func actorFromRequest(request *http.Request) (management.Actor, error) {
-	account, exists := request.Context().Value(actorContextKey).(admin.SystemAdmin)
-	// [决策理由] Actor ID 只能来自 JWT 复核后的管理员身份，不能读取客户端 JSON。
-	if !exists || account.UserID == "" {
-		return management.Actor{}, errors.New("请求缺少管理员身份")
+// listCommands 返回全部全局及群级功能触发词。
+// @param writer：响应写入器；request：已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：读取 PostgreSQL 命令配置并写入 JSON 响应。
+func (s *Server) listCommands(writer http.ResponseWriter, request *http.Request) {
+	actor := actorFromRequest(request)
+	states, err := s.management.ListCommands(request.Context(), actor)
+	// [决策理由] 管理服务错误必须通过统一领域映射返回。
+	if err != nil {
+		writeManagementError(writer, err)
+		return
 	}
-	requestID, _ := request.Context().Value(requestIDContextKey).(string)
-	actor := management.Actor{ID: account.UserID, Role: "super_admin", Channel: management.ChannelWebUI, RequestID: requestID}
+	result := make([]commandResponse, 0, len(states))
+	for _, state := range states {
+		result = append(result, commandView(state))
+	}
+	writeSuccess(writer, result)
 
 	// >>> 数据演变示例
-	// 1. admin100+request abc -> Actor{100,webui,abc}。
-	// 2. 无身份上下文 -> 零值,error。
-	return actor, nil
+	// 1. Service[全局ping,群级测试] -> DTO数组 -> 200。
+	// 2. Repository失败 -> 500统一错误且不返回部分列表。
+}
+
+// createCommand 新增一条功能触发词。
+// @param writer：响应写入器；request：已鉴权 JSON 请求。
+// @returns 无。
+// ⚠️副作用说明：可能插入命令与审计记录并热刷新命令注册表。
+func (s *Server) createCommand(writer http.ResponseWriter, request *http.Request) {
+	actor := actorFromRequest(request)
+	var input commandCreateRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
+	decoder.DisallowUnknownFields()
+	// [决策理由] 未知字段或非法 JSON 可能表示前后端版本不一致，必须明确拒绝。
+	if err := decoder.Decode(&input); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "命令新增参数格式无效")
+		return
+	}
+	state, err := s.management.CreateCommand(request.Context(), actor, management.CommandCreate{ScopeType: input.ScopeType, ScopeID: input.ScopeID, PluginName: input.PluginName, FeatureKey: input.FeatureKey, Command: input.Command})
+	// [决策理由] 重复、字段校验和数据库错误需要映射为不同 HTTP 语义。
+	if err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	writeSuccess(writer, commandView(state))
+
+	// >>> 数据演变示例
+	// 1. global,0,ping.ping,“测试” -> 标准化+审计+热刷新 -> 200新命令。
+	// 2. 同作用域重复“测试” -> ErrCommandConflict -> 409。
+}
+
+// renameCommand 修改指定命令的显示及匹配文本。
+// @param writer：响应写入器；request：携带命令 ID 和新文本的已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：可能更新命令与审计记录并热刷新命令注册表。
+func (s *Server) renameCommand(writer http.ResponseWriter, request *http.Request) {
+	actor := actorFromRequest(request)
+	id, err := parsePositiveID(request.PathValue("command_id"))
+	// [决策理由] 非正整数路径不可能对应数据库主键，应作为请求错误而非查询未找到。
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "命令 ID 格式无效")
+		return
+	}
+	var input commandPatchRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
+	decoder.DisallowUnknownFields()
+	// [决策理由] 改名接口只接受 command 字段，避免产生未实现的部分更新语义。
+	if err := decoder.Decode(&input); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "命令修改参数格式无效")
+		return
+	}
+	state, err := s.management.RenameCommand(request.Context(), actor, id, input.Command)
+	// [决策理由] 领域错误应保持稳定业务码供前端定位字段或刷新列表。
+	if err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	writeSuccess(writer, commandView(state))
+
+	// >>> 数据演变示例
+	// 1. id=1+“延迟” -> Normalize+UPDATE+审计+Load -> 200。
+	// 2. id=abc -> 路径校验 -> 400零数据库访问。
+}
+
+// deleteCommand 删除指定功能触发词。
+// @param writer：响应写入器；request：携带命令 ID 的已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：可能删除命令、写入审计并热刷新命令注册表。
+func (s *Server) deleteCommand(writer http.ResponseWriter, request *http.Request) {
+	actor := actorFromRequest(request)
+	id, err := parsePositiveID(request.PathValue("command_id"))
+	// [决策理由] 非正整数 ID 应在进入事务前拒绝。
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "命令 ID 格式无效")
+		return
+	}
+	// [决策理由] 删除失败时必须保留领域错误，不能返回虚假成功。
+	if err := s.management.DeleteCommand(request.Context(), actor, id); err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	writeSuccess(writer, nil)
+
+	// >>> 数据演变示例
+	// 1. id=1存在 -> DELETE+审计+Load -> 200 data:null。
+	// 2. id=404不存在 -> ErrCommandNotFound -> 404。
+}
+
+// commandView 将内部命令状态转换成稳定 API 模型。
+// @param state：管理服务命令状态。
+// @returns snake_case 命令响应。
+// ⚠️副作用说明：无。
+func commandView(state management.CommandState) commandResponse {
+	view := commandResponse{ID: state.ID, ScopeType: state.ScopeType, ScopeID: state.ScopeID, PluginName: state.PluginName, FeatureKey: state.FeatureKey, Command: state.Command, NormalizedCommand: state.NormalizedCommand, Enabled: state.Enabled}
+
+	// >>> 数据演变示例
+	// 1. CommandState{ID:1,Command:Ping} -> commandResponse{id:1,command:Ping}。
+	// 2. 群级命令scope_id=123 -> DTO保留作用域字段。
+	return view
+}
+
+// parsePositiveID 解析 REST 路径中的正整数主键。
+// @param value：路径参数原文。
+// @returns 正 int64 或格式错误。
+// ⚠️副作用说明：无。
+func parsePositiveID(value string) (int64, error) {
+	id, err := strconv.ParseInt(value, 10, 64)
+	// [决策理由] 数据库 BIGSERIAL 主键只能是正整数。
+	if err != nil || id <= 0 {
+		return 0, errors.New("ID必须是正整数")
+	}
+
+	// >>> 数据演变示例
+	// 1. "42" -> ParseInt -> 42,nil。
+	// 2. "abc"或"0" -> 校验失败 -> 0,error。
+	return id, nil
+}
+
+// actorFromRequest 将认证身份与请求 ID 转换成管理服务 Actor。
+// @param request：已通过 authenticate 和 middleware 的请求。
+// @returns 认证中间件注入的 WebUI 最高管理员 Actor。
+// ⚠️副作用说明：无；仅读取请求上下文。
+func actorFromRequest(request *http.Request) management.Actor {
+	actor, _ := request.Context().Value(managementActorContextKey).(management.Actor)
+
+	// >>> 数据演变示例
+	// 1. authenticate注入Actor100:req-abc -> 返回可信Actor。
+	// 2. 未经路由中间件直接调用Handler -> 返回零值并由Service再次拒绝。
+	return actor
 }
 
 // pluginView 将内部插件状态转换成稳定的 snake_case API 模型。
@@ -313,6 +468,21 @@ func writeManagementError(writer http.ResponseWriter, err error) {
 		writeError(writer, http.StatusConflict, "protected_plugin", "系统管理插件不可禁用")
 		return
 	}
+	// [决策理由] 命令字段校验失败属于客户端输入错误。
+	if errors.Is(err, admin.ErrInvalidCommand) {
+		writeError(writer, http.StatusBadRequest, "invalid_command", "命令参数无效")
+		return
+	}
+	// [决策理由] 命令主键不存在时前端应刷新或移除陈旧列表项。
+	if errors.Is(err, admin.ErrCommandNotFound) {
+		writeError(writer, http.StatusNotFound, "command_not_found", "命令不存在")
+		return
+	}
+	// [决策理由] 同作用域标准化命令重复是资源冲突，不是服务器异常。
+	if errors.Is(err, admin.ErrCommandConflict) {
+		writeError(writer, http.StatusConflict, "command_conflict", "命令在当前作用域内重复")
+		return
+	}
 	// [决策理由] 授权失败不得被误报成服务器故障。
 	if errors.Is(err, admin.ErrForbidden) || errors.Is(err, admin.ErrInvalidActor) || errors.Is(err, admin.ErrInvalidChannel) {
 		writeError(writer, http.StatusForbidden, "forbidden", "无权执行该管理操作")
@@ -322,7 +492,7 @@ func writeManagementError(writer http.ResponseWriter, err error) {
 	writeError(writer, http.StatusInternalServerError, "internal_error", "管理操作执行失败")
 
 	// >>> 数据演变示例
-	// 1. ErrPluginNotFound -> 404 plugin_not_found。
+	// 1. ErrCommandConflict -> 409 command_conflict。
 	// 2. 数据库连接错误 -> 记录内部错误 -> 500通用消息。
 }
 
@@ -351,10 +521,13 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			return
 		}
 		ctx := context.WithValue(request.Context(), actorContextKey, account)
+		requestID, _ := request.Context().Value(requestIDContextKey).(string)
+		actor := management.Actor{ID: account.UserID, Role: "super_admin", Channel: management.ChannelWebUI, RequestID: requestID}
+		ctx = context.WithValue(ctx, managementActorContextKey, actor)
 		next.ServeHTTP(writer, request.WithContext(ctx))
 
 		// >>> 数据演变示例
-		// 1. 有效Token+启用管理员 -> 注入account -> next。
+		// 1. 有效Token+启用管理员 -> 注入account和审计Actor -> next。
 		// 2. 有效Token+管理员已禁用 -> 401 -> 不调用next。
 	})
 

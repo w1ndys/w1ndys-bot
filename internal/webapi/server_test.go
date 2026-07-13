@@ -19,13 +19,70 @@ type fakeAdmins struct {
 }
 
 type fakePlugins struct {
-	states   []management.PluginState
-	updated  management.PluginState
-	actor    management.Actor
-	name     string
-	enabled  *bool
-	priority *int
-	err      error
+	states       []management.PluginState
+	updated      management.PluginState
+	actor        management.Actor
+	name         string
+	enabled      *bool
+	priority     *int
+	err          error
+	commands     []management.CommandState
+	command      management.CommandState
+	commandInput management.CommandCreate
+	commandID    int64
+	commandName  string
+}
+
+// ListCommands 返回测试命令列表并记录 Actor。
+// @param ctx：未使用的请求上下文；actor：WebUI 操作者。
+// @returns 预设命令列表或错误。
+// ⚠️副作用说明：记录最近一次 Actor。
+func (f *fakePlugins) ListCommands(_ context.Context, actor management.Actor) ([]management.CommandState, error) {
+	f.actor = actor
+
+	// >>> 数据演变示例
+	// 1. commands=[ping]+actor100 -> 记录actor -> 返回列表。
+	// 2. err=boom -> 返回预设错误。
+	return f.commands, f.err
+}
+
+// CreateCommand 记录命令新增操作。
+// @param ctx：未使用的上下文；actor：操作者；input：命令输入。
+// @returns 预设命令状态或错误。
+// ⚠️副作用说明：记录 Actor 和命令输入。
+func (f *fakePlugins) CreateCommand(_ context.Context, actor management.Actor, input management.CommandCreate) (management.CommandState, error) {
+	f.actor, f.commandInput = actor, input
+
+	// >>> 数据演变示例
+	// 1. ping.ping+测试 -> 记录 -> command,nil。
+	// 2. 重复输入+ErrCommandConflict -> 记录 -> error。
+	return f.command, f.err
+}
+
+// RenameCommand 记录命令改名操作。
+// @param ctx：未使用的上下文；actor：操作者；id：命令ID；command：新文本。
+// @returns 预设命令状态或错误。
+// ⚠️副作用说明：记录 Actor、ID 和命令文本。
+func (f *fakePlugins) RenameCommand(_ context.Context, actor management.Actor, id int64, command string) (management.CommandState, error) {
+	f.actor, f.commandID, f.commandName = actor, id, command
+
+	// >>> 数据演变示例
+	// 1. id1+延迟 -> 记录 -> command,nil。
+	// 2. id404+ErrCommandNotFound -> 记录 -> error。
+	return f.command, f.err
+}
+
+// DeleteCommand 记录命令删除操作。
+// @param ctx：未使用的上下文；actor：操作者；id：命令ID。
+// @returns 预设错误。
+// ⚠️副作用说明：记录 Actor 和命令ID。
+func (f *fakePlugins) DeleteCommand(_ context.Context, actor management.Actor, id int64) error {
+	f.actor, f.commandID = actor, id
+
+	// >>> 数据演变示例
+	// 1. id1 -> 记录 -> nil。
+	// 2. id404 -> 记录 -> ErrCommandNotFound。
+	return f.err
 }
 
 // ListPlugins 返回测试插件列表并记录 Actor。
@@ -305,5 +362,105 @@ func requestPluginPatch(server *Server, token string, name string, body string) 
 	// >>> 数据演变示例
 	// 1. ping+enabled=true -> PATCH处理 -> 200记录器。
 	// 2. admin+enabled=false -> 领域拒绝 -> 409记录器。
+	return recorder
+}
+
+// TestCommandRoutesCRUD 验证命令 REST 接口传递字段、审计身份及统一响应。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行 Argon2id 哈希并创建内存 HTTP 请求。
+func TestCommandRoutesCRUD(t *testing.T) {
+	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
+	controller := &fakePlugins{command: management.CommandState{ID: 7, ScopeType: "group", ScopeID: "123", PluginName: "ping", FeatureKey: "ping", Command: "测试", NormalizedCommand: "测试", Enabled: true}}
+	controller.commands = []management.CommandState{controller.command}
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller)
+	// [决策理由] 完整管理控制器必须成功构造服务。
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	token, err := server.sign("100")
+	// [决策理由] CRUD 路由均要求有效管理员 Token。
+	if err != nil {
+		t.Fatalf("sign() error = %v", err)
+	}
+	list := requestAPI(server, token, http.MethodGet, "/api/commands", "", "req-list-command")
+	// [决策理由] 列表必须返回 snake_case 命令数据。
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"normalized_command":"测试"`) {
+		t.Fatalf("list status=%d body=%s", list.Code, list.Body.String())
+	}
+	create := requestAPI(server, token, http.MethodPost, "/api/commands", `{"scope_type":"group","scope_id":"123","plugin_name":"ping","feature_key":"ping","command":"测试"}`, "req-create-command")
+	// [决策理由] 新增字段和请求 ID 必须完整进入管理服务。
+	if create.Code != http.StatusOK || controller.commandInput.ScopeID != "123" || controller.actor.RequestID != "req-create-command" {
+		t.Fatalf("create status=%d input=%+v actor=%+v", create.Code, controller.commandInput, controller.actor)
+	}
+	rename := requestAPI(server, token, http.MethodPatch, "/api/commands/7", `{"command":"延迟"}`, "req-rename-command")
+	// [决策理由] 路径 ID 和新命令文本必须精确传递。
+	if rename.Code != http.StatusOK || controller.commandID != 7 || controller.commandName != "延迟" {
+		t.Fatalf("rename status=%d id=%d name=%q", rename.Code, controller.commandID, controller.commandName)
+	}
+	deleted := requestAPI(server, token, http.MethodDelete, "/api/commands/7", "", "req-delete-command")
+	// [决策理由] 删除成功应返回统一成功结构和 data:null。
+	if deleted.Code != http.StatusOK || controller.commandID != 7 || !strings.Contains(deleted.Body.String(), `"data":null`) {
+		t.Fatalf("delete status=%d id=%d body=%s", deleted.Code, controller.commandID, deleted.Body.String())
+	}
+
+	// >>> 数据演变示例
+	// 1. POST命令 -> Controller.Create+审计Actor -> 200命令DTO。
+	// 2. DELETE id7 -> Controller.Delete+热刷新 -> 200 data:null。
+}
+
+// TestCommandRoutesMapValidationAndConflict 验证非法 ID 和命令冲突错误映射。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行 Argon2id 哈希并创建内存 HTTP 请求。
+func TestCommandRoutesMapValidationAndConflict(t *testing.T) {
+	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
+	controller := &fakePlugins{}
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller)
+	// [决策理由] 错误路径测试也需要完整服务依赖。
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	token, err := server.sign("100")
+	// [决策理由] 需要通过认证后才能到达路径和领域校验。
+	if err != nil {
+		t.Fatalf("sign() error = %v", err)
+	}
+	invalidID := requestAPI(server, token, http.MethodDelete, "/api/commands/abc", "", "")
+	// [决策理由] 非数字 ID 应返回400且不调用控制器。
+	if invalidID.Code != http.StatusBadRequest || controller.commandID != 0 {
+		t.Fatalf("invalid id status=%d commandID=%d", invalidID.Code, controller.commandID)
+	}
+	controller.err = admin.ErrCommandConflict
+	conflict := requestAPI(server, token, http.MethodPost, "/api/commands", `{"scope_type":"global","scope_id":"0","plugin_name":"ping","feature_key":"ping","command":"ping"}`, "")
+	// [决策理由] 同作用域重复命令必须映射为409稳定业务码。
+	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), `"code":"command_conflict"`) {
+		t.Fatalf("conflict status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+
+	// >>> 数据演变示例
+	// 1. DELETE abc -> ID解析失败 -> 400零调用。
+	// 2. POST重复命令 -> ErrCommandConflict -> 409 command_conflict。
+}
+
+// requestAPI 执行携带管理员 Token 的通用内存 API 请求。
+// @param server：测试服务；token：JWT；method、path、body：请求参数；requestID：审计请求ID。
+// @returns 已完成的响应记录器。
+// ⚠️副作用说明：创建并执行内存 HTTP 请求。
+func requestAPI(server *Server, token string, method string, path string, body string, requestID string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+token)
+	// [决策理由] 非空请求ID才写入请求头，覆盖客户端提供与服务端生成两种路径。
+	if requestID != "" {
+		request.Header.Set("X-Request-ID", requestID)
+	}
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+
+	// >>> 数据演变示例
+	// 1. GET /api/commands+Token -> 200记录器。
+	// 2. DELETE /api/commands/abc+Token -> 400记录器。
 	return recorder
 }

@@ -78,7 +78,7 @@ func (s *Service) CreateCommand(ctx context.Context, actor Actor, input CommandC
 	normalized, err := validateCommandInput(input.ScopeType, input.ScopeID, input.Command)
 	// [决策理由] 无效作用域或命令不得进入数据库事务。
 	if err != nil {
-		return CommandState{}, err
+		return CommandState{}, fmt.Errorf("%w: %v", ErrInvalidCommand, err)
 	}
 	created, err := s.repository.CreateCommand(ctx, actor, input, normalized)
 	// [决策理由] 持久化失败时没有新快照需要发布。
@@ -112,7 +112,7 @@ func (s *Service) RenameCommand(ctx context.Context, actor Actor, id int64, comm
 	normalized, err := commandregistry.Normalize(command, "/")
 	// [决策理由] 改名使用与注册表相同的标准化规则。
 	if err != nil {
-		return CommandState{}, err
+		return CommandState{}, fmt.Errorf("%w: %v", ErrInvalidCommand, err)
 	}
 	updated, err := s.repository.RenameCommand(ctx, actor, id, command, normalized)
 	// [决策理由] 事务失败时保持旧内存快照。
