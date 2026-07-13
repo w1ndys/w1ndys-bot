@@ -47,6 +47,23 @@ type fakeRuntime struct {
 	err   error
 }
 
+type fakeAuthorizer struct {
+	allowed map[string]bool
+}
+
+// IsSuperAdmin 返回测试预设的授权判断。
+// @param userID：待校验用户 ID。
+// @returns allowed 中对应的布尔值。
+// ⚠️副作用说明：无。
+func (f *fakeAuthorizer) IsSuperAdmin(userID string) bool {
+	allowed := f.allowed[userID]
+
+	// >>> 数据演变示例
+	// 1. allowed[123]=true -> IsSuperAdmin(123) -> true。
+	// 2. allowed无200 -> IsSuperAdmin(200) -> false。
+	return allowed
+}
+
 // Load 记录一次运行时刷新。
 // @param ctx：未使用的测试上下文。
 // @returns 预设刷新错误。
@@ -67,7 +84,7 @@ func (f *fakeRuntime) Load(_ context.Context) error {
 func TestSetPluginEnabledPersistsAuditedChangeAndRefreshes(t *testing.T) {
 	repository := &fakeRepository{updated: PluginState{Name: "ping", Enabled: true, Priority: 100}}
 	runtime := &fakeRuntime{}
-	service := NewService(repository, runtime)
+	service := NewService(repository, runtime, &fakeAuthorizer{allowed: map[string]bool{"123": true}})
 	actor := Actor{ID: "123", Role: "super_admin", Channel: ChannelQQ, RequestID: "req-1"}
 	state, err := service.SetPluginEnabled(context.Background(), actor, "ping", true)
 	// [决策理由] 正常管理路径必须无错误才能继续验证结果。
@@ -103,7 +120,7 @@ func TestSetPluginEnabledPersistsAuditedChangeAndRefreshes(t *testing.T) {
 func TestSetPluginPriorityRejectsInvalidActor(t *testing.T) {
 	repository := &fakeRepository{}
 	runtime := &fakeRuntime{}
-	service := NewService(repository, runtime)
+	service := NewService(repository, runtime, &fakeAuthorizer{})
 	_, err := service.SetPluginPriority(context.Background(), Actor{Channel: ChannelWebUI}, "ping", 20)
 	// [决策理由] 空 Actor ID 必须返回稳定领域错误供入口转换为拒绝响应。
 	if !errors.Is(err, ErrInvalidActor) {
@@ -130,7 +147,7 @@ func TestSetPluginPriorityRejectsInvalidActor(t *testing.T) {
 func TestSetPluginEnabledReturnsRefreshFailure(t *testing.T) {
 	repository := &fakeRepository{updated: PluginState{Name: "ping", Enabled: true}}
 	runtime := &fakeRuntime{err: errors.New("lifecycle failed")}
-	service := NewService(repository, runtime)
+	service := NewService(repository, runtime, &fakeAuthorizer{})
 	state, err := service.SetPluginEnabled(context.Background(), Actor{ID: "system", Role: "system", Channel: ChannelSystem}, "ping", true)
 	// [决策理由] 热刷新失败不能向管理入口报告完全成功。
 	if err == nil {
@@ -148,4 +165,31 @@ func TestSetPluginEnabledReturnsRefreshFailure(t *testing.T) {
 	// >>> 数据演变示例
 	// 1. DB提交true + Load失败 -> 返回 true状态和刷新错误。
 	// 2. lifecycle failed -> 不自动重试 -> loads=1。
+}
+
+// TestSetPluginEnabledRejectsUntrustedRole 验证自报角色不能绕过管理员快照。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行内存替身并可能终止当前测试。
+func TestSetPluginEnabledRejectsUntrustedRole(t *testing.T) {
+	repository := &fakeRepository{}
+	runtime := &fakeRuntime{}
+	service := NewService(repository, runtime, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
+	_, err := service.SetPluginEnabled(context.Background(), Actor{ID: "200", Role: "super_admin", Channel: ChannelQQ}, "ping", true)
+	// [决策理由] actor.Role 来自入口组装，不能替代服务端身份快照。
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("error = %v, want ErrForbidden", err)
+	}
+	// [决策理由] 未授权操作必须在事务开始前终止。
+	if repository.updateName != "" {
+		t.Fatalf("repository unexpectedly called for %q", repository.updateName)
+	}
+	// [决策理由] 未授权操作不得改变运行时状态。
+	if runtime.loads != 0 {
+		t.Fatalf("runtime loads = %d, want 0", runtime.loads)
+	}
+
+	// >>> 数据演变示例
+	// 1. actor.Role=super_admin但Resolver=false -> ErrForbidden。
+	// 2. 拒绝发生在Repository前 -> 无数据库写入和热刷新。
 }

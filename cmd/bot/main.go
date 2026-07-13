@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/w1ndys/w1ndys-bot/internal/admin"
 	commandregistry "github.com/w1ndys/w1ndys-bot/internal/command"
 	"github.com/w1ndys/w1ndys-bot/internal/config"
 	"github.com/w1ndys/w1ndys-bot/internal/db"
@@ -81,6 +82,22 @@ func main() {
 	// [决策理由] 启动时发布完整权限快照，为后续命令路由提供无数据库查询的判断能力。
 	if err := permissions.Load(ctx); err != nil {
 		projectlogger.Error("加载权限策略失败", "error", err)
+		return
+	}
+	adminRepository := admin.NewPostgresRepository(pool)
+	// [决策理由] WebUI 尚未实现时需要用环境变量完成首位最高管理员的数据库引导。
+	if err := adminRepository.BootstrapSystemAdmin(ctx, cfg.SuperAdminQQ); err != nil {
+		projectlogger.Error("引导最高管理员失败", "error", err)
+		return
+	}
+	// [决策理由] 空引导值允许纯事件模式启动，但需要明确提示管理命令暂不可用。
+	if cfg.SuperAdminQQ == "" {
+		projectlogger.Warn("未配置 SUPER_ADMIN_QQ，QQ 与 WebUI 管理操作将无可用最高管理员")
+	}
+	adminResolver := admin.NewAdminResolver(adminRepository)
+	// [决策理由] 管理员身份属于管理入口的授权根，启动时加载失败不能以空权限继续运行。
+	if err := adminResolver.Load(ctx); err != nil {
+		projectlogger.Error("加载最高管理员失败", "error", err)
 		return
 	}
 	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool))

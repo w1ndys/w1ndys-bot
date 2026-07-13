@@ -11,22 +11,28 @@ type RuntimeRefresher interface {
 	Load(context.Context) error
 }
 
+// AdminAuthorizer 定义最高管理员身份校验能力。
+type AdminAuthorizer interface {
+	IsSuperAdmin(string) bool
+}
+
 // Service 是 QQ 管理命令与 WebUI 共用的管理业务入口。
 type Service struct {
 	repository Repository
 	runtime    RuntimeRefresher
+	authorizer AdminAuthorizer
 }
 
 // NewService 创建管理服务。
-// @param repository：插件管理仓库；runtime：插件运行时刷新器。
+// @param repository：插件管理仓库；runtime：插件运行时刷新器；authorizer：最高管理员解析器。
 // @returns 可复用的管理服务。
 // ⚠️副作用说明：无；仅保存依赖引用。
-func NewService(repository Repository, runtime RuntimeRefresher) *Service {
-	service := &Service{repository: repository, runtime: runtime}
+func NewService(repository Repository, runtime RuntimeRefresher, authorizer AdminAuthorizer) *Service {
+	service := &Service{repository: repository, runtime: runtime, authorizer: authorizer}
 
 	// >>> 数据演变示例
-	// 1. PostgreSQL Repository + Manager -> Service -> 支持持久化与热刷新。
-	// 2. Repository + nil Runtime -> Service -> 仅持久化管理配置。
+	// 1. Repository + Manager + Resolver -> Service -> 支持授权、持久化与热刷新。
+	// 2. Repository + nil Runtime + Resolver -> Service -> 授权后仅持久化管理配置。
 	return service
 }
 
@@ -85,6 +91,10 @@ func (s *Service) updatePlugin(ctx context.Context, actor Actor, name string, pa
 	// [决策理由] 数据库约束只允许已定义的双控制通道和系统操作。
 	if !validChannel(actor.Channel) {
 		return PluginState{}, ErrInvalidChannel
+	}
+	// [决策理由] QQ 与 WebUI 输入不可信，必须以服务端管理员快照重新校验，不能信任 actor.Role。
+	if actor.Channel != ChannelSystem && (s.authorizer == nil || !s.authorizer.IsSuperAdmin(actor.ID)) {
+		return PluginState{}, ErrForbidden
 	}
 	// [决策理由] 空插件名不能稳定定位配置与审计目标。
 	if name == "" {

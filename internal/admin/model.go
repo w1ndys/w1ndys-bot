@@ -6,6 +6,7 @@ import "errors"
 var ErrPluginNotFound = errors.New("插件不存在")
 var ErrInvalidActor = errors.New("操作者不能为空")
 var ErrInvalidChannel = errors.New("管理通道无效")
+var ErrForbidden = errors.New("无最高管理员权限")
 
 // Channel 表示管理操作来源。
 type Channel string
@@ -36,4 +37,11 @@ type PluginState struct {
 type PluginPatch struct {
 	Enabled  *bool
 	Priority *int
+}
+
+// SystemAdmin 表示数据库配置的最高管理员账号。
+type SystemAdmin struct {
+	UserID   string
+	Nickname string
+	Enabled  bool
 }

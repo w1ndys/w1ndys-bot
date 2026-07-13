@@ -1,4 +1,4 @@
-# 📌 影响范围：读取 DB_PASSWORD、NAPCAT_TOKEN、JWT_SECRET；创建 bot 与 postgres 容器、内部网络和持久化数据卷；映射宿主机 18800 端口。
+# 📌 影响范围：读取 DB_PASSWORD、NAPCAT_TOKEN、JWT_SECRET、SUPER_ADMIN_QQ；创建 bot 与 postgres 容器、内部网络和持久化数据卷；映射宿主机 18800 端口。
 services:
   postgres:
     container_name: postgre
@@ -39,6 +39,7 @@ services:
       NAPCAT_TOKEN: ${NAPCAT_TOKEN:?请在 .env 中设置 NAPCAT_TOKEN}
       WS_PORT: 18800
       JWT_SECRET: ${JWT_SECRET:?请在 .env 中设置 JWT_SECRET}
+      SUPER_ADMIN_QQ: ${SUPER_ADMIN_QQ:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_FORMAT: ${LOG_FORMAT:-text}
     ports:
