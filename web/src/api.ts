@@ -52,6 +52,19 @@ export interface CommandCreate {
   command: string
 }
 
+export interface PermissionState {
+  id: number
+  scope_type: 'global' | 'group'
+  scope_id: string
+  plugin_name: string
+  feature_key: string
+  subject_type: 'role' | 'user'
+  subject_id: string
+  effect: 'allow' | 'deny'
+}
+
+export type PermissionSet = Omit<PermissionState, 'id'>
+
 // apiRequest 执行统一鉴权请求并解析 code/message/data 响应。
 // @param path：以 /api 开头的接口路径；options：Fetch 请求参数。
 // @returns 成功响应中的 data，失败时抛出包含后端 message 的 Error。
@@ -192,5 +205,44 @@ export function deleteCommand(id: number): Promise<null> {
   // >>> 数据演变示例
   // 1. id1 -> DELETE -> null。
   // 2. id404 -> 404 -> 抛错。
+  return result
+}
+
+// listPermissions 获取全部显式权限策略。
+// @param 无。
+// @returns 权限策略列表。
+// ⚠️副作用说明：发起鉴权网络请求。
+export function listPermissions(): Promise<PermissionState[]> {
+  const result = apiRequest<PermissionState[]>('/api/permissions')
+
+  // >>> 数据演变示例
+  // 1. 有效Token -> GET permissions -> PermissionState[]。
+  // 2. Token失效 -> 清会话 -> 抛出鉴权错误。
+  return result
+}
+
+// setPermission 新增权限策略或更新相同维度的效果。
+// @param input：权限作用域、目标、主体和效果。
+// @returns 保存并热刷新后的权限策略。
+// ⚠️副作用说明：写入后端权限与审计记录，并刷新权限快照。
+export function setPermission(input: PermissionSet): Promise<PermissionState> {
+  const result = apiRequest<PermissionState>('/api/permissions', { method: 'POST', body: JSON.stringify(input) })
+
+  // >>> 数据演变示例
+  // 1. group123+ping+user200+allow -> UPSERT -> 返回策略。
+  // 2. user+非数字QQ -> 400 -> 抛出校验错误。
+  return result
+}
+
+// deletePermission 删除一条显式权限策略。
+// @param id：权限策略主键。
+// @returns 删除成功后的空数据。
+// ⚠️副作用说明：删除后端权限、写入审计并刷新权限快照。
+export function deletePermission(id: number): Promise<null> {
+  const result = apiRequest<null>(`/api/permissions/${id}`, { method: 'DELETE' })
+
+  // >>> 数据演变示例
+  // 1. id8 -> DELETE -> null并回退下一层规则。
+  // 2. id404 -> 404 -> 抛出不存在错误。
   return result
 }

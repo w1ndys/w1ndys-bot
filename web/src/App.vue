@@ -29,6 +29,7 @@ async function logout(): Promise<void> {
       <nav v-if="sessionToken" class="main-nav">
         <RouterLink to="/plugins">插件</RouterLink>
         <RouterLink to="/commands">功能触发词</RouterLink>
+        <RouterLink to="/permissions">权限策略</RouterLink>
       </nav>
       <button v-if="sessionToken" class="ghost-button" type="button" @click="logout">退出登录</button>
     </header>

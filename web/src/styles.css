@@ -80,6 +80,11 @@ code { color: #b9c8d5; font-family: ui-monospace, SFMono-Regular, Menlo, monospa
 .row-actions { display: flex; gap: 7px; }
 .compact { padding: 8px 10px; font-size: 13px; }
 .danger-button { border: 1px solid rgba(255,114,114,.4); border-radius: 9px; color: var(--danger); background: rgba(255,114,114,.06); font-weight: 700; }
+.permission-form { display: grid; grid-template-columns: repeat(4, 1fr); align-items: end; gap: 16px; margin-bottom: 24px; padding: 22px; }
+.permission-filters { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px; }
+.permission-filters input, .permission-filters select { padding: 10px 12px; }
+.effect-badge.allow { color: var(--success); background: rgba(83,209,140,.09); }
+.effect-badge.deny { color: var(--danger); background: rgba(255,114,114,.09); }
 .empty-state { padding: 70px 20px; text-align: center; color: var(--text-soft); border: 1px dashed var(--line); border-radius: 18px; }
 
 @media (max-width: 760px) {
@@ -93,4 +98,5 @@ code { color: #b9c8d5; font-family: ui-monospace, SFMono-Regular, Menlo, monospa
   .main-nav { margin-right: 8px; }
   .command-form { grid-template-columns: 1fr; }
   .command-input { grid-column: auto; }
+  .permission-form, .permission-filters { grid-template-columns: 1fr; }
 }
