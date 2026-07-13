@@ -3,6 +3,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -22,7 +23,97 @@ type fakeRepository struct {
 	adminInput      AdminCreate
 	adminPatch      AdminPatch
 	adminUserID     string
+	settings        []SettingState
+	setting         SettingState
+	settingKey      string
 	err             error
+}
+
+// ListSystemSettings 返回测试预设设置列表。
+// @param ctx：未使用的测试上下文。
+// @returns 预设设置列表或错误。
+// ⚠️副作用说明：无。
+func (f *fakeRepository) ListSystemSettings(_ context.Context) ([]SettingState, error) {
+	// >>> 数据演变示例
+	// 1. settings=[prefix] -> 返回列表,nil。
+	// 2. err=boom -> 返回列表,boom。
+	return f.settings, f.err
+}
+
+// SetSystemSetting 记录测试设置并返回相同状态。
+// @param ctx：未使用的上下文；actor：操作者；setting：设置状态。
+// @returns 原设置或预设错误。
+// ⚠️副作用说明：记录 setting。
+func (f *fakeRepository) SetSystemSetting(_ context.Context, _ Actor, setting SettingState) (SettingState, error) {
+	f.setting = setting
+
+	// >>> 数据演变示例
+	// 1. prefix="!" -> 记录 -> 返回相同设置。
+	// 2. err=boom -> 记录 -> 返回boom。
+	return setting, f.err
+}
+
+// DeleteSystemSetting 记录测试删除键。
+// @param ctx：未使用的上下文；actor：操作者；key：设置键。
+// @returns 预设错误。
+// ⚠️副作用说明：记录 settingKey。
+func (f *fakeRepository) DeleteSystemSetting(_ context.Context, _ Actor, key string) error {
+	f.settingKey = key
+
+	// >>> 数据演变示例
+	// 1. key=command_prefix -> 记录 -> nil。
+	// 2. err=boom -> 记录 -> boom。
+	return f.err
+}
+
+// TestSetSettingValidatesPersistsAndRefreshes 验证合法设置写入后热刷新。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行内存替身并可能终止当前测试。
+func TestSetSettingValidatesPersistsAndRefreshes(t *testing.T) {
+	repository := &fakeRepository{}
+	settings := &fakeRuntime{}
+	service := NewService(repository, nil, nil, nil, nil, settings, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
+	saved, err := service.SetSetting(context.Background(), Actor{ID: "100", Channel: ChannelWebUI}, "command_prefix", json.RawMessage(`"!"`))
+	// [决策理由] 合法管理员和设置值必须保存成功。
+	if err != nil {
+		t.Fatalf("SetSetting() error = %v", err)
+	}
+	// [决策理由] Repository 应收到标准定义说明和原始 JSON 值。
+	if saved.Key != "command_prefix" || string(repository.setting.Value) != `"!"` || repository.setting.Description == "" {
+		t.Fatalf("setting saved/repository = %+v/%+v", saved, repository.setting)
+	}
+	// [决策理由] 提交后 SettingsResolver 必须且只能刷新一次。
+	if settings.loads != 1 {
+		t.Fatalf("settings loads = %d, want 1", settings.loads)
+	}
+
+	// >>> 数据演变示例
+	// 1. command_prefix="!" -> 校验+Repository -> Load一次。
+	// 2. 返回设置包含定义说明 -> WebUI可直接展示。
+}
+
+// TestSetSettingRejectsUnknownKey 验证未知设置不进入数据库。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行内存替身并可能终止当前测试。
+func TestSetSettingRejectsUnknownKey(t *testing.T) {
+	repository := &fakeRepository{}
+	settings := &fakeRuntime{}
+	service := NewService(repository, nil, nil, nil, nil, settings, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
+	_, err := service.SetSetting(context.Background(), Actor{ID: "100", Channel: ChannelWebUI}, "db_password", json.RawMessage(`"secret"`))
+	// [决策理由] 基础设施或未知键必须返回 ErrUnknownSetting。
+	if !errors.Is(err, ErrUnknownSetting) {
+		t.Fatalf("SetSetting() error = %v, want ErrUnknownSetting", err)
+	}
+	// [决策理由] 未知键不得写入数据库或刷新运行时。
+	if repository.setting.Key != "" || settings.loads != 0 {
+		t.Fatalf("unexpected repository/refresh = %+v/%d", repository.setting, settings.loads)
+	}
+
+	// >>> 数据演变示例
+	// 1. db_password -> 未注册 -> ErrUnknownSetting。
+	// 2. 拒绝发生在Repository前 -> 零写入零刷新。
 }
 
 // ListSystemAdmins 返回测试预设管理员列表。
@@ -87,7 +178,7 @@ func (f *fakeRepository) DeleteSystemAdmin(_ context.Context, _ Actor, userID st
 func TestCreateAdminValidatesAndRefreshes(t *testing.T) {
 	repository := &fakeRepository{}
 	admins := &fakeRuntime{}
-	service := NewService(repository, nil, nil, nil, admins, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
+	service := NewService(repository, nil, nil, nil, admins, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
 	created, err := service.CreateAdmin(context.Background(), Actor{ID: "100", Channel: ChannelWebUI}, AdminCreate{UserID: "200", Nickname: "副管理员"})
 	// [决策理由] 合法最高管理员应能创建新账号。
 	if err != nil {
@@ -114,7 +205,7 @@ func TestCreateAdminValidatesAndRefreshes(t *testing.T) {
 func TestUpdateAdminRejectsSelfDisable(t *testing.T) {
 	repository := &fakeRepository{}
 	admins := &fakeRuntime{}
-	service := NewService(repository, nil, nil, nil, admins, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
+	service := NewService(repository, nil, nil, nil, admins, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
 	disabled := false
 	_, err := service.UpdateAdmin(context.Background(), Actor{ID: "100", Channel: ChannelWebUI}, "100", AdminPatch{Enabled: &disabled})
 	// [决策理由] 自禁用必须返回稳定保护错误。
@@ -220,7 +311,7 @@ func (f *fakeRepository) DeletePermission(_ context.Context, _ Actor, id int64) 
 func TestSetPermissionValidatesAndRefreshes(t *testing.T) {
 	repository := &fakeRepository{}
 	permissions := &fakeRuntime{}
-	service := NewService(repository, nil, nil, permissions, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
+	service := NewService(repository, nil, nil, permissions, nil, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
 	input := PermissionSet{ScopeType: "group", ScopeID: "123", PluginName: "ping", FeatureKey: "ping", SubjectRole: "member", Effect: "deny"}
 	saved, err := service.SetPermission(context.Background(), Actor{ID: "100", Channel: ChannelQQ}, input)
 	// [决策理由] 合法管理员权限策略必须保存成功。
@@ -248,7 +339,7 @@ func TestSetPermissionValidatesAndRefreshes(t *testing.T) {
 func TestSetPermissionRejectsUnknownRole(t *testing.T) {
 	repository := &fakeRepository{}
 	permissions := &fakeRuntime{}
-	service := NewService(repository, nil, nil, permissions, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
+	service := NewService(repository, nil, nil, permissions, nil, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
 	_, err := service.SetPermission(context.Background(), Actor{ID: "100", Channel: ChannelQQ}, PermissionSet{ScopeType: "global", ScopeID: "0", PluginName: "ping", SubjectRole: "root", Effect: "allow"})
 	// [决策理由] Resolver 不认识的角色必须返回校验错误。
 	if err == nil {
@@ -271,7 +362,7 @@ func TestSetPermissionRejectsUnknownRole(t *testing.T) {
 func TestCreateCommandNormalizesAndRefreshes(t *testing.T) {
 	repository := &fakeRepository{}
 	commands := &fakeRuntime{}
-	service := NewService(repository, nil, commands, nil, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
+	service := NewService(repository, nil, commands, nil, nil, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
 	input := CommandCreate{ScopeType: "global", ScopeID: "0", PluginName: "ping", FeatureKey: "ping", Command: " /测  试 "}
 	created, err := service.CreateCommand(context.Background(), Actor{ID: "100", Channel: ChannelQQ}, input)
 	// [决策理由] 有效管理员和全局命令必须创建成功。
@@ -299,7 +390,7 @@ func TestCreateCommandNormalizesAndRefreshes(t *testing.T) {
 func TestCreateCommandRejectsInvalidScopeBeforeRepository(t *testing.T) {
 	repository := &fakeRepository{}
 	commands := &fakeRuntime{}
-	service := NewService(repository, nil, commands, nil, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
+	service := NewService(repository, nil, commands, nil, nil, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
 	_, err := service.CreateCommand(context.Background(), Actor{ID: "100", Channel: ChannelQQ}, CommandCreate{ScopeType: "group", ScopeID: "0", Command: "测试"})
 	// [决策理由] 群级命令缺少具体群号必须返回校验错误。
 	if err == nil {
@@ -383,7 +474,7 @@ func (f *fakeRuntime) Load(_ context.Context) error {
 func TestSetPluginEnabledPersistsAuditedChangeAndRefreshes(t *testing.T) {
 	repository := &fakeRepository{updated: PluginState{Name: "ping", Enabled: true, Priority: 100}}
 	runtime := &fakeRuntime{}
-	service := NewService(repository, runtime, nil, nil, nil, &fakeAuthorizer{allowed: map[string]bool{"123": true}})
+	service := NewService(repository, runtime, nil, nil, nil, nil, &fakeAuthorizer{allowed: map[string]bool{"123": true}})
 	actor := Actor{ID: "123", Role: "super_admin", Channel: ChannelQQ, RequestID: "req-1"}
 	state, err := service.SetPluginEnabled(context.Background(), actor, "ping", true)
 	// [决策理由] 正常管理路径必须无错误才能继续验证结果。
@@ -419,7 +510,7 @@ func TestSetPluginEnabledPersistsAuditedChangeAndRefreshes(t *testing.T) {
 func TestSetPluginPriorityRejectsInvalidActor(t *testing.T) {
 	repository := &fakeRepository{}
 	runtime := &fakeRuntime{}
-	service := NewService(repository, runtime, nil, nil, nil, &fakeAuthorizer{})
+	service := NewService(repository, runtime, nil, nil, nil, nil, &fakeAuthorizer{})
 	_, err := service.SetPluginPriority(context.Background(), Actor{Channel: ChannelWebUI}, "ping", 20)
 	// [决策理由] 空 Actor ID 必须返回稳定领域错误供入口转换为拒绝响应。
 	if !errors.Is(err, ErrInvalidActor) {
@@ -446,7 +537,7 @@ func TestSetPluginPriorityRejectsInvalidActor(t *testing.T) {
 func TestSetPluginEnabledReturnsRefreshFailure(t *testing.T) {
 	repository := &fakeRepository{updated: PluginState{Name: "ping", Enabled: true}}
 	runtime := &fakeRuntime{err: errors.New("lifecycle failed")}
-	service := NewService(repository, runtime, nil, nil, nil, &fakeAuthorizer{})
+	service := NewService(repository, runtime, nil, nil, nil, nil, &fakeAuthorizer{})
 	state, err := service.SetPluginEnabled(context.Background(), Actor{ID: "system", Role: "system", Channel: ChannelSystem}, "ping", true)
 	// [决策理由] 热刷新失败不能向管理入口报告完全成功。
 	if err == nil {
@@ -473,7 +564,7 @@ func TestSetPluginEnabledReturnsRefreshFailure(t *testing.T) {
 func TestSetPluginEnabledRejectsUntrustedRole(t *testing.T) {
 	repository := &fakeRepository{}
 	runtime := &fakeRuntime{}
-	service := NewService(repository, runtime, nil, nil, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
+	service := NewService(repository, runtime, nil, nil, nil, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
 	_, err := service.SetPluginEnabled(context.Background(), Actor{ID: "200", Role: "super_admin", Channel: ChannelQQ}, "ping", true)
 	// [决策理由] actor.Role 来自入口组装，不能替代服务端身份快照。
 	if !errors.Is(err, ErrForbidden) {
@@ -500,7 +591,7 @@ func TestSetPluginEnabledRejectsUntrustedRole(t *testing.T) {
 func TestSetPluginEnabledRejectsDisablingAdmin(t *testing.T) {
 	repository := &fakeRepository{}
 	runtime := &fakeRuntime{}
-	service := NewService(repository, runtime, nil, nil, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
+	service := NewService(repository, runtime, nil, nil, nil, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
 	_, err := service.SetPluginEnabled(context.Background(), Actor{ID: "100", Channel: ChannelQQ}, "admin", false)
 	// [决策理由] 关闭唯一 QQ 恢复入口必须返回稳定保护错误。
 	if !errors.Is(err, ErrProtectedPlugin) {

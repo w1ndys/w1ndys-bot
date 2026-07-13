@@ -27,6 +27,9 @@ type Repository interface {
 	CreateSystemAdmin(context.Context, Actor, AdminCreate) (SystemAdmin, error)
 	UpdateSystemAdmin(context.Context, Actor, string, AdminPatch) (SystemAdmin, error)
 	DeleteSystemAdmin(context.Context, Actor, string) error
+	ListSystemSettings(context.Context) ([]SettingState, error)
+	SetSystemSetting(context.Context, Actor, SettingState) (SettingState, error)
+	DeleteSystemSetting(context.Context, Actor, string) error
 }
 
 // SystemAdminRepository 定义最高管理员身份数据的加载能力。

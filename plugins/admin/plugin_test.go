@@ -3,6 +3,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/w1ndys/w1ndys-bot/internal/management"
@@ -201,6 +202,39 @@ func (f *fakeManagement) DeleteAdmin(context.Context, management.Actor, string) 
 	// >>> 数据演变示例
 	// 1. QQ应急插件 -> 不调用 -> nil。
 	// 2. WebUI删除管理员由AdminService负责。
+	return nil
+}
+
+// ListSettings 满足完整 WebUI 管理契约；QQ 插件不调用。
+// @param ctx：未使用的上下文；actor：操作者。
+// @returns 空列表与 nil。
+// ⚠️副作用说明：无。
+func (f *fakeManagement) ListSettings(context.Context, management.Actor) ([]management.SettingState, error) {
+	// >>> 数据演变示例
+	// 1. QQ应急插件 -> 不调用 -> 空列表。
+	// 2. WebUI设置查询由AdminService负责。
+	return nil, nil
+}
+
+// SetSetting 满足完整 WebUI 管理契约；QQ 插件不调用。
+// @param ctx：未使用的上下文；actor：操作者；key：设置键；value：JSON值。
+// @returns 零值设置与 nil。
+// ⚠️副作用说明：无。
+func (f *fakeManagement) SetSetting(context.Context, management.Actor, string, json.RawMessage) (management.SettingState, error) {
+	// >>> 数据演变示例
+	// 1. QQ应急插件 -> 不调用 -> 零值。
+	// 2. WebUI设置写入由AdminService负责。
+	return management.SettingState{}, nil
+}
+
+// DeleteSetting 满足完整 WebUI 管理契约；QQ 插件不调用。
+// @param ctx：未使用的上下文；actor：操作者；key：设置键。
+// @returns nil。
+// ⚠️副作用说明：无。
+func (f *fakeManagement) DeleteSetting(context.Context, management.Actor, string) error {
+	// >>> 数据演变示例
+	// 1. QQ应急插件 -> 不调用 -> nil。
+	// 2. WebUI删除设置由AdminService负责。
 	return nil
 }
 

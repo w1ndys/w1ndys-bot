@@ -86,6 +86,7 @@ task migrate-down       # 回滚最近一个版本
 - [x] 命令别名 CRUD、事务审计与 Command Registry 热刷新服务
 - [x] 权限策略 CRUD、事务审计与 Permission Resolver 热刷新服务
 - [x] 最高管理员 CRUD、最后账号保护、事务审计与授权热刷新
+- [x] 受控系统设置、JSONB 审计、原子快照与命令前缀热更新
 - [x] 数据库自动迁移及迁移管理任务
 - [x] Dockerfile 与机器人/PostgreSQL Compose 编排
 
@@ -93,9 +94,8 @@ task migrate-down       # 回滚最近一个版本
 
 按以下顺序推进，每一步完成测试并独立提交：
 
-1. 扩展系统设置 Repository，统一写入、缓存和审计。
-2. 建设 WebUI 后端，包括认证、审计及管理 REST API。
-3. 建设 Vue 3 WebUI，按 Manifest 配置描述渲染开关、表单和 CRUD 页面。
+1. 建设 WebUI 后端，包括认证、审计及管理 REST API。
+2. 建设 Vue 3 WebUI，按 Manifest 配置描述渲染开关、表单和 CRUD 页面。
 
 当前尚未实现 WebUI Admin Console。QQ 通道仅作为轻量应急入口，最高管理员可使用 `/插件列表`、`/启用插件 <名称>` 和 `/禁用插件 <名称>`；命令别名、权限策略、管理员、优先级及复杂配置统一由后续 WebUI 管理，避免维护两套高风险 CRUD 交互。系统 `admin` 插件不可通过管理服务禁用。所有管理变更必须同时经过授权校验、重复检测、热更新和审计记录。
 

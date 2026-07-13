@@ -1,7 +1,10 @@
 // 📌 影响范围：无；定义管理入口、AdminService 与插件运行时共享的稳定契约。
 package management
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // Channel 表示管理操作来源。
 type Channel string
@@ -89,6 +92,13 @@ type AdminPatch struct {
 	Enabled  *bool
 }
 
+// SettingState 表示一项数据库系统业务设置。
+type SettingState struct {
+	Key         string
+	Value       json.RawMessage
+	Description string
+}
+
 // Controller 定义 QQ 管理插件与未来 WebUI 共用的管理能力。
 type Controller interface {
 	ListPlugins(context.Context, Actor) ([]PluginState, error)
@@ -105,4 +115,7 @@ type Controller interface {
 	CreateAdmin(context.Context, Actor, AdminCreate) (AdminState, error)
 	UpdateAdmin(context.Context, Actor, string, AdminPatch) (AdminState, error)
 	DeleteAdmin(context.Context, Actor, string) error
+	ListSettings(context.Context, Actor) ([]SettingState, error)
+	SetSetting(context.Context, Actor, string, json.RawMessage) (SettingState, error)
+	DeleteSetting(context.Context, Actor, string) error
 }

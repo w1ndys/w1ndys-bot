@@ -31,6 +31,10 @@ type PermissionSet = management.PermissionSet
 type SystemAdmin = management.AdminState
 type AdminCreate = management.AdminCreate
 type AdminPatch = management.AdminPatch
+type SettingState = management.SettingState
+
+var ErrSettingNotFound = errors.New("系统设置不存在")
+var ErrUnknownSetting = errors.New("未知系统设置")
 
 const ChannelWebUI = management.ChannelWebUI
 const ChannelQQ = management.ChannelQQ

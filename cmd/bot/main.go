@@ -101,8 +101,14 @@ func main() {
 		projectlogger.Error("加载最高管理员失败", "error", err)
 		return
 	}
+	settingsResolver := admin.NewSettingsResolver(adminRepository)
+	// [决策理由] 系统业务设置必须在消息路由启动前完成校验和快照发布。
+	if err := settingsResolver.Load(ctx); err != nil {
+		projectlogger.Error("加载系统设置失败", "error", err)
+		return
+	}
 	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool))
-	adminService := admin.NewService(adminRepository, pluginManager, commands, permissions, adminResolver, adminResolver)
+	adminService := admin.NewService(adminRepository, pluginManager, commands, permissions, adminResolver, settingsResolver, adminResolver)
 	wsServer := ws.NewServer(cfg.NapCatToken, func(_ context.Context, event ws.Event) error {
 		logEvent(event)
 		message, isMessage := event.(*ws.MessageEvent)
@@ -110,7 +116,7 @@ func main() {
 		if !isMessage {
 			return pluginManager.Handle(ctx, event)
 		}
-		binding, matched := commands.Resolve(strconv.FormatInt(message.GroupID, 10), message.RawMessage, "/")
+		binding, matched := commands.Resolve(strconv.FormatInt(message.GroupID, 10), message.RawMessage, settingsResolver.CommandPrefix())
 		// [决策理由] 未匹配命令的消息仍可由观察型插件处理。
 		if !matched {
 			return pluginManager.Handle(ctx, event)

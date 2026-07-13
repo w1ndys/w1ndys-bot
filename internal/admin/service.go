@@ -3,7 +3,9 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
 
 	commandregistry "github.com/w1ndys/w1ndys-bot/internal/command"
 	"github.com/w1ndys/w1ndys-bot/internal/permission"
@@ -26,15 +28,16 @@ type Service struct {
 	commands    RuntimeRefresher
 	permissions RuntimeRefresher
 	admins      RuntimeRefresher
+	settings    RuntimeRefresher
 	authorizer  AdminAuthorizer
 }
 
 // NewService 创建管理服务。
-// @param repository：管理仓库；runtime：插件刷新器；commands：命令刷新器；permissions：权限刷新器；admins：管理员刷新器；authorizer：最高管理员解析器。
+// @param repository：管理仓库；runtime：插件刷新器；commands：命令刷新器；permissions：权限刷新器；admins：管理员刷新器；settings：设置刷新器；authorizer：最高管理员解析器。
 // @returns 可复用的管理服务。
 // ⚠️副作用说明：无；仅保存依赖引用。
-func NewService(repository Repository, runtime RuntimeRefresher, commands RuntimeRefresher, permissions RuntimeRefresher, admins RuntimeRefresher, authorizer AdminAuthorizer) *Service {
-	service := &Service{repository: repository, runtime: runtime, commands: commands, permissions: permissions, admins: admins, authorizer: authorizer}
+func NewService(repository Repository, runtime RuntimeRefresher, commands RuntimeRefresher, permissions RuntimeRefresher, admins RuntimeRefresher, settings RuntimeRefresher, authorizer AdminAuthorizer) *Service {
+	service := &Service{repository: repository, runtime: runtime, commands: commands, permissions: permissions, admins: admins, settings: settings, authorizer: authorizer}
 
 	// >>> 数据演变示例
 	// 1. Repository + Manager + CommandRegistry + Resolver -> Service -> 支持授权、持久化与热刷新。
@@ -472,6 +475,131 @@ func (s *Service) reloadAdmins(ctx context.Context) error {
 	// >>> 数据演变示例
 	// 1. DB新增200 -> Load -> 200立即成为最高管理员。
 	// 2. Load失败 -> 返回错误 -> Resolver保留旧不可变快照。
+	return nil
+}
+
+// ListSettings 返回全部已注册设置及当前有效值。
+// @param ctx：查询生命周期；actor：操作者。
+// @returns 设置列表或授权、仓库错误。
+// ⚠️副作用说明：读取 system_settings；缺失数据库值时合并定义默认值。
+func (s *Service) ListSettings(ctx context.Context, actor Actor) ([]SettingState, error) {
+	// [决策理由] 系统设置属于敏感管理配置，读取前必须鉴权。
+	if err := s.authorize(actor); err != nil {
+		return nil, err
+	}
+	stored, err := s.repository.ListSystemSettings(ctx)
+	// [决策理由] 数据库查询失败时无法确定覆盖值。
+	if err != nil {
+		return nil, fmt.Errorf("列出系统设置: %w", err)
+	}
+	byKey := make(map[string]SettingState, len(stored))
+	for _, state := range stored {
+		byKey[state.Key] = state
+	}
+	definitions := Definitions()
+	result := make([]SettingState, 0, len(definitions))
+	for key, definition := range definitions {
+		state, exists := byKey[key]
+		// [决策理由] 数据库未覆盖时管理端也需要看到默认有效值。
+		if !exists {
+			state = SettingState{Key: key, Value: append(json.RawMessage(nil), definition.Default...), Description: definition.Description}
+		}
+		result = append(result, state)
+	}
+	sort.Slice(result, func(i int, j int) bool {
+		// >>> 数据演变示例
+		// 1. webui_title,command_prefix -> command_prefix排前。
+		// 2. 单项列表 -> 顺序不变。
+		return result[i].Key < result[j].Key
+	})
+
+	// >>> 数据演变示例
+	// 1. DB prefix="!" + 其他缺失 -> 返回!及其余默认值。
+	// 2. DB空 -> 返回4项完整默认设置。
+	return result, nil
+}
+
+// SetSetting 校验并保存已注册系统设置。
+// @param ctx：操作生命周期；actor：操作者；key：设置键；value：JSON原始值。
+// @returns 保存后设置或授权、校验、事务、刷新错误。
+// ⚠️副作用说明：写入设置与审计表，并可能替换 SettingsResolver 快照。
+func (s *Service) SetSetting(ctx context.Context, actor Actor, key string, value json.RawMessage) (SettingState, error) {
+	// [决策理由] 系统设置写入必须验证最高管理员身份。
+	if err := s.authorize(actor); err != nil {
+		return SettingState{}, err
+	}
+	definition, exists := settingDefinitions[key]
+	// [决策理由] 未注册键不得进入数据库形成不可控动态配置。
+	if !exists {
+		return SettingState{}, fmt.Errorf("%w: %s", ErrUnknownSetting, key)
+	}
+	// [决策理由] 写入前使用当前版本定义执行类型和范围校验。
+	if err := validateSetting(key, value); err != nil {
+		return SettingState{}, err
+	}
+	setting := SettingState{Key: key, Value: append(json.RawMessage(nil), value...), Description: definition.Description}
+	saved, err := s.repository.SetSystemSetting(ctx, actor, setting)
+	// [决策理由] 事务失败时不应刷新设置快照。
+	if err != nil {
+		return SettingState{}, fmt.Errorf("保存系统设置: %w", err)
+	}
+	// [决策理由] 提交后必须立即让支持热更新的业务读取新值。
+	if err := s.reloadSettings(ctx); err != nil {
+		return saved, err
+	}
+
+	// >>> 数据演变示例
+	// 1. command_prefix="!" -> 校验+UPSERT+audit -> 路由立即使用!。
+	// 2. unknown=true -> ErrUnknownSetting -> 不写数据库。
+	return saved, nil
+}
+
+// DeleteSetting 删除数据库覆盖并回退到定义默认值。
+// @param ctx：操作生命周期；actor：操作者；key：设置键。
+// @returns 授权、未知键、未找到、事务或刷新错误。
+// ⚠️副作用说明：删除设置覆盖、写审计并可能替换 SettingsResolver 快照。
+func (s *Service) DeleteSetting(ctx context.Context, actor Actor, key string) error {
+	// [决策理由] 系统设置删除必须验证最高管理员身份。
+	if err := s.authorize(actor); err != nil {
+		return err
+	}
+	_, exists := settingDefinitions[key]
+	// [决策理由] 未注册键不能通过管理服务操作。
+	if !exists {
+		return fmt.Errorf("%w: %s", ErrUnknownSetting, key)
+	}
+	// [决策理由] 删除失败时保持旧运行快照。
+	if err := s.repository.DeleteSystemSetting(ctx, actor, key); err != nil {
+		return fmt.Errorf("删除系统设置: %w", err)
+	}
+	// [决策理由] 删除覆盖后必须立即发布默认有效值。
+	if err := s.reloadSettings(ctx); err != nil {
+		return err
+	}
+
+	// >>> 数据演变示例
+	// 1. 删除command_prefix覆盖 -> Resolver.Load -> 前缀回退/。
+	// 2. 删除unknown -> ErrUnknownSetting -> 不访问数据库。
+	return nil
+}
+
+// reloadSettings 在设置事务提交后刷新运行时快照。
+// @param ctx：刷新生命周期。
+// @returns 刷新器错误；未配置刷新器时返回 nil。
+// ⚠️副作用说明：可能从数据库重载并替换 SettingsResolver 快照。
+func (s *Service) reloadSettings(ctx context.Context) error {
+	// [决策理由] nil 刷新器支持离线管理进程只修改数据库。
+	if s.settings == nil {
+		return nil
+	}
+	// [决策理由] 刷新失败需明确告知数据库已提交但运行时仍用旧快照。
+	if err := s.settings.Load(ctx); err != nil {
+		return fmt.Errorf("刷新系统设置快照: %w", err)
+	}
+
+	// >>> 数据演变示例
+	// 1. DB prefix="!" -> Load -> 路由立即读取!。
+	// 2. Load失败 -> 返回错误 -> Resolver保留旧快照。
 	return nil
 }
 
