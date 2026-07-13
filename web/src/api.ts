@@ -65,6 +65,13 @@ export interface PermissionState {
 
 export type PermissionSet = Omit<PermissionState, 'id'>
 
+export interface SettingState {
+  key: string
+  value: unknown
+  description: string
+  overridden: boolean
+}
+
 // apiRequest 执行统一鉴权请求并解析 code/message/data 响应。
 // @param path：以 /api 开头的接口路径；options：Fetch 请求参数。
 // @returns 成功响应中的 data，失败时抛出包含后端 message 的 Error。
@@ -244,5 +251,47 @@ export function deletePermission(id: number): Promise<null> {
   // >>> 数据演变示例
   // 1. id8 -> DELETE -> null并回退下一层规则。
   // 2. id404 -> 404 -> 抛出不存在错误。
+  return result
+}
+
+// listSettings 获取全部受控系统设置及当前有效值。
+// @param 无。
+// @returns 合并默认值与数据库覆盖后的设置列表。
+// ⚠️副作用说明：发起鉴权网络请求。
+export function listSettings(): Promise<SettingState[]> {
+  const result = apiRequest<SettingState[]>('/api/settings')
+
+  // >>> 数据演变示例
+  // 1. prefix已覆盖 -> 返回value="!"且overridden=true。
+  // 2. DB无覆盖 -> 返回后端定义默认值且overridden=false。
+  return result
+}
+
+// setSetting 保存一个受控系统设置的JSON值。
+// @param key：稳定设置键；value：符合该键定义的值。
+// @returns 保存并热刷新后的设置状态。
+// ⚠️副作用说明：写入设置与审计记录，并刷新运行时设置快照。
+export function setSetting(key: string, value: unknown): Promise<SettingState> {
+  const result = apiRequest<SettingState>(`/api/settings/${encodeURIComponent(key)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ value }),
+  })
+
+  // >>> 数据演变示例
+  // 1. command_prefix+"!" -> PUT -> 返回覆盖状态。
+  // 2. default_page_size+500 -> 400 -> 抛出校验错误。
+  return result
+}
+
+// resetSetting 删除数据库覆盖并恢复后端定义默认值。
+// @param key：稳定设置键。
+// @returns 删除成功后的空数据。
+// ⚠️副作用说明：删除设置覆盖、写入审计并刷新运行时设置快照。
+export function resetSetting(key: string): Promise<null> {
+  const result = apiRequest<null>(`/api/settings/${encodeURIComponent(key)}`, { method: 'DELETE' })
+
+  // >>> 数据演变示例
+  // 1. prefix覆盖存在 -> DELETE -> null并恢复"/"。
+  // 2. 无覆盖 -> 404 -> 抛出无覆盖错误。
   return result
 }

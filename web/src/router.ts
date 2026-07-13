@@ -5,6 +5,7 @@ import LoginView from './views/LoginView.vue'
 import PluginsView from './views/PluginsView.vue'
 import CommandsView from './views/CommandsView.vue'
 import PermissionsView from './views/PermissionsView.vue'
+import SettingsView from './views/SettingsView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -14,6 +15,7 @@ const router = createRouter({
     { path: '/plugins', name: 'plugins', component: PluginsView, meta: { requiresAuth: true } },
     { path: '/commands', name: 'commands', component: CommandsView, meta: { requiresAuth: true } },
     { path: '/permissions', name: 'permissions', component: PermissionsView, meta: { requiresAuth: true } },
+    { path: '/settings', name: 'settings', component: SettingsView, meta: { requiresAuth: true } },
   ],
 })
 

@@ -85,6 +85,12 @@ code { color: #b9c8d5; font-family: ui-monospace, SFMono-Regular, Menlo, monospa
 .permission-filters input, .permission-filters select { padding: 10px 12px; }
 .effect-badge.allow { color: var(--success); background: rgba(83,209,140,.09); }
 .effect-badge.deny { color: var(--danger); background: rgba(255,114,114,.09); }
+.settings-grid { display: grid; gap: 18px; }
+.setting-card { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, .7fr) auto; align-items: end; gap: 20px; padding: 24px; }
+.setting-card h2 { font-size: 20px; }
+.setting-status { display: inline-flex; margin-top: 4px; padding: 4px 8px; border-radius: 7px; color: var(--text-soft); background: rgba(145,162,178,.09); font-size: 12px; }
+.setting-status.overridden { color: var(--accent); background: rgba(255,184,77,.09); }
+.setting-actions { display: flex; gap: 8px; }
 .empty-state { padding: 70px 20px; text-align: center; color: var(--text-soft); border: 1px dashed var(--line); border-radius: 18px; }
 
 @media (max-width: 760px) {
@@ -95,8 +101,12 @@ code { color: #b9c8d5; font-family: ui-monospace, SFMono-Regular, Menlo, monospa
   .priority-field { grid-column: 1 / -1; }
   .topbar { padding: 0 16px; }
   .brand > span:last-child { display: none; }
-  .main-nav { margin-right: 8px; }
+  .main-nav { min-width: 0; margin-right: 8px; overflow-x: auto; scrollbar-width: none; }
+  .main-nav::-webkit-scrollbar { display: none; }
+  .main-nav a { flex: 0 0 auto; padding: 8px; font-size: 13px; }
+  .topbar > .ghost-button { flex: 0 0 auto; padding: 9px 10px; }
   .command-form { grid-template-columns: 1fr; }
   .command-input { grid-column: auto; }
   .permission-form, .permission-filters { grid-template-columns: 1fr; }
+  .setting-card { grid-template-columns: 1fr; }
 }
