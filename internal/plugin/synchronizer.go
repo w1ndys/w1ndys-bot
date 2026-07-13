@@ -52,9 +52,9 @@ func (s *Synchronizer) Sync(ctx context.Context, manifests []Manifest) error {
 		return fmt.Errorf("开始插件同步事务: %w", err)
 	}
 	defer transaction.Rollback(ctx)
-	// [决策理由] 每轮同步先标记全部未安装，随后当前 Manifest 再恢复 installed=true。
-	if _, err := transaction.Exec(ctx, `UPDATE plugin_definitions SET installed = FALSE, updated_at = NOW()`); err != nil {
-		return fmt.Errorf("标记插件未安装: %w", err)
+	// [决策理由] 每轮同步先标记全部不可用，随后当前 Manifest 再恢复 available=true。
+	if _, err := transaction.Exec(ctx, `UPDATE plugin_definitions SET available = FALSE, updated_at = NOW()`); err != nil {
+		return fmt.Errorf("标记插件不可用: %w", err)
 	}
 	for _, manifest := range manifests {
 		// [决策理由] 任一插件同步失败都必须回滚整批元数据。
@@ -68,8 +68,8 @@ func (s *Synchronizer) Sync(ctx context.Context, manifests []Manifest) error {
 	}
 
 	// >>> 数据演变示例
-	// 1. DB[A旧],manifests=[A新,B] -> A更新、B插入、两者 installed=true。
-	// 2. DB[A,B],manifests=[A] -> B installed=false，历史配置保留。
+	// 1. DB[A旧],manifests=[A新,B] -> A更新、B插入、两者 available=true。
+	// 2. DB[A,B],manifests=[A] -> B available=false，历史配置保留。
 	return nil
 }
 
@@ -80,7 +80,7 @@ func (s *Synchronizer) Sync(ctx context.Context, manifests []Manifest) error {
 func syncManifest(ctx context.Context, transaction pgx.Tx, manifest Manifest) error {
 	_, err := transaction.Exec(ctx, `
         INSERT INTO plugin_definitions
-            (plugin_name, display_name, description, version, priority, schema_version, installed)
+            (plugin_name, display_name, description, version, priority, schema_version, available)
         VALUES ($1, $2, $3, $4, $5, $6, TRUE)
         ON CONFLICT (plugin_name) DO UPDATE SET
             display_name = EXCLUDED.display_name,
@@ -88,7 +88,7 @@ func syncManifest(ctx context.Context, transaction pgx.Tx, manifest Manifest) er
             version = EXCLUDED.version,
             priority = EXCLUDED.priority,
             schema_version = EXCLUDED.schema_version,
-            installed = TRUE,
+            available = TRUE,
             updated_at = NOW()`,
 		manifest.Name, manifest.DisplayName, manifest.Description, manifest.Version, manifest.Priority, manifest.SchemaVersion)
 	// [决策理由] 插件定义是功能外键父记录，失败后不能继续写功能。
@@ -107,7 +107,7 @@ func syncManifest(ctx context.Context, transaction pgx.Tx, manifest Manifest) er
 		return fmt.Errorf("同步插件 %s 运行状态: %w", manifest.Name, err)
 	}
 	// [决策理由] 标记旧功能而不删除，避免将来级联删除管理员配置的命令和权限。
-	if _, err := transaction.Exec(ctx, `UPDATE plugin_features SET installed = FALSE, updated_at = NOW() WHERE plugin_name = $1`, manifest.Name); err != nil {
+	if _, err := transaction.Exec(ctx, `UPDATE plugin_features SET available = FALSE, updated_at = NOW() WHERE plugin_name = $1`, manifest.Name); err != nil {
 		return fmt.Errorf("标记插件 %s 旧功能: %w", manifest.Name, err)
 	}
 	for _, feature := range manifest.Features {
@@ -123,14 +123,14 @@ func syncManifest(ctx context.Context, transaction pgx.Tx, manifest Manifest) er
 		}
 		_, err = transaction.Exec(ctx, `
             INSERT INTO plugin_features
-		        (plugin_name, feature_key, display_name, description, default_commands, default_permissions, installed)
+		        (plugin_name, feature_key, display_name, description, default_commands, default_permissions, available)
 		    VALUES ($1, $2, $3, $4, $5, $6, TRUE)
 		    ON CONFLICT (plugin_name, feature_key) DO UPDATE SET
 		        display_name = EXCLUDED.display_name,
 		        description = EXCLUDED.description,
 		        default_commands = EXCLUDED.default_commands,
 		        default_permissions = EXCLUDED.default_permissions,
-		        installed = TRUE,
+		        available = TRUE,
 		        updated_at = NOW()`,
 			manifest.Name, feature.Key, feature.DisplayName, feature.Description, commands, permissions)
 		// [决策理由] 任一功能失败都应回滚整个插件 Manifest。
@@ -158,6 +158,6 @@ func syncManifest(ctx context.Context, transaction pgx.Tx, manifest Manifest) er
 
 	// >>> 数据演变示例
 	// 1. 新 ping Manifest -> definition + disabled config + ping feature。
-	// 2. 已有 score v1 -> score v2 -> 更新当前功能并标记已移除功能 installed=false。
+	// 2. 已有 score v1 -> score v2 -> 更新当前功能并标记已移除功能 available=false。
 	return nil
 }

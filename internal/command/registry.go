@@ -41,10 +41,10 @@ func (r *Registry) Load(ctx context.Context) error {
         SELECT c.id, c.scope_type, c.scope_id, c.plugin_name, c.feature_key,
                c.command, c.normalized_command, c.enabled
         FROM plugin_commands c
-        JOIN plugin_definitions p ON p.plugin_name = c.plugin_name AND p.installed = TRUE
+        JOIN plugin_definitions p ON p.plugin_name = c.plugin_name AND p.available = TRUE
         JOIN plugin_features f ON f.plugin_name = c.plugin_name
                               AND f.feature_key = c.feature_key
-                              AND f.installed = TRUE
+                              AND f.available = TRUE
         WHERE c.enabled = TRUE`)
 	// [决策理由] 查询失败时必须保留旧快照，避免瞬间清空所有命令。
 	if err != nil {

@@ -43,13 +43,14 @@ docs/                    设计与开发文档
 
 ## 4. 数据库迁移
 
-程序启动时自动向上迁移。当前迁移版本为 5：
+程序启动时自动向上迁移。当前迁移版本为 6：
 
 1. `plugin_config`：插件开关、优先级和 JSON 配置。
 2. `system_settings`、`system_admins`、`admin_audit_logs`：系统管理基础表。
 3. `plugin_definitions`、`plugin_features`：Manifest 元数据。
 4. `plugin_commands`：全局及群级自定义命令。
 5. `permission_policies`：插件或功能的角色权限覆盖。
+6. 将插件及功能的 `installed` 字段重命名为语义更准确的 `available`。
 
 每个版本同时提供 `up.sql` 与 `down.sql`，分别用于应用和回滚。不得修改已部署的迁移；结构变化应新增版本。
 
@@ -83,6 +84,7 @@ task migrate-down       # 回滚最近一个版本
 - [x] `ping` 插件端到端命令回复链路
 - [x] 最高管理员环境引导、身份缓存与 QQ 插件管理命令
 - [x] 命令别名 CRUD、事务审计与 Command Registry 热刷新服务
+- [x] 权限策略 CRUD、事务审计与 Permission Resolver 热刷新服务
 - [x] 数据库自动迁移及迁移管理任务
 - [x] Dockerfile 与机器人/PostgreSQL Compose 编排
 
@@ -90,13 +92,11 @@ task migrate-down       # 回滚最近一个版本
 
 按以下顺序推进，每一步完成测试并独立提交：
 
-1. 实现权限策略 CRUD，并在事务提交后原子热刷新权限快照。
-2. 扩展系统设置与管理员 Repository，统一写入、缓存和审计。
-3. 扩展 QQ 管理命令，使管理员可维护命令别名与群级权限。
-4. 建设 WebUI 后端，包括认证、审计及管理 REST API。
-5. 建设 Vue 3 WebUI，按 Manifest 配置描述渲染开关、表单和 CRUD 页面。
+1. 扩展系统设置与管理员 Repository，统一写入、缓存和审计。
+2. 建设 WebUI 后端，包括认证、审计及管理 REST API。
+3. 建设 Vue 3 WebUI，按 Manifest 配置描述渲染开关、表单和 CRUD 页面。
 
-当前尚未实现 WebUI Admin Console。最高管理员可使用插件管理命令：`/插件列表`、`/启用插件 <名称>`、`/禁用插件 <名称>`、`/设置插件优先级 <名称> <整数>`；也可使用命令管理命令：`/命令列表`、`/新增全局命令 <插件> <功能> <命令>`、`/新增群命令 <群号> <插件> <功能> <命令>`、`/修改命令 <ID> <新命令>`、`/删除命令 <ID>`。系统 `admin` 插件不可通过管理服务禁用。所有管理变更最终必须同时经过授权校验、重复检测、热更新和审计记录。
+当前尚未实现 WebUI Admin Console。QQ 通道仅作为轻量应急入口，最高管理员可使用 `/插件列表`、`/启用插件 <名称>` 和 `/禁用插件 <名称>`；命令别名、权限策略、管理员、优先级及复杂配置统一由后续 WebUI 管理，避免维护两套高风险 CRUD 交互。系统 `admin` 插件不可通过管理服务禁用。所有管理变更必须同时经过授权校验、重复检测、热更新和审计记录。
 
 ## 8. 阶段验收
 
