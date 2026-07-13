@@ -91,6 +91,7 @@ type SettingState struct {
 	Key         string
 	Value       json.RawMessage
 	Description string
+	Overridden  bool
 }
 
 // Controller 定义 QQ 管理插件与未来 WebUI 共用的管理能力。

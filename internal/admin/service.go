@@ -392,7 +392,7 @@ func (s *Service) ListSettings(ctx context.Context, actor Actor) ([]SettingState
 
 	// >>> 数据演变示例
 	// 1. DB prefix="!" + 其他缺失 -> 返回!及其余默认值。
-	// 2. DB空 -> 返回4项完整默认设置。
+	// 2. DB空 -> 返回3项完整默认设置。
 	return result, nil
 }
 
@@ -412,9 +412,9 @@ func (s *Service) SetSetting(ctx context.Context, actor Actor, key string, value
 	}
 	// [决策理由] 写入前使用当前版本定义执行类型和范围校验。
 	if err := validateSetting(key, value); err != nil {
-		return SettingState{}, err
+		return SettingState{}, fmt.Errorf("%w: %v", ErrInvalidSetting, err)
 	}
-	setting := SettingState{Key: key, Value: append(json.RawMessage(nil), value...), Description: definition.Description}
+	setting := SettingState{Key: key, Value: append(json.RawMessage(nil), value...), Description: definition.Description, Overridden: true}
 	saved, err := s.repository.SetSystemSetting(ctx, actor, setting)
 	// [决策理由] 事务失败时不应刷新设置快照。
 	if err != nil {

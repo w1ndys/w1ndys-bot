@@ -35,6 +35,50 @@ type fakePlugins struct {
 	permission      management.PermissionState
 	permissionInput management.PermissionSet
 	permissionID    int64
+	settings        []management.SettingState
+	setting         management.SettingState
+	settingKey      string
+	settingValue    json.RawMessage
+}
+
+// ListSettings 返回测试设置列表并记录 Actor。
+// @param ctx：未使用的请求上下文；actor：WebUI 操作者。
+// @returns 预设设置列表或错误。
+// ⚠️副作用说明：记录最近一次 Actor。
+func (f *fakePlugins) ListSettings(_ context.Context, actor management.Actor) ([]management.SettingState, error) {
+	f.actor = actor
+
+	// >>> 数据演变示例
+	// 1. settings=[prefix]+actor100 -> 记录actor -> 返回列表。
+	// 2. err=boom -> 返回预设错误。
+	return f.settings, f.err
+}
+
+// SetSetting 记录系统设置保存操作。
+// @param ctx：未使用的上下文；actor：操作者；key：设置键；value：JSON值。
+// @returns 预设设置状态或错误。
+// ⚠️副作用说明：记录 Actor、设置键和 JSON 值副本。
+func (f *fakePlugins) SetSetting(_ context.Context, actor management.Actor, key string, value json.RawMessage) (management.SettingState, error) {
+	f.actor, f.settingKey = actor, key
+	f.settingValue = append(json.RawMessage(nil), value...)
+
+	// >>> 数据演变示例
+	// 1. prefix+"!" -> 记录副本 -> setting,nil。
+	// 2. page_size+500+ErrInvalidSetting -> 记录 -> error。
+	return f.setting, f.err
+}
+
+// DeleteSetting 记录系统设置覆盖删除操作。
+// @param ctx：未使用的上下文；actor：操作者；key：设置键。
+// @returns 预设错误。
+// ⚠️副作用说明：记录 Actor 和设置键。
+func (f *fakePlugins) DeleteSetting(_ context.Context, actor management.Actor, key string) error {
+	f.actor, f.settingKey = actor, key
+
+	// >>> 数据演变示例
+	// 1. prefix -> 记录 -> nil。
+	// 2. 未覆盖prefix -> 记录 -> ErrSettingNotFound。
+	return f.err
 }
 
 // ListPermissions 返回测试权限列表并记录 Actor。
@@ -561,6 +605,87 @@ func TestPermissionRoutesMapInvalidAndNotFound(t *testing.T) {
 	// >>> 数据演变示例
 	// 1. user=abc -> ErrInvalidPermission -> 400 invalid_permission。
 	// 2. DELETE id404 -> ErrPermissionNotFound -> 404 permission_not_found。
+}
+
+// TestSettingRoutesListSetAndDelete 验证受控系统设置的查询、覆盖和恢复默认链路。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行 Argon2id 哈希并创建内存 HTTP 请求。
+func TestSettingRoutesListSetAndDelete(t *testing.T) {
+	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
+	controller := &fakePlugins{setting: management.SettingState{Key: "command_prefix", Value: json.RawMessage(`"!"`), Description: "机器人命令前缀", Overridden: true}}
+	controller.settings = []management.SettingState{controller.setting, {Key: "default_page_size", Value: json.RawMessage(`20`), Description: "管理列表默认分页大小"}}
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller)
+	// [决策理由] 完整控制器必须成功构造设置 API 服务。
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	token, err := server.sign("100")
+	// [决策理由] 设置接口均要求有效管理员 Token。
+	if err != nil {
+		t.Fatalf("sign() error = %v", err)
+	}
+	list := requestAPI(server, token, http.MethodGet, "/api/settings", "", "req-list-setting")
+	// [决策理由] 列表必须保留 JSON 值类型和覆盖状态。
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"value":"!"`) || !strings.Contains(list.Body.String(), `"overridden":true`) {
+		t.Fatalf("list status=%d body=%s", list.Code, list.Body.String())
+	}
+	set := requestAPI(server, token, http.MethodPut, "/api/settings/command_prefix", `{"value":"!"}`, "req-set-setting")
+	// [决策理由] 设置键、原始 JSON 和请求ID必须完整传入管理服务。
+	if set.Code != http.StatusOK || controller.settingKey != "command_prefix" || string(controller.settingValue) != `"!"` || controller.actor.RequestID != "req-set-setting" {
+		t.Fatalf("set status=%d key=%s value=%s actor=%+v", set.Code, controller.settingKey, controller.settingValue, controller.actor)
+	}
+	deleted := requestAPI(server, token, http.MethodDelete, "/api/settings/command_prefix", "", "req-delete-setting")
+	// [决策理由] 删除覆盖应传递设置键并返回统一空数据成功响应。
+	if deleted.Code != http.StatusOK || controller.settingKey != "command_prefix" || !strings.Contains(deleted.Body.String(), `"data":null`) {
+		t.Fatalf("delete status=%d key=%s body=%s", deleted.Code, controller.settingKey, deleted.Body.String())
+	}
+
+	// >>> 数据演变示例
+	// 1. PUT prefix="!" -> UPSERT+审计+热刷新 -> 200 overridden=true。
+	// 2. DELETE prefix -> 删除覆盖+回退默认/ -> 200 data:null。
+}
+
+// TestSettingRoutesMapInvalidAndUnknown 验证设置值、未知键及无覆盖错误映射。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行 Argon2id 哈希并创建内存 HTTP 请求。
+func TestSettingRoutesMapInvalidAndUnknown(t *testing.T) {
+	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
+	controller := &fakePlugins{err: admin.ErrInvalidSetting}
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller)
+	// [决策理由] 错误映射测试需要完整服务依赖。
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	token, err := server.sign("100")
+	// [决策理由] 必须通过认证后才能到达设置领域错误映射。
+	if err != nil {
+		t.Fatalf("sign() error = %v", err)
+	}
+	invalid := requestAPI(server, token, http.MethodPut, "/api/settings/default_page_size", `{"value":500}`, "")
+	// [决策理由] 超范围值应映射为400稳定业务码。
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `"code":"invalid_setting"`) {
+		t.Fatalf("invalid status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+	controller.err = admin.ErrUnknownSetting
+	unknown := requestAPI(server, token, http.MethodPut, "/api/settings/db_password", `{"value":"secret"}`, "")
+	// [决策理由] 未注册敏感键应映射为404且不成为动态设置。
+	if unknown.Code != http.StatusNotFound || !strings.Contains(unknown.Body.String(), `"code":"unknown_setting"`) {
+		t.Fatalf("unknown status=%d body=%s", unknown.Code, unknown.Body.String())
+	}
+	controller.err = admin.ErrSettingNotFound
+	missingOverride := requestAPI(server, token, http.MethodDelete, "/api/settings/command_prefix", "", "")
+	// [决策理由] 已使用默认值时再次删除应明确返回无覆盖状态。
+	if missingOverride.Code != http.StatusNotFound || !strings.Contains(missingOverride.Body.String(), `"code":"setting_override_not_found"`) {
+		t.Fatalf("missing override status=%d body=%s", missingOverride.Code, missingOverride.Body.String())
+	}
+
+	// >>> 数据演变示例
+	// 1. page_size=500 -> ErrInvalidSetting -> 400 invalid_setting。
+	// 2. db_password -> ErrUnknownSetting -> 404 unknown_setting。
 }
 
 // requestAPI 执行携带管理员 Token 的通用内存 API 请求。

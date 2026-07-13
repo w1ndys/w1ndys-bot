@@ -29,6 +29,7 @@ func (r *PostgresRepository) ListSystemSettings(ctx context.Context) ([]SettingS
 			return nil, fmt.Errorf("扫描系统设置: %w", err)
 		}
 		current.Value = append(json.RawMessage(nil), current.Value...)
+		current.Overridden = true
 		settings = append(settings, current)
 	}
 	// [决策理由] 迭代完成后仍需检查连接和协议错误。
@@ -64,6 +65,7 @@ func (r *PostgresRepository) SetSystemSetting(ctx context.Context, actor Actor, 
 	if err != nil {
 		return SettingState{}, fmt.Errorf("保存系统设置: %w", err)
 	}
+	saved.Overridden = true
 	var beforeValue any
 	// [决策理由] 新设置没有 before 快照，数据库审计应保存 NULL。
 	if found {

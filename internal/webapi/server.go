@@ -50,6 +50,9 @@ type ManagementController interface {
 	ListPermissions(context.Context, management.Actor) ([]management.PermissionState, error)
 	SetPermission(context.Context, management.Actor, management.PermissionSet) (management.PermissionState, error)
 	DeletePermission(context.Context, management.Actor, int64) error
+	ListSettings(context.Context, management.Actor) ([]management.SettingState, error)
+	SetSetting(context.Context, management.Actor, string, json.RawMessage) (management.SettingState, error)
+	DeleteSetting(context.Context, management.Actor, string) error
 }
 
 // Server 提供 WebUI 认证 HTTP 接口。
@@ -138,6 +141,17 @@ type permissionResponse struct {
 	Effect      string `json:"effect"`
 }
 
+type settingSetRequest struct {
+	Value json.RawMessage `json:"value"`
+}
+
+type settingResponse struct {
+	Key         string          `json:"key"`
+	Value       json.RawMessage `json:"value"`
+	Description string          `json:"description"`
+	Overridden  bool            `json:"overridden"`
+}
+
 // New 创建 WebUI API 服务并在内存中准备环境密码哈希。
 // @param password：环境变量中的共享密码；jwtSecret：JWT 签名密钥；admins：管理员快照解析器；controller：管理业务服务。
 // @returns 可注册到 HTTP 路由的 Server，或配置强度错误。
@@ -185,6 +199,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/permissions", s.authenticate(http.HandlerFunc(s.listPermissions)))
 	mux.Handle("POST /api/permissions", s.authenticate(http.HandlerFunc(s.setPermission)))
 	mux.Handle("DELETE /api/permissions/{permission_id}", s.authenticate(http.HandlerFunc(s.deletePermission)))
+	mux.Handle("GET /api/settings", s.authenticate(http.HandlerFunc(s.listSettings)))
+	mux.Handle("PUT /api/settings/{setting_key}", s.authenticate(http.HandlerFunc(s.setSetting)))
+	mux.Handle("DELETE /api/settings/{setting_key}", s.authenticate(http.HandlerFunc(s.deleteSetting)))
 	handler := s.middleware(mux)
 
 	// >>> 数据演变示例
@@ -536,6 +553,94 @@ func permissionView(state management.PermissionState) permissionResponse {
 	return view
 }
 
+// listSettings 返回全部受控系统设置及当前有效值。
+// @param writer：响应写入器；request：已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：读取 PostgreSQL 设置覆盖并写入 JSON 响应。
+func (s *Server) listSettings(writer http.ResponseWriter, request *http.Request) {
+	actor := actorFromRequest(request)
+	states, err := s.management.ListSettings(request.Context(), actor)
+	// [决策理由] 设置列表需要合并完整默认值，查询失败时不能返回部分结果。
+	if err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	result := make([]settingResponse, 0, len(states))
+	for _, state := range states {
+		result = append(result, settingView(state))
+	}
+	writeSuccess(writer, result)
+
+	// >>> 数据演变示例
+	// 1. DB覆盖prefix=!+其余默认 -> 合并DTO数组 -> 200。
+	// 2. Repository失败 -> 500统一错误且不返回部分设置。
+}
+
+// setSetting 保存一个已注册系统设置的 JSON 值。
+// @param writer：响应写入器；request：携带设置键与 value 的已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：可能 UPSERT 设置、写入审计并热刷新 SettingsResolver。
+func (s *Server) setSetting(writer http.ResponseWriter, request *http.Request) {
+	actor := actorFromRequest(request)
+	key := request.PathValue("setting_key")
+	var input settingSetRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
+	decoder.DisallowUnknownFields()
+	// [决策理由] value 必须保持原始 JSON 类型，未知包装字段应明确拒绝。
+	if err := decoder.Decode(&input); err != nil || len(input.Value) == 0 {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "系统设置参数格式无效")
+		return
+	}
+	state, err := s.management.SetSetting(request.Context(), actor, key, input.Value)
+	// [决策理由] 未知键、类型范围和持久化错误需要稳定区分。
+	if err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	writeSuccess(writer, settingView(state))
+
+	// >>> 数据演变示例
+	// 1. command_prefix+value="!" -> 校验+UPSERT+审计+热刷新 -> 200。
+	// 2. default_page_size+value=500 -> invalid_setting -> 400。
+}
+
+// deleteSetting 删除数据库设置覆盖并回退定义默认值。
+// @param writer：响应写入器；request：携带设置键的已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：可能删除设置覆盖、写入审计并热刷新 SettingsResolver。
+func (s *Server) deleteSetting(writer http.ResponseWriter, request *http.Request) {
+	actor := actorFromRequest(request)
+	key := request.PathValue("setting_key")
+	// [决策理由] 删除失败时不能声称已恢复默认值。
+	if err := s.management.DeleteSetting(request.Context(), actor, key); err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	writeSuccess(writer, nil)
+
+	// >>> 数据演变示例
+	// 1. command_prefix存在覆盖 -> DELETE+审计+Load -> 200 data:null并回退/。
+	// 2. 未覆盖设置 -> setting_override_not_found -> 404。
+}
+
+// settingView 将内部设置状态转换成稳定 API 模型。
+// @param state：管理服务设置状态。
+// @returns 包含当前值和是否覆盖的 snake_case 设置响应。
+// ⚠️副作用说明：复制 JSON 值，避免响应持有共享切片。
+func settingView(state management.SettingState) settingResponse {
+	value := append(json.RawMessage(nil), state.Value...)
+	// [决策理由] 设置值理论上始终合法，空值仍安全输出 null 而非破坏整个响应编码。
+	if len(value) == 0 {
+		value = json.RawMessage(`null`)
+	}
+	view := settingResponse{Key: state.Key, Value: value, Description: state.Description, Overridden: state.Overridden}
+
+	// >>> 数据演变示例
+	// 1. prefix="!"+Overridden=true -> DTO保留JSON字符串和覆盖标记。
+	// 2. 空Value -> null -> 保持合法统一响应。
+	return view
+}
+
 // actorFromRequest 将认证身份与请求 ID 转换成管理服务 Actor。
 // @param request：已通过 authenticate 和 middleware 的请求。
 // @returns 认证中间件注入的 WebUI 最高管理员 Actor。
@@ -610,6 +715,21 @@ func writeManagementError(writer http.ResponseWriter, err error) {
 	// [决策理由] 功能外键不存在表示页面提交了陈旧 Manifest 目标。
 	if errors.Is(err, admin.ErrFeatureNotFound) {
 		writeError(writer, http.StatusNotFound, "feature_not_found", "插件功能不存在")
+		return
+	}
+	// [决策理由] 设置 JSON 类型或范围错误属于客户端字段问题。
+	if errors.Is(err, admin.ErrInvalidSetting) {
+		writeError(writer, http.StatusBadRequest, "invalid_setting", "系统设置值无效")
+		return
+	}
+	// [决策理由] 未注册设置键不属于可管理资源。
+	if errors.Is(err, admin.ErrUnknownSetting) {
+		writeError(writer, http.StatusNotFound, "unknown_setting", "未知系统设置")
+		return
+	}
+	// [决策理由] 删除不存在的数据库覆盖表示当前设置已经在使用默认值。
+	if errors.Is(err, admin.ErrSettingNotFound) {
+		writeError(writer, http.StatusNotFound, "setting_override_not_found", "系统设置当前没有覆盖值")
 		return
 	}
 	// [决策理由] 授权失败不得被误报成服务器故障。

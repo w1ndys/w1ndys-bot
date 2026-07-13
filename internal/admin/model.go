@@ -31,6 +31,7 @@ type SettingState = management.SettingState
 
 var ErrSettingNotFound = errors.New("系统设置不存在")
 var ErrUnknownSetting = errors.New("未知系统设置")
+var ErrInvalidSetting = errors.New("系统设置值无效")
 
 const ChannelWebUI = management.ChannelWebUI
 const ChannelQQ = management.ChannelQQ
