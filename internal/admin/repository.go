@@ -16,6 +16,10 @@ import (
 type Repository interface {
 	ListPlugins(context.Context) ([]PluginState, error)
 	UpdatePlugin(context.Context, Actor, string, PluginPatch) (PluginState, error)
+	ListCommands(context.Context) ([]CommandState, error)
+	CreateCommand(context.Context, Actor, CommandCreate, string) (CommandState, error)
+	RenameCommand(context.Context, Actor, int64, string, string) (CommandState, error)
+	DeleteCommand(context.Context, Actor, int64) error
 }
 
 // SystemAdminRepository 定义最高管理员身份数据的加载能力。

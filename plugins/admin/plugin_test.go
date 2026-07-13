@@ -90,6 +90,50 @@ func (f *fakeManagement) SetPluginPriority(_ context.Context, actor management.A
 	return management.PluginState{Name: name, Enabled: true, Priority: priority}, nil
 }
 
+// ListCommands 返回空测试命令列表。
+// @param ctx：未使用的上下文；actor：操作者。
+// @returns 空列表与 nil。
+// ⚠️副作用说明：无。
+func (f *fakeManagement) ListCommands(context.Context, management.Actor) ([]management.CommandState, error) {
+	// >>> 数据演变示例
+	// 1. 查询命令 -> [] -> nil。
+	// 2. 无预设数据 -> 保持空列表。
+	return nil, nil
+}
+
+// CreateCommand 返回空测试命令。
+// @param ctx：未使用的上下文；actor：操作者；input：命令输入。
+// @returns 零值命令与 nil。
+// ⚠️副作用说明：无。
+func (f *fakeManagement) CreateCommand(context.Context, management.Actor, management.CommandCreate) (management.CommandState, error) {
+	// >>> 数据演变示例
+	// 1. CreateCommand -> 零值,nil。
+	// 2. 当前插件测试未调用 -> 无状态变化。
+	return management.CommandState{}, nil
+}
+
+// RenameCommand 返回空测试命令。
+// @param ctx：未使用的上下文；actor：操作者；id：命令 ID；command：新文本。
+// @returns 零值命令与 nil。
+// ⚠️副作用说明：无。
+func (f *fakeManagement) RenameCommand(context.Context, management.Actor, int64, string) (management.CommandState, error) {
+	// >>> 数据演变示例
+	// 1. RenameCommand -> 零值,nil。
+	// 2. 当前插件测试未调用 -> 无状态变化。
+	return management.CommandState{}, nil
+}
+
+// DeleteCommand 返回测试成功。
+// @param ctx：未使用的上下文；actor：操作者；id：命令 ID。
+// @returns nil。
+// ⚠️副作用说明：无。
+func (f *fakeManagement) DeleteCommand(context.Context, management.Actor, int64) error {
+	// >>> 数据演变示例
+	// 1. DeleteCommand -> nil。
+	// 2. 当前插件测试未调用 -> 无状态变化。
+	return nil
+}
+
 // TestHandleEnablePluginCommand 验证启用命令提取参数、身份并回复结果。
 // @param t：Go 测试上下文。
 // @returns 无。

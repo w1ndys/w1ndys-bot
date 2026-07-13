@@ -4,6 +4,8 @@ package admin
 import (
 	"context"
 	"fmt"
+
+	commandregistry "github.com/w1ndys/w1ndys-bot/internal/command"
 )
 
 // RuntimeRefresher 定义数据库管理变更后的运行时刷新能力。
@@ -20,20 +22,179 @@ type AdminAuthorizer interface {
 type Service struct {
 	repository Repository
 	runtime    RuntimeRefresher
+	commands   RuntimeRefresher
 	authorizer AdminAuthorizer
 }
 
 // NewService 创建管理服务。
-// @param repository：插件管理仓库；runtime：插件运行时刷新器；authorizer：最高管理员解析器。
+// @param repository：管理仓库；runtime：插件运行时刷新器；commands：命令快照刷新器；authorizer：最高管理员解析器。
 // @returns 可复用的管理服务。
 // ⚠️副作用说明：无；仅保存依赖引用。
-func NewService(repository Repository, runtime RuntimeRefresher, authorizer AdminAuthorizer) *Service {
-	service := &Service{repository: repository, runtime: runtime, authorizer: authorizer}
+func NewService(repository Repository, runtime RuntimeRefresher, commands RuntimeRefresher, authorizer AdminAuthorizer) *Service {
+	service := &Service{repository: repository, runtime: runtime, commands: commands, authorizer: authorizer}
 
 	// >>> 数据演变示例
-	// 1. Repository + Manager + Resolver -> Service -> 支持授权、持久化与热刷新。
-	// 2. Repository + nil Runtime + Resolver -> Service -> 授权后仅持久化管理配置。
+	// 1. Repository + Manager + CommandRegistry + Resolver -> Service -> 支持授权、持久化与热刷新。
+	// 2. Repository + nil刷新器 + Resolver -> Service -> 授权后仅持久化管理配置。
 	return service
+}
+
+// ListCommands 返回管理端命令列表。
+// @param ctx：查询生命周期；actor：操作者。
+// @returns 命令快照或授权、仓库错误。
+// ⚠️副作用说明：读取命令 Repository 和管理员快照。
+func (s *Service) ListCommands(ctx context.Context, actor Actor) ([]CommandState, error) {
+	// [决策理由] 命令配置属于管理信息，读取前也必须鉴权。
+	if err := s.authorize(actor); err != nil {
+		return nil, err
+	}
+	commands, err := s.repository.ListCommands(ctx)
+	// [决策理由] 查询失败和空列表必须明确区分。
+	if err != nil {
+		return nil, fmt.Errorf("列出命令: %w", err)
+	}
+
+	// >>> 数据演变示例
+	// 1. 管理员 + Repository[ping] -> [ping]。
+	// 2. 非管理员 -> ErrForbidden -> 不查询数据库。
+	return commands, nil
+}
+
+// CreateCommand 新增命令并热刷新命令快照。
+// @param ctx：操作生命周期；actor：操作者；input：新命令字段。
+// @returns 新命令快照或校验、事务、刷新错误。
+// ⚠️副作用说明：写入命令与审计表，并可能替换命令注册表快照。
+func (s *Service) CreateCommand(ctx context.Context, actor Actor, input CommandCreate) (CommandState, error) {
+	// [决策理由] 所有管理写入必须先验证服务端身份快照。
+	if err := s.authorize(actor); err != nil {
+		return CommandState{}, err
+	}
+	normalized, err := validateCommandInput(input.ScopeType, input.ScopeID, input.Command)
+	// [决策理由] 无效作用域或命令不得进入数据库事务。
+	if err != nil {
+		return CommandState{}, err
+	}
+	created, err := s.repository.CreateCommand(ctx, actor, input, normalized)
+	// [决策理由] 持久化失败时没有新快照需要发布。
+	if err != nil {
+		return CommandState{}, fmt.Errorf("新增命令: %w", err)
+	}
+	// [决策理由] 写入成功后必须立即让新命令参与路由。
+	if err := s.reloadCommands(ctx); err != nil {
+		return created, err
+	}
+
+	// >>> 数据演变示例
+	// 1. global:测试 -> Normalize -> INSERT+audit -> Registry.Load -> 返回新命令。
+	// 2. 重复命令 -> ErrCommandConflict -> 不刷新快照。
+	return created, nil
+}
+
+// RenameCommand 修改命令文本并热刷新命令快照。
+// @param ctx：操作生命周期；actor：操作者；id：命令 ID；command：新文本。
+// @returns 更新后命令或授权、校验、事务、刷新错误。
+// ⚠️副作用说明：更新命令与审计表，并可能替换命令注册表快照。
+func (s *Service) RenameCommand(ctx context.Context, actor Actor, id int64, command string) (CommandState, error) {
+	// [决策理由] 命令改名必须验证最高管理员身份。
+	if err := s.authorize(actor); err != nil {
+		return CommandState{}, err
+	}
+	// [决策理由] 非正数 ID 不可能对应数据库命令。
+	if id <= 0 {
+		return CommandState{}, fmt.Errorf("%w: %d", ErrCommandNotFound, id)
+	}
+	normalized, err := commandregistry.Normalize(command, "/")
+	// [决策理由] 改名使用与注册表相同的标准化规则。
+	if err != nil {
+		return CommandState{}, err
+	}
+	updated, err := s.repository.RenameCommand(ctx, actor, id, command, normalized)
+	// [决策理由] 事务失败时保持旧内存快照。
+	if err != nil {
+		return CommandState{}, fmt.Errorf("修改命令: %w", err)
+	}
+	// [决策理由] 改名提交后必须立即发布新匹配键。
+	if err := s.reloadCommands(ctx); err != nil {
+		return updated, err
+	}
+
+	// >>> 数据演变示例
+	// 1. id=1,“测试” -> UPDATE+audit -> Load -> 返回测试。
+	// 2. id=0 -> ErrCommandNotFound -> 不访问数据库。
+	return updated, nil
+}
+
+// DeleteCommand 删除命令并热刷新命令快照。
+// @param ctx：操作生命周期；actor：操作者；id：命令 ID。
+// @returns 授权、未找到、事务或刷新错误。
+// ⚠️副作用说明：删除命令、写入审计并可能替换命令注册表快照。
+func (s *Service) DeleteCommand(ctx context.Context, actor Actor, id int64) error {
+	// [决策理由] 命令删除必须验证最高管理员身份。
+	if err := s.authorize(actor); err != nil {
+		return err
+	}
+	// [决策理由] 非正数 ID 不可能对应数据库命令。
+	if id <= 0 {
+		return fmt.Errorf("%w: %d", ErrCommandNotFound, id)
+	}
+	// [决策理由] 删除失败时内存快照仍应保留旧命令。
+	if err := s.repository.DeleteCommand(ctx, actor, id); err != nil {
+		return fmt.Errorf("删除命令: %w", err)
+	}
+	// [决策理由] 删除提交后必须立即从路由快照移除。
+	if err := s.reloadCommands(ctx); err != nil {
+		return err
+	}
+
+	// >>> 数据演变示例
+	// 1. id=1 -> DELETE+audit -> Registry.Load -> nil。
+	// 2. id=404 -> ErrCommandNotFound -> 保留旧快照。
+	return nil
+}
+
+// validateCommandInput 校验命令作用域并返回标准化文本。
+// @param scopeType：global或group；scopeID：0或群号；command：命令文本。
+// @returns 标准化命令或作用域、文本错误。
+// ⚠️副作用说明：无。
+func validateCommandInput(scopeType string, scopeID string, command string) (string, error) {
+	// [决策理由] 全局命令只能位于固定作用域0。
+	if scopeType == "global" && scopeID != "0" {
+		return "", fmt.Errorf("全局命令 scope_id 必须为 0")
+	}
+	// [决策理由] 群级命令必须提供具体群号。
+	if scopeType == "group" && (scopeID == "" || scopeID == "0") {
+		return "", fmt.Errorf("群级命令必须提供群号")
+	}
+	// [决策理由] 未知作用域不能依赖数据库约束才拒绝。
+	if scopeType != "global" && scopeType != "group" {
+		return "", fmt.Errorf("命令作用域 %q 无效", scopeType)
+	}
+	normalized, err := commandregistry.Normalize(command, "/")
+
+	// >>> 数据演变示例
+	// 1. global,0,“/测试” -> Normalize -> “测试”。
+	// 2. group,0,“测试” -> 作用域校验 -> error。
+	return normalized, err
+}
+
+// reloadCommands 在命令写事务提交后刷新运行时快照。
+// @param ctx：刷新生命周期。
+// @returns 刷新器错误；未配置刷新器时返回 nil。
+// ⚠️副作用说明：可能从数据库重载并替换命令注册表快照。
+func (s *Service) reloadCommands(ctx context.Context) error {
+	// [决策理由] nil 刷新器支持迁移或离线管理进程只修改数据库。
+	if s.commands == nil {
+		return nil
+	}
+	// [决策理由] 刷新失败需要明确告知数据库已提交但运行时仍使用旧快照。
+	if err := s.commands.Load(ctx); err != nil {
+		return fmt.Errorf("刷新命令运行快照: %w", err)
+	}
+
+	// >>> 数据演变示例
+	// 1. DB新增测试 -> Load -> 内存立即可匹配测试。
+	// 2. Load失败 -> 返回错误 -> Registry保留旧不可变快照。
+	return nil
 }
 
 // ListPlugins 返回管理端插件列表。

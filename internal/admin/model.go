@@ -12,10 +12,14 @@ var ErrInvalidActor = errors.New("操作者不能为空")
 var ErrInvalidChannel = errors.New("管理通道无效")
 var ErrForbidden = errors.New("无最高管理员权限")
 var ErrProtectedPlugin = errors.New("系统管理插件不可禁用")
+var ErrCommandNotFound = errors.New("命令不存在")
+var ErrCommandConflict = errors.New("命令在作用域内重复")
 
 type Channel = management.Channel
 type Actor = management.Actor
 type PluginState = management.PluginState
+type CommandState = management.CommandState
+type CommandCreate = management.CommandCreate
 
 const ChannelWebUI = management.ChannelWebUI
 const ChannelQQ = management.ChannelQQ
