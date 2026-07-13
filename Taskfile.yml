@@ -10,9 +10,10 @@ env:
 
 tasks:
   setup:
-    desc: 安装或同步 Go 开发依赖
+    desc: 安装或同步 Go 与 WebUI 开发依赖
     cmds:
       - go mod download
+      - npm --prefix web install
 
   test:
     desc: 运行完整测试套件
@@ -24,11 +25,22 @@ tasks:
     cmds:
       - test -z "$(gofmt -l cmd internal pkg plugins)"
       - go vet ./...
+      - npm --prefix web run typecheck
 
   run:
     desc: 启动本地机器人基础框架
     cmds:
       - go run ./cmd/bot
+
+  web-dev:
+    desc: 启动 WebUI 开发服务器并代理本机 Go API
+    cmds:
+      - npm --prefix web run dev
+
+  web-build:
+    desc: 类型检查并构建 WebUI 生产资源
+    cmds:
+      - npm --prefix web run build
 
   migrate-up:
     desc: 应用所有未执行的数据库迁移

@@ -4,3 +4,5 @@
 bin/
 coverage.out
 .cache/
+web/node_modules/
+web/dist/
