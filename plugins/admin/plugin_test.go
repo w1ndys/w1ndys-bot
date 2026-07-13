@@ -44,11 +44,14 @@ func (f *fakeMessenger) Reply(_ context.Context, _ *ws.MessageEvent, message any
 }
 
 type fakeManagement struct {
-	states   []management.PluginState
-	actor    management.Actor
-	name     string
-	enabled  bool
-	priority int
+	states       []management.PluginState
+	actor        management.Actor
+	name         string
+	enabled      bool
+	priority     int
+	commandInput management.CommandCreate
+	commandID    int64
+	commandText  string
 }
 
 // ListPlugins 返回测试插件列表并记录操作者。
@@ -105,33 +108,97 @@ func (f *fakeManagement) ListCommands(context.Context, management.Actor) ([]mana
 // @param ctx：未使用的上下文；actor：操作者；input：命令输入。
 // @returns 零值命令与 nil。
 // ⚠️副作用说明：无。
-func (f *fakeManagement) CreateCommand(context.Context, management.Actor, management.CommandCreate) (management.CommandState, error) {
+func (f *fakeManagement) CreateCommand(_ context.Context, _ management.Actor, input management.CommandCreate) (management.CommandState, error) {
+	f.commandInput = input
 	// >>> 数据演变示例
-	// 1. CreateCommand -> 零值,nil。
-	// 2. 当前插件测试未调用 -> 无状态变化。
-	return management.CommandState{}, nil
+	// 1. CreateCommand(test) -> 记录input -> id=9,nil。
+	// 2. 带空格命令 -> 原文本保存在Command字段。
+	return management.CommandState{ID: 9, PluginName: input.PluginName, FeatureKey: input.FeatureKey, Command: input.Command}, nil
 }
 
 // RenameCommand 返回空测试命令。
 // @param ctx：未使用的上下文；actor：操作者；id：命令 ID；command：新文本。
 // @returns 零值命令与 nil。
 // ⚠️副作用说明：无。
-func (f *fakeManagement) RenameCommand(context.Context, management.Actor, int64, string) (management.CommandState, error) {
+func (f *fakeManagement) RenameCommand(_ context.Context, _ management.Actor, id int64, command string) (management.CommandState, error) {
+	f.commandID, f.commandText = id, command
 	// >>> 数据演变示例
 	// 1. RenameCommand -> 零值,nil。
 	// 2. 当前插件测试未调用 -> 无状态变化。
-	return management.CommandState{}, nil
+	return management.CommandState{ID: id, Command: command}, nil
 }
 
 // DeleteCommand 返回测试成功。
 // @param ctx：未使用的上下文；actor：操作者；id：命令 ID。
 // @returns nil。
 // ⚠️副作用说明：无。
-func (f *fakeManagement) DeleteCommand(context.Context, management.Actor, int64) error {
+func (f *fakeManagement) DeleteCommand(_ context.Context, _ management.Actor, id int64) error {
+	f.commandID = id
 	// >>> 数据演变示例
 	// 1. DeleteCommand -> nil。
 	// 2. 当前插件测试未调用 -> 无状态变化。
 	return nil
+}
+
+// TestHandleCreateGroupCommandPreservesCommandWords 验证群级新增命令解析目标和多词文本。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行内存插件并可能终止当前测试。
+func TestHandleCreateGroupCommandPreservesCommandWords(t *testing.T) {
+	messenger := &fakeMessenger{}
+	managementService := &fakeManagement{}
+	current := &implementation{messenger: messenger, management: managementService}
+	ctx := plugin.WithFeature(context.Background(), featureCommandCreateGroup)
+	err := current.Handle(ctx, &ws.MessageEvent{UserID: 2769731875, MessageID: 90, RawMessage: "/新增群命令 123 ping ping 测 试"})
+	// [决策理由] 创建成功后管理事件应停止继续传播。
+	if err != plugin.ErrStopPropagation {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	input := managementService.commandInput
+	// [决策理由] 群号、插件和功能必须按固定参数位置解析。
+	if input.ScopeType != "group" || input.ScopeID != "123" || input.PluginName != "ping" || input.FeatureKey != "ping" {
+		t.Fatalf("command input = %+v", input)
+	}
+	// [决策理由] 命令参数后的所有词都属于命令文本，不能只保留第一个词。
+	if input.Command != "测 试" {
+		t.Fatalf("command text = %q", input.Command)
+	}
+	// [决策理由] 创建结果必须引用回复原命令消息。
+	if messenger.referenceID != 90 || messenger.referenceContent != "命令 #9 已创建：测 试 → ping.ping" {
+		t.Fatalf("reply = %d,%q", messenger.referenceID, messenger.referenceContent)
+	}
+
+	// >>> 数据演变示例
+	// 1. 群123+ping.ping+“测 试” -> CommandCreate -> id=9。
+	// 2. message_id=90 -> 引用回复创建结果。
+}
+
+// TestHandleDeleteCommandRejectsInvalidID 验证删除命令在无效 ID 时提前终止。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行内存插件并可能终止当前测试。
+func TestHandleDeleteCommandRejectsInvalidID(t *testing.T) {
+	messenger := &fakeMessenger{}
+	managementService := &fakeManagement{}
+	current := &implementation{messenger: messenger, management: managementService}
+	ctx := plugin.WithFeature(context.Background(), featureCommandDelete)
+	err := current.Handle(ctx, &ws.MessageEvent{MessageID: 91, RawMessage: "/删除命令 abc"})
+	// [决策理由] 参数错误已回复，事件仍应视为消费完成。
+	if err != plugin.ErrStopPropagation {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	// [决策理由] 非数字 ID 不得调用删除事务。
+	if managementService.commandID != 0 {
+		t.Fatalf("DeleteCommand unexpectedly called with %d", managementService.commandID)
+	}
+	// [决策理由] 用户应收到明确的正整数格式提示。
+	if messenger.referenceContent != "操作失败：命令 ID 必须是正整数" {
+		t.Fatalf("reply = %q", messenger.referenceContent)
+	}
+
+	// >>> 数据演变示例
+	// 1. id=abc -> ParseInt失败 -> 不调用Service。
+	// 2. 参数错误 -> 引用回复明确提示。
 }
 
 // TestHandleEnablePluginCommand 验证启用命令提取参数、身份并回复结果。
