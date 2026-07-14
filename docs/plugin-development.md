@@ -37,7 +37,7 @@ blank import → init 注册 Registration → 启动同步 Manifest
 
    `plugin_name` 和 `feature_key` 会进入数据库、命令、权限和审计引用，发布后不要随意修改。
 
-   `plugins/echo/plugin.go` 把待修改元数据集中在文件顶部“插件配置区”。复制示例后，只需修改插件名称、展示信息、优先级、功能键、默认命令和默认权限；保持 `init` 只负责绑定集中 Manifest 与 Factory。插件随主程序源码一起编译和发布，不维护独立版本。
+   `plugins/echo/constants.go` 集中维护待修改的插件常量。复制示例后，只需修改插件名称、展示信息、优先级、功能键、默认命令和默认权限开关；保持 `plugin.go` 中的 `init` 只负责绑定集中 Manifest 与 Factory。插件随主程序源码一起编译和发布，不维护独立版本。
 
 3. 为每项独立能力声明一个 `FeatureManifest`：
 
