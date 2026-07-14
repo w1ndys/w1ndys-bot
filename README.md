@@ -90,6 +90,7 @@ task compose-down
 | `task test` | 运行全部 Go 测试 |
 | `task lint` | 检查 gofmt、go vet 和前端类型 |
 | `task web-build` | 类型检查并构建 WebUI |
+| `task web-e2e` | 使用无头 Chromium 验证桌面、平板和移动端管理流程 |
 | `task migrate-version` | 查看数据库迁移版本 |
 | `task migrate-up` | 应用所有待执行迁移 |
 | `task migrate-down` | 回滚最近一版迁移 |
@@ -120,7 +121,7 @@ web/                         Vue 3 管理界面
 docs/                        架构与开发文档
 ```
 
-更详细的消息路由、权限优先级、数据库模型及开发计划见 [开发指南](docs/guide.md)。贡献前请阅读 [Repository Guidelines](AGENTS.md)。
+更详细的消息路由、权限优先级、数据库模型及开发计划见 [开发指南](docs/guide.md)；生产配置、备份、升级与回滚步骤见 [部署手册](docs/deployment.md)。贡献前请阅读 [Repository Guidelines](AGENTS.md)。
 
 ## 配置与安全
 
