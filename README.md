@@ -121,7 +121,7 @@ web/                         Vue 3 管理界面
 docs/                        架构与开发文档
 ```
 
-更详细的消息路由、权限优先级、数据库模型及开发计划见 [开发指南](docs/guide.md)；生产配置、备份、升级与回滚步骤见 [部署手册](docs/deployment.md)。贡献前请阅读 [Repository Guidelines](AGENTS.md)。
+更详细的消息路由、权限优先级、数据库模型及开发计划见 [开发指南](docs/guide.md)；生产配置、备份、升级与回滚步骤见 [部署手册](docs/deployment.md)；版本变化见 [变更日志](CHANGELOG.md)。贡献前请阅读 [Repository Guidelines](AGENTS.md)。
 
 ## 配置与安全
 
