@@ -9,21 +9,6 @@ import (
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 )
 
-// 插件配置区：开发新插件时优先集中修改这里，避免元数据散落在init和业务函数中。
-const (
-	pluginName        = "echo"
-	pluginDisplayName = "Echo 回声"
-	pluginDescription = "回复命令后携带的文本，用于演示插件开发链路"
-	pluginPriority    = 100
-
-	featureEcho            = "echo"
-	featureDisplayName     = "回声"
-	featureDescription     = "引用回复输入参数"
-	defaultCommandEcho     = "echo"
-	defaultCommandEchoCN   = "回声"
-	defaultMemberAvailable = true
-)
-
 var manifest = plugin.Manifest{
 	Name: pluginName, DisplayName: pluginDisplayName, Description: pluginDescription,
 	Priority: pluginPriority,
