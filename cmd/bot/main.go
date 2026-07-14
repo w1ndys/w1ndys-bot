@@ -70,6 +70,7 @@ func main() {
 		return
 	}
 	registrations := plugin.Registrations()
+	logSupportedPlugins(registrations)
 	pluginSynchronizer := plugin.NewSynchronizer(pool)
 	// [决策理由] 插件定义必须在加载运行状态前与当前二进制 Manifest 保持一致。
 	if err := pluginSynchronizer.Sync(ctx, plugin.Manifests()); err != nil {
@@ -206,6 +207,40 @@ func main() {
 	// >>> 数据演变示例
 	// 1. 有效环境变量 + 可连接数据库 -> Config -> pgxpool -> WS 服务 -> 等待退出信号 -> 正常关闭。
 	// 2. 缺少 DB_PASSWORD -> 配置校验错误 -> 输出错误日志 -> 进程终止。
+}
+
+// logSupportedPlugins 输出当前二进制编译包含的插件及功能元数据。
+// @param registrations：按插件名排序的编译时插件注册快照。
+// @returns 无。
+// ⚠️副作用说明：向标准日志写入插件名称、优先级、系统标记、描述和功能元数据。
+func logSupportedPlugins(registrations []plugin.Registration) {
+	projectlogger.Info("已发现当前支持的插件", "plugin_count", len(registrations))
+	for _, registration := range registrations {
+		manifest := registration.Manifest
+		features := make([]map[string]any, 0, len(manifest.Features))
+		for _, feature := range manifest.Features {
+			features = append(features, map[string]any{
+				"key":                 feature.Key,
+				"display_name":        feature.DisplayName,
+				"description":         feature.Description,
+				"default_commands":    feature.DefaultCommands,
+				"default_permissions": feature.DefaultPermissions,
+			})
+		}
+		projectlogger.Info("当前支持插件",
+			"plugin", manifest.Name,
+			"display_name", manifest.DisplayName,
+			"description", manifest.Description,
+			"priority", manifest.Priority,
+			"system", manifest.System,
+			"feature_count", len(features),
+			"features", features,
+		)
+	}
+
+	// >>> 数据演变示例
+	// 1. [admin{3项功能},echo{1项功能}] -> 汇总 plugin_count=2 -> 分别输出两条完整插件日志。
+	// 2. [] -> 汇总 plugin_count=0 -> 不输出插件明细。
 }
 
 // featureDefaults 查找功能 Manifest 并转换默认权限。
