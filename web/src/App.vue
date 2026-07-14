@@ -185,7 +185,7 @@ async function handleSessionTokenChange(token: string): Promise<void> {
   }
   // [决策理由] 401会在API层清空Token，必须立即离开受保护页面且保留原目标供重新登录。
   if (token === '' && route.name !== 'login') {
-    await router.replace({ name: 'login', query: { redirect: route.fullPath } })
+    await router.replace({ name: 'login', query: { redirect: resolveSessionRedirect() } })
   }
   // [决策理由] 登录成功后应立即加载当前账号可见的插件二级菜单。
   if (token !== '') {
@@ -195,6 +195,24 @@ async function handleSessionTokenChange(token: string): Promise<void> {
   // >>> 数据演变示例
   // 1. /permissions+Token清空 -> /login?redirect=/permissions。
   // 2. 主动退出或登录页Token为空 -> 不追加redirect且不重复导航。
+}
+
+// resolveSessionRedirect 在启动期路由尚未同步时保留浏览器真实目标。
+// @param 无；读取Vue Router和浏览器地址栏。
+// @returns 会话恢复后应返回的站内路径。
+// ⚠️副作用说明：读取window.location，不修改浏览器状态。
+function resolveSessionRedirect(): string {
+  let result = route.fullPath
+  const browserPath = `${window.location.pathname}${window.location.search}`
+  // [决策理由] 应用启动早期route可能仍是根路径，此时地址栏才是用户实际访问目标。
+  if (result === '/' && browserPath !== '/') {
+    result = browserPath
+  }
+
+  // >>> 数据演变示例
+  // 1. route=/但地址栏=/plugins -> 启动期校正 -> /plugins。
+  // 2. route=/audit-logs且地址栏一致 -> 保留route -> /audit-logs。
+  return result
 }
 
 watch(sessionToken, handleSessionTokenChange)
