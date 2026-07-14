@@ -149,6 +149,7 @@ async function loadPage(): Promise<void> {
     if (pluginName.value === '' && plugins.value.length > 0) {
       pluginName.value = plugins.value[0].name
     }
+    await loadFeatures(pluginName.value)
   } catch (error) {
     setError(error, '加载权限策略失败')
   } finally {
@@ -392,10 +393,6 @@ onMounted(loadPage)
 
 <template>
   <section class="management-page">
-    <header class="page-heading">
-      <div><div class="breadcrumb">插件管理 / <code>{{ pluginName || '未选择插件' }}</code> / 权限</div><h1>权限策略</h1><p class="muted">配置显式规则；未命中时按“群级功能 → 群级插件 → 全局功能 → 全局插件 → Manifest 默认值”回退。</p></div>
-      <NButton secondary type="primary" :loading="loading" @click="loadPage">刷新</NButton>
-    </header>
     <NAlert v-if="errorMessage" type="error" closable @close="errorMessage = ''">{{ errorMessage }}</NAlert>
     <NAlert type="info" :bordered="false">空功能范围表示“当前插件全部功能”，不是未配置；拒绝规则与允许规则具有相同的作用域优先级。</NAlert>
 
@@ -432,7 +429,6 @@ onMounted(loadPage)
 
 <style scoped>
 .management-page { display: grid; gap: 24px; }
-.breadcrumb { color: var(--color-text-muted); font-size: 13px; margin-bottom: 8px; }
 .permission-form { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 0 16px; }
 .permission-form :deep(.n-form-item) { grid-column: span 3; }
 .form-action { align-items: center; display: flex; grid-column: span 3; padding-top: 30px; }

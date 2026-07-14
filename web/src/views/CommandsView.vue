@@ -31,6 +31,7 @@ const saving = ref(false)
 const pendingID = ref(0)
 const errorMessage = ref('')
 const featureRequestSequence = ref(0)
+const featureLoaded = ref(false)
 const deleteTarget = ref<CommandState | null>(null)
 
 const pluginOptions = computed(buildPluginOptions)
@@ -123,6 +124,7 @@ async function loadPage(): Promise<void> {
     if (selectedPlugin.value === '' && plugins.value.length > 0) {
       selectedPlugin.value = plugins.value[0].name
     }
+    await loadFeatures(selectedPlugin.value)
   } catch (error) {
     setError(error, '加载功能触发词失败')
   } finally {
@@ -141,6 +143,7 @@ async function loadPage(): Promise<void> {
 async function loadFeatures(pluginName: string): Promise<void> {
   const sequence = ++featureRequestSequence.value
   featureLoading.value = pluginName !== ''
+  featureLoaded.value = false
   features.value = []
   selectedFeature.value = ''
   // [决策理由] 空插件没有合法查询目标，应直接清除加载态。
@@ -162,6 +165,7 @@ async function loadFeatures(pluginName: string): Promise<void> {
       return
     }
     features.value = loaded
+    featureLoaded.value = true
     // [决策理由] 命令必须绑定真实功能，默认选择首个可用项。
     if (loaded.length > 0) {
       selectedFeature.value = loaded[0].key
@@ -365,15 +369,6 @@ onMounted(loadPage)
 
 <template>
   <section class="management-page">
-    <header class="page-heading">
-      <div>
-        <div class="breadcrumb">插件管理 / <code>{{ selectedPlugin || '未选择插件' }}</code> / 命令</div>
-        <h1>命令管理</h1>
-        <p class="muted">维护功能触发词。保存后立即热更新，并在同一作用域内执行重复检测。</p>
-      </div>
-      <NButton secondary type="primary" :loading="loading" @click="loadPage">刷新</NButton>
-    </header>
-
     <NAlert v-if="errorMessage" type="error" closable @close="errorMessage = ''">{{ errorMessage }}</NAlert>
 
     <NCard title="新增触发词" size="small" :bordered="true">
@@ -399,7 +394,7 @@ onMounted(loadPage)
         </NFormItem>
         <div class="form-action"><NButton attr-type="submit" type="primary" :loading="saving" :disabled="featureLoading || features.length === 0">添加触发词</NButton></div>
       </NForm>
-      <NAlert v-if="!featureLoading && selectedPlugin !== '' && features.length === 0" type="warning" :bordered="false">当前插件没有可用功能，无法创建触发词。</NAlert>
+      <NAlert v-if="featureLoaded && !featureLoading && selectedPlugin !== '' && features.length === 0" type="warning" :bordered="false">当前插件没有可用功能，无法创建触发词。</NAlert>
     </NCard>
 
     <NCard title="已配置命令" size="small">
@@ -436,7 +431,6 @@ onMounted(loadPage)
 
 <style scoped>
 .management-page { display: grid; gap: 24px; }
-.breadcrumb { color: var(--color-text-muted); font-size: 13px; margin-bottom: 8px; }
 .command-form { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 0 16px; }
 .command-form :deep(.n-form-item) { grid-column: span 3; }
 .command-form :deep(.n-form-item:nth-last-of-type(1)) { grid-column: span 5; }

@@ -11,6 +11,35 @@ const pluginName = computed(readPluginName)
 const plugin = ref<PluginState | null>(null)
 const loading = ref(true)
 const errorMessage = ref('')
+const pageHeading = computed(buildPageHeading)
+
+interface PageHeading {
+  breadcrumb: string
+  title: string
+  description: string
+}
+
+// buildPageHeading 根据当前工作台页签生成唯一的页面标题信息。
+// @param 无；读取当前路由名称和插件元数据。
+// @returns 当前页签的面包屑末级、标题与说明。
+// ⚠️副作用说明：无。
+function buildPageHeading(): PageHeading {
+  const headings: Record<string, PageHeading> = {
+    'plugin-overview': { breadcrumb: '概览', title: plugin.value?.display_name || pluginName.value || '插件概览', description: plugin.value?.description || '查看插件状态与基础信息。' },
+    'plugin-features': { breadcrumb: '功能', title: '所属功能', description: '查看当前插件注册并可供命令和权限策略使用的功能。' },
+    'plugin-commands': { breadcrumb: '命令', title: '命令管理', description: '维护功能触发词；保存后立即热更新，并在同一作用域内执行重复检测。' },
+    'plugin-permissions': { breadcrumb: '权限', title: '权限策略', description: '配置显式规则；未命中时按作用域优先级回退到 Manifest 默认值。' },
+  }
+  const routeName = String(route.name ?? '')
+  const fallback = headings['plugin-overview']
+  // [决策理由] 未知嵌套路由仍需展示稳定标题，避免工作台头部空白。
+  const result = headings[routeName] ?? fallback
+
+  // >>> 数据演变示例
+  // 1. plugin-commands+ping -> 命令 -> 命令管理 -> 命令维护说明。
+  // 2. 未知路由+admin -> 无匹配 -> 回退概览 -> Admin插件标题。
+  return result
+}
 
 // readPluginName 读取当前插件工作台的稳定路由参数。
 // @param 无。
@@ -91,12 +120,12 @@ watch(pluginName, loadPlugin, { immediate: true })
   <section class="workspace-shell" :aria-busy="loading">
     <header class="workspace-header">
       <div class="workspace-heading">
-        <p class="workspace-breadcrumb">插件管理 / <code>{{ pluginName || '未知插件' }}</code></p>
+        <p class="workspace-breadcrumb">插件管理 / <code>{{ pluginName || '未知插件' }}</code> / {{ pageHeading.breadcrumb }}</p>
         <div class="workspace-title-row">
-          <h1>{{ plugin?.display_name || pluginName || '插件工作台' }}</h1>
+          <h1>{{ pageHeading.title }}</h1>
           <span v-if="plugin" class="workspace-scope">当前范围：{{ plugin.name }}</span>
         </div>
-        <p class="workspace-description">{{ plugin?.description || '查看插件能力并管理该插件的运行配置、命令与权限。' }}</p>
+        <p class="workspace-description">{{ pageHeading.description }}</p>
       </div>
     </header>
 
