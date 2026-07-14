@@ -123,7 +123,7 @@ async function navigateMenu(key: string): Promise<void> {
 async function loadPluginMenu(): Promise<void> {
   // [决策理由] 未登录时插件接口必然返回401，不应发送无效请求。
   if (sessionToken.value === '') {
-    menuOptions.value = [{ label: '系统设置', key: 'settings' }]
+    menuOptions.value = [{ label: '系统设置', key: 'settings' }, { label: '审计日志', key: 'audit-logs' }]
     return
   }
   menuError.value = ''
@@ -139,12 +139,14 @@ async function loadPluginMenu(): Promise<void> {
     menuOptions.value = [
       { label: '插件管理', key: 'plugins', children },
       { label: '系统设置', key: 'settings' },
+      { label: '审计日志', key: 'audit-logs' },
     ]
   } catch (error) {
     menuError.value = error instanceof Error ? error.message : '插件菜单加载失败'
     menuOptions.value = [
       { label: '插件管理', key: 'plugins' },
       { label: '系统设置', key: 'settings' },
+      { label: '审计日志', key: 'audit-logs' },
     ]
   }
 

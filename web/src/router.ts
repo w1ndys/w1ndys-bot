@@ -67,6 +67,19 @@ function loadSettingsView() {
   return result
 }
 
+// loadAuditLogsView 懒加载审计日志页。
+// @param 无。
+// @returns 审计日志组件模块 Promise。
+// ⚠️副作用说明：首次访问时发起前端代码块请求。
+function loadAuditLogsView() {
+  const result = import('./views/AuditLogsView.vue')
+
+  // >>> 数据演变示例
+  // 1. 首次进入/audit-logs -> 请求审计页代码块 -> 渲染只读列表。
+  // 2. 再次进入 -> 浏览器缓存命中 -> 直接渲染。
+  return result
+}
+
 // loadPluginWorkspaceView 懒加载插件工作台外壳。
 // @param 无。
 // @returns 插件工作台组件模块 Promise。
@@ -125,6 +138,7 @@ const router = createRouter({
       ],
     },
     { path: '/settings', name: 'settings', component: loadSettingsView, meta: { requiresAuth: true } },
+    { path: '/audit-logs', name: 'audit-logs', component: loadAuditLogsView, meta: { requiresAuth: true } },
   ],
 })
 

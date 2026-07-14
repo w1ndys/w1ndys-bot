@@ -29,7 +29,7 @@ func (r *PostgresRepository) ListAuditLogs(ctx context.Context, query AuditQuery
 		return AuditPage{}, fmt.Errorf("统计审计日志: %w", err)
 	}
 	offset := (query.Page - 1) * query.PageSize
-	rows, err := r.pool.Query(ctx, `SELECT id,actor_id,actor_role,channel,action,target_type,target_id,before_json,after_json,success,COALESCE(error_message,''),COALESCE(request_id,''),created_at FROM admin_audit_logs `+auditFilter+` ORDER BY created_at DESC,id DESC LIMIT $7 OFFSET $8`, append(arguments, query.PageSize, offset)...)
+	rows, err := r.pool.Query(ctx, `SELECT id,actor_id,actor_role,channel,action,target_type,target_id,NULL::jsonb,NULL::jsonb,success,COALESCE(error_message,''),COALESCE(request_id,''),created_at FROM admin_audit_logs `+auditFilter+` ORDER BY created_at DESC,id DESC LIMIT $7 OFFSET $8`, append(arguments, query.PageSize, offset)...)
 	// [决策理由] 查询失败时不能返回与 total 不匹配的空页。
 	if err != nil {
 		return AuditPage{}, fmt.Errorf("查询审计日志: %w", err)
@@ -51,7 +51,7 @@ func (r *PostgresRepository) ListAuditLogs(ctx context.Context, query AuditQuery
 	page := AuditPage{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}
 
 	// >>> 数据演变示例
-	// 1. page=1,size=20,actor=100 -> COUNT+LIMIT20 OFFSET0 -> AuditPage。
+	// 1. page=1,size=20,actor=100 -> COUNT+不读取快照的LIMIT20 OFFSET0 -> AuditPage。
 	// 2. 无匹配记录 -> total=0,items=[] -> 空页。
 	return page, nil
 }

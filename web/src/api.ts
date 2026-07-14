@@ -72,6 +72,42 @@ export interface SettingState {
   overridden: boolean
 }
 
+export interface AuditState {
+  id: number
+  actor_id: string
+  actor_role: string
+  channel: string
+  action: string
+  target_type: string
+  target_id: string
+  before: unknown
+  after: unknown
+  success: boolean
+  error_message: string
+  request_id: string
+  created_at: string
+}
+
+export type AuditSummary = Omit<AuditState, 'before' | 'after'>
+
+export interface AuditPage {
+  items: AuditSummary[]
+  page: number
+  page_size: number
+  total: number
+}
+
+export interface AuditQuery {
+  page: number
+  page_size: number
+  actor_id?: string
+  action?: string
+  target_type?: string
+  target_id?: string
+  start_time?: string
+  end_time?: string
+}
+
 // apiRequest 执行统一鉴权请求并解析 code/message/data 响应。
 // @param path：以 /api 开头的接口路径；options：Fetch 请求参数。
 // @returns 成功响应中的 data，失败时抛出包含后端 message 的 Error。
@@ -293,5 +329,38 @@ export function resetSetting(key: string): Promise<null> {
   // >>> 数据演变示例
   // 1. prefix覆盖存在 -> DELETE -> null并恢复"/"。
   // 2. 无覆盖 -> 404 -> 抛出无覆盖错误。
+  return result
+}
+
+// listAuditLogs 分页读取只读审计日志。
+// @param query：分页、操作者、动作、资源与UTC时间范围筛选。
+// @returns 审计记录、当前分页和总数。
+// ⚠️副作用说明：发起鉴权网络请求。
+export function listAuditLogs(query: AuditQuery): Promise<AuditPage> {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) {
+    // [决策理由] 空筛选不应传给后端，否则会把“不限”误写成精确空值条件。
+    if (value !== undefined && value !== '') {
+      params.set(key, String(value))
+    }
+  }
+  const result = apiRequest<AuditPage>(`/api/audit-logs?${params.toString()}`)
+
+  // >>> 数据演变示例
+  // 1. page=2+action=plugin.enable -> URL参数编码 -> 返回第2页审计。
+  // 2. 空可选筛选+page=1 -> 仅发送分页参数 -> 返回全部类型首屏。
+  return result
+}
+
+// getAuditLog 获取单条审计的完整前后快照。
+// @param id：正整数审计记录ID。
+// @returns 后端权威审计详情。
+// ⚠️副作用说明：发起鉴权网络请求。
+export function getAuditLog(id: number): Promise<AuditState> {
+  const result = apiRequest<AuditState>(`/api/audit-logs/${id}`)
+
+  // >>> 数据演变示例
+  // 1. id=8 -> GET详情 -> 返回完整before/after。
+  // 2. id=404 -> 后端404 -> 抛出“审计日志不存在”。
   return result
 }

@@ -196,10 +196,24 @@ type auditResponse struct {
 }
 
 type auditPageResponse struct {
-	Items    []auditResponse `json:"items"`
-	Page     int             `json:"page"`
-	PageSize int             `json:"page_size"`
-	Total    int64           `json:"total"`
+	Items    []auditSummaryResponse `json:"items"`
+	Page     int                    `json:"page"`
+	PageSize int                    `json:"page_size"`
+	Total    int64                  `json:"total"`
+}
+
+type auditSummaryResponse struct {
+	ID           int64     `json:"id"`
+	ActorID      string    `json:"actor_id"`
+	ActorRole    string    `json:"actor_role"`
+	Channel      string    `json:"channel"`
+	Action       string    `json:"action"`
+	TargetType   string    `json:"target_type"`
+	TargetID     string    `json:"target_id"`
+	Success      bool      `json:"success"`
+	ErrorMessage string    `json:"error_message"`
+	RequestID    string    `json:"request_id"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // New 创建 WebUI API 服务并在内存中准备环境密码哈希。
@@ -831,9 +845,9 @@ func (s *Server) listAuditLogs(writer http.ResponseWriter, request *http.Request
 		writeManagementError(writer, err)
 		return
 	}
-	items := make([]auditResponse, 0, len(page.Items))
+	items := make([]auditSummaryResponse, 0, len(page.Items))
 	for _, state := range page.Items {
-		items = append(items, auditView(state))
+		items = append(items, auditSummaryView(state))
 	}
 	writeSuccess(writer, auditPageResponse{Items: items, Page: page.Page, PageSize: page.PageSize, Total: page.Total})
 
@@ -937,8 +951,8 @@ func parseOptionalTime(value string) (*time.Time, error) {
 // @returns JSON 快照为 null 或原值的 snake_case 审计响应。
 // ⚠️副作用说明：复制前后 JSON 字节。
 func auditView(state management.AuditState) auditResponse {
-	before := append(json.RawMessage(nil), state.BeforeJSON...)
-	after := append(json.RawMessage(nil), state.AfterJSON...)
+	before := redactAuditJSON(state.BeforeJSON)
+	after := redactAuditJSON(state.AfterJSON)
 	// [决策理由] 数据库 NULL 快照应编码成 JSON null，而不是省略或破坏响应。
 	if len(before) == 0 {
 		before = json.RawMessage(`null`)
@@ -947,12 +961,119 @@ func auditView(state management.AuditState) auditResponse {
 	if len(after) == 0 {
 		after = json.RawMessage(`null`)
 	}
-	view := auditResponse{ID: state.ID, ActorID: state.ActorID, ActorRole: state.ActorRole, Channel: state.Channel, Action: state.Action, TargetType: state.TargetType, TargetID: state.TargetID, Before: before, After: after, Success: state.Success, ErrorMessage: state.ErrorMessage, RequestID: state.RequestID, CreatedAt: state.CreatedAt.UTC()}
+	view := auditResponse{ID: state.ID, ActorID: state.ActorID, ActorRole: state.ActorRole, Channel: state.Channel, Action: state.Action, TargetType: state.TargetType, TargetID: state.TargetID, Before: before, After: after, Success: state.Success, ErrorMessage: sanitizeAuditError(state.ErrorMessage), RequestID: state.RequestID, CreatedAt: state.CreatedAt.UTC()}
 
 	// >>> 数据演变示例
 	// 1. update含before/after+东八区时间 -> DTO保留JSON并转UTC。
 	// 2. delete的after为空 -> after:null。
 	return view
+}
+
+// auditSummaryView 将内部审计状态转换为不含快照的列表摘要。
+// @param state：管理服务审计状态。
+// @returns 不包含before/after大字段的只读摘要。
+// ⚠️副作用说明：无。
+func auditSummaryView(state management.AuditState) auditSummaryResponse {
+	view := auditSummaryResponse{ID: state.ID, ActorID: state.ActorID, ActorRole: state.ActorRole, Channel: state.Channel, Action: state.Action, TargetType: state.TargetType, TargetID: state.TargetID, Success: state.Success, ErrorMessage: sanitizeAuditError(state.ErrorMessage), RequestID: state.RequestID, CreatedAt: state.CreatedAt.UTC()}
+
+	// >>> 数据演变示例
+	// 1. 含大型before/after的记录 -> 仅复制元数据 -> 轻量摘要。
+	// 2. 东八区created_at -> UTC转换 -> Z结尾时间。
+	return view
+}
+
+// redactAuditJSON 递归脱敏审计快照中的常见凭据字段。
+// @param raw：数据库保存的JSON快照。
+// @returns 脱敏后的独立JSON；空值或解析失败返回null。
+// ⚠️副作用说明：分配新JSON数据，不修改数据库原始审计记录。
+func redactAuditJSON(raw json.RawMessage) json.RawMessage {
+	// [决策理由] 数据库NULL快照应稳定输出JSON null。
+	if len(raw) == 0 {
+		return json.RawMessage(`null`)
+	}
+	var value any
+	// [决策理由] 非法历史JSON不得原样回传而泄露潜在敏感文本。
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return json.RawMessage(`null`)
+	}
+	redacted := redactAuditValue(value)
+	encoded, err := json.Marshal(redacted)
+	// [决策理由] 无法重新编码时必须采用安全闭合的null响应。
+	if err != nil {
+		return json.RawMessage(`null`)
+	}
+
+	// >>> 数据演变示例
+	// 1. {"token":"abc"} -> 解析并递归脱敏 -> {"token":"[已脱敏]"}。
+	// 2. 空值或非法JSON -> 安全回退 -> null。
+	return encoded
+}
+
+// redactAuditValue 递归复制JSON值并替换敏感字段。
+// @param value：已解析JSON值。
+// @returns 保持结构的脱敏副本。
+// ⚠️副作用说明：分配新的map与slice，不修改输入值。
+func redactAuditValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		result := make(map[string]any, len(typed))
+		for key, child := range typed {
+			// [决策理由] 名称包含凭据语义的字段不允许离开服务端。
+			if isSensitiveAuditKey(key) {
+				result[key] = "[已脱敏]"
+			} else {
+				result[key] = redactAuditValue(child)
+			}
+		}
+		return result
+	case []any:
+		result := make([]any, len(typed))
+		for index, child := range typed {
+			result[index] = redactAuditValue(child)
+		}
+		return result
+	default:
+		// >>> 数据演变示例
+		// 1. map含嵌套secret -> 递归map -> 字段替换。
+		// 2. 数组含普通数字与布尔值 -> 逐项复制 -> 原值保持。
+		return typed
+	}
+}
+
+// isSensitiveAuditKey 判断JSON字段名是否表达常见凭据语义。
+// @param key：原始字段名，可能包含大小写及分隔符。
+// @returns 规范化后命中敏感词时为true。
+// ⚠️副作用说明：无。
+func isSensitiveAuditKey(key string) bool {
+	normalized := strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.ToLower(key))
+	sensitiveTerms := []string{"password", "token", "secret", "credential", "apikey", "accesskey", "privatekey", "authorization", "cookie", "session", "dsn"}
+	for _, term := range sensitiveTerms {
+		// [决策理由] 前后缀组合如database_dsn和session_id同样属于敏感字段。
+		if strings.Contains(normalized, term) {
+			return true
+		}
+	}
+
+	// >>> 数据演变示例
+	// 1. "API_Key" -> "apikey" -> 命中apikey -> true。
+	// 2. "enabled" -> "enabled" -> 无敏感词 -> false。
+	return false
+}
+
+// sanitizeAuditError 避免数据库错误文本把请求凭据带到管理页面。
+// @param message：内部审计错误原文。
+// @returns 空错误保持为空，非空错误返回可关联请求ID的固定说明。
+// ⚠️副作用说明：无。
+func sanitizeAuditError(message string) string {
+	// [决策理由] 失败详情可能拼接外部输入，API不能安全判断其中哪些片段是秘密。
+	if message != "" {
+		return "操作失败，请根据请求 ID 查看受限服务端日志"
+	}
+
+	// >>> 数据演变示例
+	// 1. "连接失败 password=abc" -> 非空 -> 固定安全说明。
+	// 2. "" -> 无失败详情 -> ""。
+	return ""
 }
 
 // actorFromRequest 将认证身份与请求 ID 转换成管理服务 Actor。

@@ -740,7 +740,7 @@ func TestSettingRoutesMapInvalidAndUnknown(t *testing.T) {
 func TestAuditRoutesListAndDetail(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
 	createdAt := time.Date(2026, 7, 13, 10, 0, 0, 0, time.FixedZone("CST", 8*60*60))
-	record := management.AuditState{ID: 8, ActorID: "100", ActorRole: "super_admin", Channel: "webui", Action: "setting.set", TargetType: "system_setting", TargetID: "command_prefix", BeforeJSON: json.RawMessage(`{"Value":"/"}`), AfterJSON: json.RawMessage(`{"Value":"!"}`), Success: true, RequestID: "req-write", CreatedAt: createdAt}
+	record := management.AuditState{ID: 8, ActorID: "100", ActorRole: "super_admin", Channel: "webui", Action: "setting.set", TargetType: "system_setting", TargetID: "command_prefix", BeforeJSON: json.RawMessage(`{"Value":"/","token":"old-secret"}`), AfterJSON: json.RawMessage(`{"Value":"!","nested":{"password":"new-secret"}}`), Success: true, RequestID: "req-write", CreatedAt: createdAt}
 	controller := &fakePlugins{audit: record, auditPage: management.AuditPage{Items: []management.AuditState{record}, Page: 2, PageSize: 10, Total: 21}}
 	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller)
 	// [决策理由] 完整控制器必须成功构造审计 API 服务。
@@ -755,18 +755,51 @@ func TestAuditRoutesListAndDetail(t *testing.T) {
 	}
 	list := requestAPI(server, token, http.MethodGet, "/api/audit-logs?page=2&page_size=10&actor_id=100&action=setting.set&start_time=2026-07-13T00:00:00%2B08:00", "", "req-list-audit")
 	// [决策理由] 分页、筛选和审计 Actor 必须完整传入服务，响应保留总数。
-	if list.Code != http.StatusOK || controller.auditQuery.Page != 2 || controller.auditQuery.PageSize != 10 || controller.auditQuery.ActorID != "100" || controller.auditQuery.StartTime == nil || controller.actor.RequestID != "req-list-audit" || !strings.Contains(list.Body.String(), `"total":21`) {
+	if list.Code != http.StatusOK || controller.auditQuery.Page != 2 || controller.auditQuery.PageSize != 10 || controller.auditQuery.ActorID != "100" || controller.auditQuery.StartTime == nil || controller.actor.RequestID != "req-list-audit" || !strings.Contains(list.Body.String(), `"total":21`) || strings.Contains(list.Body.String(), `"before"`) {
 		t.Fatalf("list status=%d query=%+v actor=%+v body=%s", list.Code, controller.auditQuery, controller.actor, list.Body.String())
 	}
 	detail := requestAPI(server, token, http.MethodGet, "/api/audit-logs/8", "", "req-detail-audit")
-	// [决策理由] 详情接口必须传递ID并原样返回前后JSON快照。
-	if detail.Code != http.StatusOK || controller.auditID != 8 || !strings.Contains(detail.Body.String(), `"before":{"Value":"/"}`) || !strings.Contains(detail.Body.String(), `"after":{"Value":"!"}`) || !strings.Contains(detail.Body.String(), `"created_at":"2026-07-13T02:00:00Z"`) {
+	// [决策理由] 详情接口必须传递ID、保留非敏感值并在服务端脱敏凭据字段。
+	if detail.Code != http.StatusOK || controller.auditID != 8 || !strings.Contains(detail.Body.String(), `"Value":"/"`) || !strings.Contains(detail.Body.String(), `"token":"[已脱敏]"`) || !strings.Contains(detail.Body.String(), `"password":"[已脱敏]"`) || strings.Contains(detail.Body.String(), "old-secret") || strings.Contains(detail.Body.String(), "new-secret") || !strings.Contains(detail.Body.String(), `"created_at":"2026-07-13T02:00:00Z"`) {
 		t.Fatalf("detail status=%d id=%d body=%s", detail.Code, controller.auditID, detail.Body.String())
 	}
 
 	// >>> 数据演变示例
 	// 1. GET page2+actor100 -> AuditQuery -> 200 items,total21。
 	// 2. GET id8 -> 完整before/after JSON -> 200详情。
+}
+
+// TestRedactAuditJSON 验证常见敏感键、嵌套数组和异常JSON均安全闭合。
+// @param t：Go测试上下文。
+// @returns 无。
+// ⚠️副作用说明：无。
+func TestRedactAuditJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "common keys", raw: `{"API_Key":"a","authorization":"b","cookie":"c","database_dsn":"d"}`, want: `{"API_Key":"[已脱敏]","authorization":"[已脱敏]","cookie":"[已脱敏]","database_dsn":"[已脱敏]"}`},
+		{name: "nested array", raw: `[{"Private-Key":"a"},{"session_id":"b"},{"enabled":true}]`, want: `[{"Private-Key":"[已脱敏]"},{"session_id":"[已脱敏]"},{"enabled":true}]`},
+		{name: "invalid json", raw: `token=plain-secret`, want: `null`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := string(redactAuditJSON(json.RawMessage(test.raw)))
+			// [决策理由] 脱敏输出必须结构和值完全匹配安全预期。
+			if got != test.want {
+				t.Fatalf("redactAuditJSON() = %s, want %s", got, test.want)
+			}
+
+			// >>> 数据演变示例
+			// 1. API_Key输入 -> 规范化命中 -> [已脱敏]。
+			// 2. 非法JSON -> 解析失败 -> null。
+		})
+	}
+
+	// >>> 数据演变示例
+	// 1. 三组用例依次执行 -> 全部匹配 -> 测试通过。
+	// 2. 任一秘密未替换 -> 字符串不匹配 -> 测试失败。
 }
 
 // TestAuditRoutesRejectInvalidQueryAndMapNotFound 验证时间格式、ID和未找到错误映射。
