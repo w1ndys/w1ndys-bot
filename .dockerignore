@@ -8,3 +8,7 @@ coverage.out
 docs
 web/node_modules
 web/dist
+web/e2e
+web/playwright-report
+web/playwright.config.ts
+web/test-results

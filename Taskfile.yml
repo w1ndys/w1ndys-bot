@@ -43,6 +43,21 @@ tasks:
     cmds:
       - npm --prefix web run build
 
+  web-e2e-install:
+    desc: 安装 WSL/CI 无头测试所需的 Chromium 与系统依赖
+    cmds:
+      - npm --prefix web exec -- playwright install --with-deps chromium
+
+  web-e2e:
+    desc: 使用无头 Chromium 运行 WebUI 端到端测试
+    cmds:
+      - npm --prefix web run test:e2e
+
+  web-e2e-ui:
+    desc: 使用 Playwright UI 调试 WebUI 端到端测试
+    cmds:
+      - npm --prefix web run test:e2e:ui
+
   migrate-up:
     desc: 应用所有未执行的数据库迁移
     cmds:
