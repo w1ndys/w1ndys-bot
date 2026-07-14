@@ -1,8 +1,16 @@
 # w1ndys-bot
 
-基于 Go、NapCat OneBot 11 和 PostgreSQL 的 QQ 机器人框架，内置插件生命周期、命令路由、多级权限、审计日志与 Web 管理界面。
+面向个人开发者的 QQ 机器人开发框架。它负责 NapCat OneBot 11 接入、命令路由、权限、持久化和 Web 管理，开发者只需在 Go 代码中实现自己的机器人功能。
 
-> 项目仍在积极开发中。后端管理 API 与 Vue WebUI 已可用于开发，生产镜像会一并构建并托管 WebUI 静态资源。
+> 本项目采用源码内置插件模式，不提供插件市场、动态安装或独立插件版本。插件与主程序一起编译、测试和发布。
+
+## 适合什么场景
+
+- 为自己的 QQ 号或群聊快速开发自动回复、查询、管理及 API 联动功能。
+- 希望复用稳定的 OneBot 连接、权限和管理后台，不想为每个机器人重复搭建基础设施。
+- 接受修改 Go 源码后重新构建部署，不需要面向社区分发二进制插件。
+
+如果你需要跨项目动态安装第三方插件、插件市场或独立插件版本管理，本项目目前不适合该场景。
 
 ## 功能特性
 
@@ -14,14 +22,14 @@
 - Vue 3 + TypeScript + Naive UI 管理界面，采用亮色曲奇棕主题
 - PostgreSQL 自动迁移、Docker Compose 编排和结构化日志
 
-## 工作原理
+## 一条消息如何被处理
 
 ```text
 NapCat 事件 → WebSocket → 命令匹配 → 权限解析
              → PluginManager → 插件 → OneBot API → NapCat
 ```
 
-插件能力由代码中的 Manifest 定义，运行状态、命令、权限和系统设置保存在 PostgreSQL。启动时程序自动应用数据库迁移、同步插件元数据并发布运行时快照。
+插件通过代码中的 `Manifest` 声明名称、功能、默认命令和默认权限，通过 `Factory` 接收发送消息等运行依赖。运行状态、管理员调整后的命令、权限和系统设置保存在 PostgreSQL。服务启动时会自动迁移数据库、同步当前源码包含的插件，并打印插件清单。
 
 ## 环境要求
 
@@ -78,6 +86,22 @@ NapCat 事件 → WebSocket → 命令匹配 → 权限解析
 task compose-down
 ```
 
+## 开发自己的插件
+
+推荐从内置 Echo 示例开始：
+
+```bash
+cp -R plugins/echo plugins/my_plugin
+```
+
+然后完成三件事：
+
+1. 在插件文件顶部修改 `Manifest` 的名称、功能键、默认命令和默认权限。
+2. 在 `Handle` 中实现消息处理，并通过注入的 `Messenger` 调用 OneBot。
+3. 在 `cmd/bot/main.go` 中 blank import 插件包，使其编译进主程序。
+
+执行 `task test` 和 `task compose-rebuild` 后，即可在 WebUI 中启用插件并调整命令与权限。完整接口、生命周期和测试要求见 [插件开发指南](docs/plugin-development.md)。
+
 ## 本地开发
 
 常用命令均从仓库根目录执行：
@@ -121,7 +145,7 @@ web/                         Vue 3 管理界面
 docs/                        架构与开发文档
 ```
 
-更详细的消息路由、权限优先级、数据库模型及开发计划见 [开发指南](docs/guide.md)；生产配置、备份、升级与回滚步骤见 [部署手册](docs/deployment.md)；版本变化见 [变更日志](CHANGELOG.md)。贡献前请阅读 [Repository Guidelines](AGENTS.md)。
+架构与开发进度见 [开发指南](docs/guide.md)，部署、备份和回滚见 [部署手册](docs/deployment.md)，版本变化见 [变更日志](CHANGELOG.md)。贡献前请阅读 [Repository Guidelines](AGENTS.md)。
 
 ## 配置与安全
 
