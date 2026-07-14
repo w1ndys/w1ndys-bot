@@ -13,25 +13,7 @@ import (
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 )
 
-// 插件配置区：系统插件元数据集中维护，init只负责注册。
-const (
-	pluginName        = "admin"
-	pluginDisplayName = "系统管理"
-	pluginDescription = "通过QQ查询和紧急切换插件状态"
-	pluginPriority    = 1000
-
-	featureList           = "plugin_list"
-	featureListDisplay    = "插件列表"
-	featureListCommand    = "插件列表"
-	featureEnable         = "plugin_enable"
-	featureEnableDisplay  = "启用插件"
-	featureEnableCommand  = "启用插件"
-	featureDisable        = "plugin_disable"
-	featureDisableDisplay = "禁用插件"
-	featureDisableCommand = "禁用插件"
-)
-
-var systemPermissions = plugin.RolePermissions{SuperAdmin: true}
+var systemPermissions = plugin.RolePermissions{SuperAdmin: true} // 三项管理功能的默认角色权限：仅超级管理员可用，群主/管理员/成员均不可用
 
 var manifest = plugin.Manifest{
 	Name: pluginName, DisplayName: pluginDisplayName, Description: pluginDescription,
