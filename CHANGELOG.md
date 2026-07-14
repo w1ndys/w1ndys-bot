@@ -1,8 +1,10 @@
 # 变更日志
 
-本文件记录 `w1ndys-bot` 的重要变更。版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)，分类参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
+本文件记录 `w1ndys-bot` 的重要变更。发布标签采用北京时间日历版本 `vYYYY.MM.DD.HHmm`，精确到分钟且不使用自增序号；分类参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
 ## [Unreleased]
+
+## [2026.07.14.1517] - 2026-07-14 15:17 CST
 
 ### 新增
 
@@ -29,4 +31,5 @@
 - 修复启动期 API 401 丢失原访问路径的问题。
 - 修复权限策略事务锁键包含 NUL 导致 PostgreSQL 写入失败的问题。
 
-[Unreleased]: https://github.com/w1ndys/w1ndys-bot/commits/main
+[Unreleased]: https://github.com/w1ndys/w1ndys-bot/compare/v2026.07.14.1517...HEAD
+[2026.07.14.1517]: https://github.com/w1ndys/w1ndys-bot/releases/tag/v2026.07.14.1517
