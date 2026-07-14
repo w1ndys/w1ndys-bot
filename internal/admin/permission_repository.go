@@ -53,7 +53,7 @@ func (r *PostgresRepository) SetPermission(ctx context.Context, actor Actor, inp
 		return PermissionState{}, fmt.Errorf("开启权限管理事务: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	lockKey := input.ScopeType + "\x00" + input.ScopeID + "\x00" + input.PluginName + "\x00" + input.FeatureKey + "\x00" + input.SubjectType + "\x00" + input.SubjectID
+	lockKey := permissionLockKey(input)
 	// [决策理由] 不存在行无法被 FOR UPDATE 锁定，维度级 advisory lock 防止并发新增撞唯一索引。
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, lockKey); err != nil {
 		return PermissionState{}, fmt.Errorf("锁定权限策略维度: %w", err)
@@ -102,6 +102,25 @@ func (r *PostgresRepository) SetPermission(ctx context.Context, actor Actor, inp
 	// 1. 无member策略 + deny -> INSERT+audit -> 返回新ID。
 	// 2. 已有member:allow + deny -> UPDATE同一ID+audit -> deny。
 	return after, nil
+}
+
+// permissionLockKey 将权限唯一维度编码为PostgreSQL可接受且无歧义的锁键。
+// @param input：权限策略唯一维度。
+// @returns 不含NUL字节的JSON数组字符串。
+// ⚠️副作用说明：分配JSON编码字节，不访问数据库。
+func permissionLockKey(input PermissionSet) string {
+	dimensions := [...]string{input.ScopeType, input.ScopeID, input.PluginName, input.FeatureKey, input.SubjectType, input.SubjectID}
+	encoded, err := json.Marshal(dimensions)
+	// [决策理由] 固定字符串数组理论上不会编码失败；安全回退仍需保持可打印且维度有边界。
+	if err != nil {
+		return fmt.Sprintf("%q", dimensions)
+	}
+	result := string(encoded)
+
+	// >>> 数据演变示例
+	// 1. global,0,ping,"",role,member -> JSON数组 -> 无NUL稳定锁键。
+	// 2. 字段分别为"a,b"与"a","b" -> JSON边界不同 -> 不会锁键碰撞。
+	return result
 }
 
 // DeletePermission 删除权限策略并记录删除前快照。
