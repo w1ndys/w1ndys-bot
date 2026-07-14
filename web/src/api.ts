@@ -16,7 +16,6 @@ export interface PluginState {
   name: string
   display_name: string
   description: string
-  version: string
   available: boolean
   enabled: boolean
   priority: number

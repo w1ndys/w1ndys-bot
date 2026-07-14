@@ -29,14 +29,12 @@ type FeatureManifest struct {
 
 // Manifest 描述编译进二进制的插件及其管理元数据。
 type Manifest struct {
-	Name          string
-	DisplayName   string
-	Description   string
-	Version       string
-	SchemaVersion int
-	Priority      int
-	System        bool
-	Features      []FeatureManifest
+	Name        string
+	DisplayName string
+	Description string
+	Priority    int
+	System      bool
+	Features    []FeatureManifest
 }
 
 // Validate 校验插件及功能标识的稳定性和唯一性。
@@ -51,14 +49,6 @@ func (m Manifest) Validate() error {
 	// [决策理由] 展示名称为空会使 WebUI 无法提供可读插件列表。
 	if strings.TrimSpace(m.DisplayName) == "" {
 		return errors.New("插件展示名称不能为空")
-	}
-	// [决策理由] 版本用于判断二进制元数据变化，不能为空。
-	if strings.TrimSpace(m.Version) == "" {
-		return errors.New("插件版本不能为空")
-	}
-	// [决策理由] Schema 版本必须从 1 开始，便于配置升级判断。
-	if m.SchemaVersion < 1 {
-		return errors.New("插件 Schema 版本必须大于 0")
 	}
 	seenFeatures := make(map[string]struct{}, len(m.Features))
 	for _, feature := range m.Features {

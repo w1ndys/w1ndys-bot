@@ -408,8 +408,8 @@ func requestMe(server *Server, token string) *httptest.ResponseRecorder {
 func TestPluginRoutesListAndPatch(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
 	plugins := &fakePlugins{
-		states:  []management.PluginState{{Name: "ping", DisplayName: "Ping", Version: "1.0.0", Available: true, ConfigJSON: json.RawMessage(`{}`)}},
-		updated: management.PluginState{Name: "ping", DisplayName: "Ping", Version: "1.0.0", Available: true, Enabled: true, ConfigJSON: json.RawMessage(`{}`)},
+		states:  []management.PluginState{{Name: "ping", DisplayName: "Ping", Available: true, ConfigJSON: json.RawMessage(`{}`)}},
+		updated: management.PluginState{Name: "ping", DisplayName: "Ping", Available: true, Enabled: true, ConfigJSON: json.RawMessage(`{}`)},
 	}
 	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, plugins)
 	// [决策理由] 合法依赖必须构造插件 API 服务。
@@ -430,6 +430,10 @@ func TestPluginRoutesListAndPatch(t *testing.T) {
 	// [决策理由] 列表接口必须返回 snake_case 元数据并传递 WebUI Actor。
 	if listRecorder.Code != http.StatusOK || !strings.Contains(listRecorder.Body.String(), `"display_name":"Ping"`) || plugins.actor.ID != "100" || plugins.actor.RequestID != "req-list" {
 		t.Fatalf("list status=%d body=%s actor=%+v", listRecorder.Code, listRecorder.Body.String(), plugins.actor)
+	}
+	// [决策理由] 个人源码内置插件不维护独立版本，API 不应重新暴露已移除字段。
+	if strings.Contains(listRecorder.Body.String(), `"version"`) {
+		t.Fatalf("插件列表仍暴露 version: body=%s", listRecorder.Body.String())
 	}
 	patchRequest := httptest.NewRequest(http.MethodPatch, "/api/plugins/ping", strings.NewReader(`{"enabled":true}`))
 	patchRequest.Header.Set("Authorization", "Bearer "+token)

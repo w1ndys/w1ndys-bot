@@ -24,6 +24,37 @@ func TestNormalize(t *testing.T) {
 	// 2. " PING " -> "ping"。
 }
 
+// TestExtractArguments 验证单词、多词命令及大小写参数提取。
+// @param t：Go测试上下文。
+// @returns 无。
+// ⚠️副作用说明：无。
+func TestExtractArguments(t *testing.T) {
+	tests := []struct{ name, input, prefix, command, want string }{
+		{name: "single command", input: "/echo Hello  World", prefix: "/", command: "echo", want: "Hello World"},
+		{name: "multi command", input: "机器人 回声 保留大小写 AbC", command: "机器人 回声", want: "保留大小写 AbC"},
+		{name: "exact command", input: "/echo", prefix: "/", command: "echo", want: ""},
+		{name: "mismatch", input: "/ping hello", prefix: "/", command: "echo", want: ""},
+		{name: "unicode lower", input: "/İ 内容", prefix: "/", command: "i", want: "内容"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := ExtractArguments(test.input, test.prefix, test.command)
+			// [决策理由] 参数提取必须与表格中每种命令形态的预期完全一致。
+			if got != test.want {
+				t.Fatalf("ExtractArguments() = %q, want %q", got, test.want)
+			}
+
+			// >>> 数据演变示例
+			// 1. 单词命令+参数 -> 移除1个命令字段 -> 保留参数大小写。
+			// 2. 输入与命令不一致 -> 防御校验 -> 空参数。
+		})
+	}
+
+	// >>> 数据演变示例
+	// 1. 五组合法预期 -> 全部相等 -> 测试通过。
+	// 2. 多词边界错误 -> got不等want -> 测试失败。
+}
+
 // TestResolveMatchesLongestParameterizedCommand 验证带参数输入按最长命令前缀路由。
 // @param t：Go 测试上下文。
 // @returns 无。

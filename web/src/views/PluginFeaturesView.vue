@@ -125,7 +125,7 @@ function renderDefaultPermissions(row: FeatureState) {
   return result
 }
 
-// renderAvailability 渲染功能在当前版本中的可用状态。
+// renderAvailability 渲染功能在当前部署中的可用状态。
 // @param row：当前功能元数据。
 // @returns 带文字的语义状态标签。
 // ⚠️副作用说明：无。
@@ -166,7 +166,7 @@ onMounted(loadFeatures)
     <header class="section-heading">
       <div>
         <h2>所属功能</h2>
-        <p>功能由当前部署版本的插件 Manifest 声明，仅供查看；命令与权限请在对应工作台中配置。</p>
+        <p>功能由当前部署的插件 Manifest 声明，仅供查看；命令与权限请在对应工作台中配置。</p>
       </div>
       <NTag type="info">Manifest 只读</NTag>
     </header>

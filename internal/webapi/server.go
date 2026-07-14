@@ -107,7 +107,6 @@ type pluginResponse struct {
 	Name        string          `json:"name"`
 	DisplayName string          `json:"display_name"`
 	Description string          `json:"description"`
-	Version     string          `json:"version"`
 	Available   bool            `json:"available"`
 	Enabled     bool            `json:"enabled"`
 	Priority    int             `json:"priority"`
@@ -1099,7 +1098,7 @@ func pluginView(state management.PluginState) pluginResponse {
 	if len(config) == 0 {
 		config = json.RawMessage(`{}`)
 	}
-	view := pluginResponse{Name: state.Name, DisplayName: state.DisplayName, Description: state.Description, Version: state.Version, Available: state.Available, Enabled: state.Enabled, Priority: state.Priority, Config: config}
+	view := pluginResponse{Name: state.Name, DisplayName: state.DisplayName, Description: state.Description, Available: state.Available, Enabled: state.Enabled, Priority: state.Priority, Config: config}
 
 	// >>> 数据演变示例
 	// 1. ping+config{} -> snake_case DTO+独立JSON副本。

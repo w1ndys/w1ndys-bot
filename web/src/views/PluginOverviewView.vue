@@ -53,7 +53,7 @@ async function loadPluginOverview(): Promise<void> {
       applyPluginState(matched)
     } else {
       plugin.value = null
-      errorMessage.value = '插件不存在或未包含在当前部署版本中。'
+      errorMessage.value = '插件不存在或未编译进当前部署。'
     }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '加载插件概览失败'
@@ -149,13 +149,12 @@ onMounted(loadPluginOverview)
           <div class="section-heading">
             <div>
               <h2>插件状态</h2>
-              <p>状态与版本来自当前部署和插件 Manifest，仅用于确认运行范围。</p>
+              <p>状态来自当前部署和插件 Manifest，用于确认功能是否已编译并可运行。</p>
             </div>
-            <NTag :type="plugin.available ? 'success' : 'error'">{{ plugin.available ? '当前版本可用' : '当前版本不可用' }}</NTag>
+            <NTag :type="plugin.available ? 'success' : 'error'">{{ plugin.available ? '当前部署可用' : '当前部署不可用' }}</NTag>
           </div>
           <NDescriptions class="status-descriptions" label-placement="left" :column="2" bordered>
             <NDescriptionsItem label="插件键"><code>{{ plugin.name }}</code></NDescriptionsItem>
-            <NDescriptionsItem label="版本">v{{ plugin.version }}</NDescriptionsItem>
             <NDescriptionsItem label="运行状态"><NTag :type="plugin.enabled ? 'success' : 'default'">{{ plugin.enabled ? '已启用' : '已停用' }}</NTag></NDescriptionsItem>
             <NDescriptionsItem label="配置来源"><NTag>数据库覆盖与 Manifest 默认值</NTag></NDescriptionsItem>
           </NDescriptions>

@@ -76,7 +76,7 @@ async function loadPlugin(name: string): Promise<void> {
     plugin.value = matched
     // [决策理由] 不存在的插件必须与网络失败分开提示，避免管理员误判服务故障。
     if (matched === null) {
-      errorMessage.value = '插件不存在或未包含在当前部署版本中。'
+      errorMessage.value = '插件不存在或未编译进当前部署。'
     }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '加载插件工作台失败'

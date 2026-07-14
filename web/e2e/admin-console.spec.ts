@@ -2,7 +2,7 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
 
 const plugins = [
-  { name: 'ping', display_name: 'Ping', description: '连通性测试', version: '1.0.0', available: true, enabled: true, priority: 100, config: {} },
+  { name: 'ping', display_name: 'Ping', description: '连通性测试', available: true, enabled: true, priority: 100, config: {} },
 ]
 const features = [
   { plugin_name: 'ping', key: 'ping', display_name: '连通性测试', description: '回复延迟', available: true, default_commands: ['ping'], default_permissions: { member: true } },

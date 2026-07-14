@@ -52,9 +52,17 @@ func (s *Synchronizer) Sync(ctx context.Context, manifests []Manifest) error {
 		return fmt.Errorf("开始插件同步事务: %w", err)
 	}
 	defer transaction.Rollback(ctx)
+	// [决策理由] 默认命令由 Manifest 声明，应在同一事务重建以释放已移除插件或功能占用的触发词；管理员自定义命令不受影响。
+	if _, err := transaction.Exec(ctx, `DELETE FROM plugin_commands WHERE is_default = TRUE`); err != nil {
+		return fmt.Errorf("重建插件默认命令前清理旧记录: %w", err)
+	}
 	// [决策理由] 每轮同步先标记全部不可用，随后当前 Manifest 再恢复 available=true。
 	if _, err := transaction.Exec(ctx, `UPDATE plugin_definitions SET available = FALSE, updated_at = NOW()`); err != nil {
 		return fmt.Errorf("标记插件不可用: %w", err)
+	}
+	// [决策理由] 已移除插件的功能也必须立即变为不可用，避免管理 API 暴露与父插件矛盾的状态。
+	if _, err := transaction.Exec(ctx, `UPDATE plugin_features SET available = FALSE, updated_at = NOW()`); err != nil {
+		return fmt.Errorf("标记插件功能不可用: %w", err)
 	}
 	for _, manifest := range manifests {
 		// [决策理由] 任一插件同步失败都必须回滚整批元数据。
@@ -80,17 +88,15 @@ func (s *Synchronizer) Sync(ctx context.Context, manifests []Manifest) error {
 func syncManifest(ctx context.Context, transaction pgx.Tx, manifest Manifest) error {
 	_, err := transaction.Exec(ctx, `
         INSERT INTO plugin_definitions
-            (plugin_name, display_name, description, version, priority, schema_version, available)
-        VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+            (plugin_name, display_name, description, priority, available)
+		VALUES ($1, $2, $3, $4, TRUE)
         ON CONFLICT (plugin_name) DO UPDATE SET
             display_name = EXCLUDED.display_name,
             description = EXCLUDED.description,
-            version = EXCLUDED.version,
-            priority = EXCLUDED.priority,
-            schema_version = EXCLUDED.schema_version,
-            available = TRUE,
-            updated_at = NOW()`,
-		manifest.Name, manifest.DisplayName, manifest.Description, manifest.Version, manifest.Priority, manifest.SchemaVersion)
+			priority = EXCLUDED.priority,
+			available = TRUE,
+			updated_at = NOW()`,
+		manifest.Name, manifest.DisplayName, manifest.Description, manifest.Priority)
 	// [决策理由] 插件定义是功能外键父记录，失败后不能继续写功能。
 	if err != nil {
 		return fmt.Errorf("同步插件 %s 定义: %w", manifest.Name, err)
@@ -105,10 +111,6 @@ func syncManifest(ctx context.Context, transaction pgx.Tx, manifest Manifest) er
 	// [决策理由] 运行状态表必须为新插件创建默认关闭记录。
 	if err != nil {
 		return fmt.Errorf("同步插件 %s 运行状态: %w", manifest.Name, err)
-	}
-	// [决策理由] 标记旧功能而不删除，避免将来级联删除管理员配置的命令和权限。
-	if _, err := transaction.Exec(ctx, `UPDATE plugin_features SET available = FALSE, updated_at = NOW() WHERE plugin_name = $1`, manifest.Name); err != nil {
-		return fmt.Errorf("标记插件 %s 旧功能: %w", manifest.Name, err)
 	}
 	for _, feature := range manifest.Features {
 		commands, err := json.Marshal(feature.DefaultCommands)
@@ -143,7 +145,7 @@ func syncManifest(ctx context.Context, transaction pgx.Tx, manifest Manifest) er
 			if err != nil {
 				return fmt.Errorf("标准化插件 %s 功能 %s 默认命令: %w", manifest.Name, feature.Key, err)
 			}
-			_, err = transaction.Exec(ctx, `
+			commandTag, err := transaction.Exec(ctx, `
                 INSERT INTO plugin_commands
                     (scope_type, scope_id, plugin_name, feature_key, command, normalized_command, is_default)
                 VALUES ('global', '0', $1, $2, $3, $4, TRUE)
@@ -152,6 +154,10 @@ func syncManifest(ctx context.Context, transaction pgx.Tx, manifest Manifest) er
 			// [决策理由] 默认命令写入失败时 Manifest 与 Command Registry 不一致，必须回滚。
 			if err != nil {
 				return fmt.Errorf("同步插件 %s 功能 %s 默认命令: %w", manifest.Name, feature.Key, err)
+			}
+			// [决策理由] 冲突不能静默跳过，否则 Manifest 声明的功能可能在运行时没有触发词。
+			if commandTag.RowsAffected() == 0 {
+				return fmt.Errorf("插件 %s 功能 %s 默认命令 %q 与现有命令冲突", manifest.Name, feature.Key, defaultCommand)
 			}
 		}
 	}

@@ -29,7 +29,6 @@ type PluginState struct {
 	Name        string
 	DisplayName string
 	Description string
-	Version     string
 	Available   bool
 	Enabled     bool
 	Priority    int

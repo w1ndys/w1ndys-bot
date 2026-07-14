@@ -169,7 +169,6 @@ onMounted(loadPlugins)
             <p>{{ plugin.description || '暂无插件说明' }}</p>
             <div class="plugin-meta">
               <code>{{ plugin.name }}</code>
-              <span>v{{ plugin.version }}</span>
             </div>
           </div>
 

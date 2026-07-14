@@ -53,7 +53,7 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 // @returns 按优先级和名称排序的插件快照，或数据库错误。
 // ⚠️副作用说明：执行 PostgreSQL 只读查询。
 func (r *PostgresRepository) ListPlugins(ctx context.Context) ([]PluginState, error) {
-	rows, err := r.pool.Query(ctx, `SELECT c.plugin_name,d.display_name,d.description,d.version,d.available,c.enabled,c.priority,c.config_json FROM plugin_config c JOIN plugin_definitions d ON d.plugin_name=c.plugin_name ORDER BY c.priority DESC,c.plugin_name ASC`)
+	rows, err := r.pool.Query(ctx, `SELECT c.plugin_name,d.display_name,d.description,d.available,c.enabled,c.priority,c.config_json FROM plugin_config c JOIN plugin_definitions d ON d.plugin_name=c.plugin_name ORDER BY c.priority DESC,c.plugin_name ASC`)
 	// [决策理由] 查询失败时无法提供可信的完整管理快照。
 	if err != nil {
 		return nil, fmt.Errorf("查询插件配置: %w", err)
@@ -63,7 +63,7 @@ func (r *PostgresRepository) ListPlugins(ctx context.Context) ([]PluginState, er
 	for rows.Next() {
 		var state PluginState
 		// [决策理由] 单行结构异常意味着快照不完整，不能静默忽略。
-		if err := rows.Scan(&state.Name, &state.DisplayName, &state.Description, &state.Version, &state.Available, &state.Enabled, &state.Priority, &state.ConfigJSON); err != nil {
+		if err := rows.Scan(&state.Name, &state.DisplayName, &state.Description, &state.Available, &state.Enabled, &state.Priority, &state.ConfigJSON); err != nil {
 			return nil, fmt.Errorf("扫描插件配置: %w", err)
 		}
 		states = append(states, state)
@@ -141,7 +141,7 @@ func (r *PostgresRepository) UpdatePlugin(ctx context.Context, actor Actor, name
 // ⚠️副作用说明：对目标 plugin_config 行加行锁直至事务结束。
 func selectPlugin(ctx context.Context, tx pgx.Tx, name string) (PluginState, error) {
 	var state PluginState
-	err := tx.QueryRow(ctx, `SELECT c.plugin_name,d.display_name,d.description,d.version,d.available,c.enabled,c.priority,c.config_json FROM plugin_config c JOIN plugin_definitions d ON d.plugin_name=c.plugin_name WHERE c.plugin_name=$1 FOR UPDATE OF c`, name).Scan(&state.Name, &state.DisplayName, &state.Description, &state.Version, &state.Available, &state.Enabled, &state.Priority, &state.ConfigJSON)
+	err := tx.QueryRow(ctx, `SELECT c.plugin_name,d.display_name,d.description,d.available,c.enabled,c.priority,c.config_json FROM plugin_config c JOIN plugin_definitions d ON d.plugin_name=c.plugin_name WHERE c.plugin_name=$1 FOR UPDATE OF c`, name).Scan(&state.Name, &state.DisplayName, &state.Description, &state.Available, &state.Enabled, &state.Priority, &state.ConfigJSON)
 	// [决策理由] 将数据库无行错误转换为稳定领域错误，避免上层依赖 pgx。
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PluginState{}, fmt.Errorf("%w: %s", ErrPluginNotFound, name)

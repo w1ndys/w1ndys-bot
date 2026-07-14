@@ -1,7 +1,7 @@
 // 📌 影响范围：拦截浏览器管理写接口并维护内存测试状态；不访问真实数据库、NapCat或生产凭据。
 import { expect, test, type Page, type Route } from '@playwright/test'
 
-const plugin = { name: 'ping', display_name: 'Ping', description: '连通性测试', version: '1.0.0', available: true, enabled: true, priority: 100, config: {} }
+const plugin = { name: 'ping', display_name: 'Ping', description: '连通性测试', available: true, enabled: true, priority: 100, config: {} }
 const feature = { plugin_name: 'ping', key: 'ping', display_name: '连通性测试', description: '回复延迟', available: true, default_commands: ['ping'], default_permissions: { member: true } }
 
 // fulfill 返回统一WebAPI测试信封。

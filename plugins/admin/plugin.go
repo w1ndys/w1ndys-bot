@@ -13,9 +13,35 @@ import (
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 )
 
-const featureList = "plugin_list"
-const featureEnable = "plugin_enable"
-const featureDisable = "plugin_disable"
+// 插件配置区：系统插件元数据集中维护，init只负责注册。
+const (
+	pluginName        = "admin"
+	pluginDisplayName = "系统管理"
+	pluginDescription = "通过QQ查询和紧急切换插件状态"
+	pluginPriority    = 1000
+
+	featureList           = "plugin_list"
+	featureListDisplay    = "插件列表"
+	featureListCommand    = "插件列表"
+	featureEnable         = "plugin_enable"
+	featureEnableDisplay  = "启用插件"
+	featureEnableCommand  = "启用插件"
+	featureDisable        = "plugin_disable"
+	featureDisableDisplay = "禁用插件"
+	featureDisableCommand = "禁用插件"
+)
+
+var systemPermissions = plugin.RolePermissions{SuperAdmin: true}
+
+var manifest = plugin.Manifest{
+	Name: pluginName, DisplayName: pluginDisplayName, Description: pluginDescription,
+	Priority: pluginPriority, System: true,
+	Features: []plugin.FeatureManifest{
+		{Key: featureList, DisplayName: featureListDisplay, DefaultCommands: []string{featureListCommand}, DefaultPermissions: systemPermissions},
+		{Key: featureEnable, DisplayName: featureEnableDisplay, DefaultCommands: []string{featureEnableCommand}, DefaultPermissions: systemPermissions},
+		{Key: featureDisable, DisplayName: featureDisableDisplay, DefaultCommands: []string{featureDisableCommand}, DefaultPermissions: systemPermissions},
+	},
+}
 
 type implementation struct {
 	messenger  plugin.Messenger
@@ -30,7 +56,7 @@ func (p *implementation) Name() string {
 	// >>> 数据演变示例
 	// 1. implementation -> Name -> admin。
 	// 2. 任意运行状态 -> Name保持admin。
-	return "admin"
+	return pluginName
 }
 
 // Handle 执行最高管理员的插件查询和紧急启停命令。
@@ -185,15 +211,7 @@ func newPlugin(runtime plugin.Runtime) (plugin.Plugin, error) {
 // @returns 无。
 // ⚠️副作用说明：向全局Plugin Catalog注册admin。
 func init() {
-	permissions := plugin.RolePermissions{SuperAdmin: true}
-	plugin.MustRegister(plugin.Registration{Manifest: plugin.Manifest{
-		Name: "admin", DisplayName: "系统管理", Description: "通过QQ查询和紧急切换插件状态", Version: "1.1.0", SchemaVersion: 1, Priority: 1000, System: true,
-		Features: []plugin.FeatureManifest{
-			{Key: featureList, DisplayName: "插件列表", DefaultCommands: []string{"插件列表"}, DefaultPermissions: permissions},
-			{Key: featureEnable, DisplayName: "启用插件", DefaultCommands: []string{"启用插件"}, DefaultPermissions: permissions},
-			{Key: featureDisable, DisplayName: "禁用插件", DefaultCommands: []string{"禁用插件"}, DefaultPermissions: permissions},
-		},
-	}, Factory: newPlugin})
+	plugin.MustRegister(plugin.Registration{Manifest: manifest, Factory: newPlugin})
 
 	// >>> 数据演变示例
 	// 1. 进程加载包 -> 注册admin System Manifest与三项应急功能。

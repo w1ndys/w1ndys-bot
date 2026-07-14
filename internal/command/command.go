@@ -65,3 +65,34 @@ func Normalize(input string, prefix string) (string, error) {
 	// 2. " PING " + prefix=/ -> "ping"。
 	return value, nil
 }
+
+// ExtractArguments 从已匹配命令的原始输入中提取参数并保留参数大小写。
+// @param input：用户原始消息；prefix：系统命令前缀；normalizedCommand：Registry已匹配的标准命令。
+// @returns 合并空白后的参数文本；无参数或输入不一致时为空。
+// ⚠️副作用说明：无。
+func ExtractArguments(input string, prefix string, normalizedCommand string) string {
+	value := strings.TrimSpace(input)
+	// [决策理由] 系统前缀不属于触发词或业务参数，必须先移除。
+	if prefix != "" && strings.HasPrefix(value, prefix) {
+		value = strings.TrimSpace(strings.TrimPrefix(value, prefix))
+	}
+	inputFields := strings.Fields(value)
+	commandFields := strings.Fields(normalizedCommand)
+	// [决策理由] 精确命令没有剩余字段；异常短输入也应安全返回空参数。
+	if len(inputFields) <= len(commandFields) {
+		return ""
+	}
+	// [决策理由] 调用方通常来自Registry匹配，但独立使用时仍需防止错误命令截取用户文本。
+	for index, commandField := range commandFields {
+		// [决策理由] 命令匹配不区分大小写，参数提取必须采用相同语义。
+		if strings.ToLower(inputFields[index]) != strings.ToLower(commandField) {
+			return ""
+		}
+	}
+	result := strings.Join(inputFields[len(commandFields):], " ")
+
+	// >>> 数据演变示例
+	// 1. "/echo Hello World"+prefix=/+command=echo -> 去命令 -> "Hello World"。
+	// 2. "回声 文本"+command="自定义 回声" -> 命令不一致 -> ""。
+	return result
+}

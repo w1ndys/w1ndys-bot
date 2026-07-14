@@ -56,6 +56,7 @@ func Register(registration Registration) error {
 	if _, exists := registrationCatalog.items[registration.Manifest.Name]; exists {
 		return fmt.Errorf("插件 %q 已注册", registration.Manifest.Name)
 	}
+	registration.Manifest = cloneManifest(registration.Manifest)
 	registrationCatalog.items[registration.Manifest.Name] = registration
 
 	// >>> 数据演变示例
@@ -87,6 +88,7 @@ func Registrations() []Registration {
 	registrationCatalog.RLock()
 	result := make([]Registration, 0, len(registrationCatalog.items))
 	for _, registration := range registrationCatalog.items {
+		registration.Manifest = cloneManifest(registration.Manifest)
 		result = append(result, registration)
 	}
 	registrationCatalog.RUnlock()
@@ -100,6 +102,24 @@ func Registrations() []Registration {
 	// >>> 数据演变示例
 	// 1. Catalog{score,ping} -> [ping,score]。
 	// 2. 空 Catalog -> 空切片。
+	return result
+}
+
+// cloneManifest 深复制 Manifest 中的可变切片。
+// @param manifest：待复制的插件元数据。
+// @returns 不共享 Features 和 DefaultCommands 底层数组的 Manifest。
+// ⚠️副作用说明：分配新的切片；不修改输入。
+func cloneManifest(manifest Manifest) Manifest {
+	result := manifest
+	result.Features = make([]FeatureManifest, len(manifest.Features))
+	for index, feature := range manifest.Features {
+		result.Features[index] = feature
+		result.Features[index].DefaultCommands = append([]string(nil), feature.DefaultCommands...)
+	}
+
+	// >>> 数据演变示例
+	// 1. Features=[echo{[echo]}] -> 深复制 -> 修改副本命令不影响原值。
+	// 2. Features=[] -> 深复制 -> 独立空切片。
 	return result
 }
 

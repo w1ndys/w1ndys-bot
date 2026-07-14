@@ -24,7 +24,7 @@ import (
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 	projectlogger "github.com/w1ndys/w1ndys-bot/pkg/logger"
 	_ "github.com/w1ndys/w1ndys-bot/plugins/admin"
-	_ "github.com/w1ndys/w1ndys-bot/plugins/ping"
+	_ "github.com/w1ndys/w1ndys-bot/plugins/echo"
 )
 
 // main 启动机器人基础设施。
@@ -135,11 +135,12 @@ func main() {
 			projectlogger.Warn("命令权限不足", "target", binding.Target(), "user_id", message.UserID, "role", role)
 			return nil
 		}
-		routedContext := plugin.WithFeature(ctx, binding.FeatureKey)
+		arguments := commandregistry.ExtractArguments(message.RawMessage, settingsResolver.CommandPrefix(), binding.NormalizedCommand)
+		routedContext := plugin.WithInvocation(ctx, plugin.Invocation{FeatureKey: binding.FeatureKey, Command: binding.Command, Arguments: arguments})
 		routeErr := pluginManager.HandleNamed(routedContext, binding.PluginName, event)
 
 		// >>> 数据演变示例
-		// 1. /ping -> Command Binding -> 权限允许 -> ping.HandleNamed。
+		// 1. /echo Hello -> Command Binding -> Invocation{echo,Hello} -> echo.HandleNamed。
 		// 2. 未匹配消息 -> PluginManager 广播给观察型插件。
 		return routeErr
 	})
@@ -227,7 +228,7 @@ func featureDefaults(registrations []plugin.Registration, pluginName string, fea
 	}
 
 	// >>> 数据演变示例
-	// 1. ping.ping -> Manifest Feature -> Defaults,true。
+	// 1. echo.echo -> Manifest Feature -> Defaults,true。
 	// 2. removed.missing -> 无匹配 -> 零值,false。
 	return permission.Defaults{}, false
 }
