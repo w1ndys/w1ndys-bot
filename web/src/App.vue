@@ -29,25 +29,54 @@ const menuOptions = ref<MenuOption[]>([])
 const activeMenuKey = computed(resolveActiveMenuKey)
 const themeOverrides: GlobalThemeOverrides = {
   common: {
-    primaryColor: '#9a6744',
-    primaryColorHover: '#b17b55',
-    primaryColorPressed: '#7c4f32',
-    primaryColorSuppl: '#a9704a',
-    bodyColor: '#f8f3eb',
-    cardColor: '#fffdf9',
-    modalColor: '#fffdf9',
-    popoverColor: '#fffdf9',
-    textColorBase: '#3f2d22',
-    borderColor: '#dfd0c2',
-    dividerColor: '#eadfd4',
-    borderRadius: '10px',
+    primaryColor: '#8B5E3C',
+    primaryColorHover: '#A87550',
+    primaryColorPressed: '#70472D',
+    primaryColorSuppl: '#8B5E3C',
+    bodyColor: '#F7F4F0',
+    cardColor: '#FFFFFF',
+    modalColor: '#FFFFFF',
+    popoverColor: '#FFFFFF',
+    tableColor: '#FFFFFF',
+    textColorBase: '#352F2B',
+    textColor1: '#352F2B',
+    textColor2: '#625850',
+    textColor3: '#7B7067',
+    borderColor: '#DED7CF',
+    dividerColor: '#EEE9E3',
+    successColor: '#2F7D4A',
+    warningColor: '#B06B16',
+    errorColor: '#C43D3D',
+    infoColor: '#3F6F94',
+    borderRadius: '8px',
+    fontSize: '14px',
+    fontFamily: 'Inter, "Noto Sans SC", "Microsoft YaHei", "PingFang SC", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
   },
   Button: {
-    borderRadiusMedium: '10px',
+    borderRadiusMedium: '8px',
+    heightMedium: '36px',
     fontWeight: '700',
   },
   Card: {
-    borderRadius: '16px',
+    borderRadius: '8px',
+    paddingMedium: '20px',
+  },
+  DataTable: {
+    thColor: '#F7F4F0',
+    thTextColor: '#625850',
+    tdColorHover: '#F7F4F0',
+    borderColor: '#EEE9E3',
+  },
+  Menu: {
+    itemColorActive: '#F1E2D4',
+    itemColorActiveHover: '#F1E2D4',
+    itemTextColorActive: '#70472D',
+    itemTextColorActiveHover: '#70472D',
+    itemBorderRadius: '6px',
+  },
+  Tabs: {
+    tabTextColorActiveLine: '#70472D',
+    barColor: '#8B5E3C',
   },
 }
 
@@ -186,12 +215,12 @@ onMounted(loadPluginMenu)
             </div>
           </header>
           <NLayout class="admin-layout" has-sider>
-            <NLayoutSider class="desktop-sider" bordered :width="224" content-style="padding: 22px 12px;">
+            <NLayoutSider class="desktop-sider" bordered :width="240" content-style="padding: 20px 12px;">
               <div class="sidebar-caption">管理功能</div>
               <NAlert v-if="menuError" class="menu-alert" type="error" size="small"><NButton text type="primary" @click="loadPluginMenu">重试加载插件</NButton></NAlert>
               <NMenu :value="activeMenuKey" :options="menuOptions" :default-expanded-keys="['plugins']" @update:value="navigateMenu" />
             </NLayoutSider>
-            <NLayoutContent class="admin-content" content-style="min-height: calc(100vh - 68px);">
+            <NLayoutContent class="admin-content" content-style="min-height: calc(100vh - 56px);">
               <main class="page-container">
                 <RouterView />
               </main>

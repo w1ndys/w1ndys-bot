@@ -9,7 +9,6 @@ export default defineConfig({
       output: {
         manualChunks: {
           framework: ['vue', 'vue-router'],
-          ui: ['naive-ui'],
         },
       },
     },
