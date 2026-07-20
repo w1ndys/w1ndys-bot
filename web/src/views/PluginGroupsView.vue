@@ -1,12 +1,13 @@
 <!-- 📌 影响范围：读写插件群默认策略与单群覆盖；手工输入 QQ 群号。 -->
 <script setup lang="ts">
-import { NAlert, NButton, NCard, NDataTable, NInput, NSpace, NSwitch, NTag, useMessage, type DataTableColumns } from 'naive-ui'
+import { NAlert, NButton, NCard, NDataTable, NInput, NSpace, NSwitch, NTag, type DataTableColumns } from 'naive-ui'
 import { computed, h, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { deletePluginGroupOverride, getPluginGroupControl, setPluginGroupDefault, setPluginGroupOverride, type PluginGroupControlState, type PluginGroupOverride } from '../api'
+import { useAppFeedback } from '../feedback'
 
 const route = useRoute()
-const message = useMessage()
+const feedback = useAppFeedback()
 
 // readPluginName 读取当前路由的插件稳定名称。
 // @param 无；读取 route.params.pluginName。
@@ -77,11 +78,11 @@ async function changeDefault(enabled: boolean): Promise<void> {
     const refreshed = await loadState(name)
     // [决策理由] 写入成功但权威重读失败时不得误报“已更新”。
     if (!refreshed) return
-    message.success('群默认策略已更新')
+    feedback.success('群默认策略已更新')
   } catch (error) {
     // [决策理由] 过期插件写入的错误不得污染新路由。
     if (sequence !== mutationSequence || name !== pluginName.value) return
-    message.error(error instanceof Error ? error.message : '更新失败')
+    feedback.error(error, '更新群默认策略失败')
     await loadState(name)
   } finally {
     // [决策理由] 只有最新写请求可以解除单飞锁。
@@ -100,7 +101,7 @@ async function changeDefault(enabled: boolean): Promise<void> {
 async function addOverride(enabled: boolean): Promise<void> {
   // [决策理由] 前端先拒绝非正整数，后端仍执行权威校验。
   if (!/^[1-9]\d{0,19}$/.test(groupID.value)) {
-    message.error('请输入正确的 QQ 群号')
+    feedback.warning('请输入正确的 QQ 群号')
     return
   }
   const name = pluginName.value
@@ -111,11 +112,13 @@ async function addOverride(enabled: boolean): Promise<void> {
     // [决策理由] 路由切换后不得清空新插件页的输入。
     if (sequence !== mutationSequence || name !== pluginName.value) return
     groupID.value = ''
-    await loadState(name)
+    const refreshed = await loadState(name)
+    // [决策理由] 只有权威列表成功重读后才能确认新增结果已展示。
+    if (refreshed) feedback.success('单群覆盖已新增')
   } catch (error) {
     // [决策理由] 只展示当前写请求错误。
     if (sequence !== mutationSequence || name !== pluginName.value) return
-    message.error(error instanceof Error ? error.message : '新增失败')
+    feedback.error(error, '新增单群覆盖失败')
   } finally {
     // [决策理由] 最新写请求结束后恢复控件。
     if (sequence === mutationSequence) saving.value = false
@@ -138,11 +141,13 @@ async function changeOverride(item: PluginGroupOverride, enabled: boolean): Prom
     await setPluginGroupOverride(name, item.group_id, enabled, item.version)
     // [决策理由] 只刷新发起写操作的同一插件页。
     if (sequence !== mutationSequence || name !== pluginName.value) return
-    await loadState(name)
+    const refreshed = await loadState(name)
+    // [决策理由] 只有权威版本与最终状态完成重读后才提示更新成功。
+    if (refreshed) feedback.success('单群覆盖已更新')
   } catch (error) {
     // [决策理由] 过期错误不得触发新路由重载。
     if (sequence !== mutationSequence || name !== pluginName.value) return
-    message.error(error instanceof Error ? error.message : '更新失败')
+    feedback.error(error, '更新单群覆盖失败')
     await loadState(name)
   } finally {
     // [决策理由] 最新写请求完成后解锁。
@@ -166,11 +171,13 @@ async function removeOverride(item: PluginGroupOverride): Promise<void> {
     await deletePluginGroupOverride(name, item.group_id, item.version)
     // [决策理由] 只重载发起删除的同一插件页。
     if (sequence !== mutationSequence || name !== pluginName.value) return
-    await loadState(name)
+    const refreshed = await loadState(name)
+    // [决策理由] 删除后必须确认页面已恢复继承状态再提示成功。
+    if (refreshed) feedback.success('单群覆盖已删除并恢复继承')
   } catch (error) {
     // [决策理由] 过期删除错误不得污染新路由。
     if (sequence !== mutationSequence || name !== pluginName.value) return
-    message.error(error instanceof Error ? error.message : '删除失败')
+    feedback.error(error, '删除单群覆盖失败')
   } finally {
     // [决策理由] 最新删除请求完成后解锁。
     if (sequence === mutationSequence) saving.value = false

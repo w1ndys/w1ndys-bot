@@ -4,12 +4,14 @@ import { NAlert, NButton, NEmpty, NInputNumber, NSpin, NSwitch, NTag } from 'nai
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { listPlugins, patchPlugin, type PluginState } from '../api'
+import { useAppFeedback } from '../feedback'
 
 const plugins = ref<PluginState[]>([])
 const loading = ref(true)
 const errorMessage = ref('')
 const pendingName = ref('')
 const router = useRouter()
+const feedback = useAppFeedback()
 const prioritySnapshots = new Map<string, number>()
 
 // loadPlugins 重新获取完整插件快照。
@@ -52,13 +54,9 @@ async function togglePlugin(plugin: PluginState, enabled: boolean): Promise<void
   try {
     const updated = await patchPlugin(plugin.name, { enabled })
     replacePlugin(updated)
+    feedback.success(`插件已${updated.enabled ? '启用' : '停用'}并热更新`)
   } catch (error) {
-    // [决策理由] 受保护插件等业务错误应原样展示给管理员。
-    if (error instanceof Error) {
-      errorMessage.value = error.message
-    } else {
-      errorMessage.value = '修改插件状态失败'
-    }
+    feedback.error(error, '修改插件状态失败')
   } finally {
     pendingName.value = ''
   }
@@ -78,17 +76,11 @@ async function savePriority(plugin: PluginState): Promise<void> {
   try {
     const updated = await patchPlugin(plugin.name, { priority: Number(plugin.priority) })
     replacePlugin(updated)
+    feedback.success('插件优先级已保存并热更新')
   } catch (error) {
-    // [决策理由] 后端范围或持久化错误应反馈给管理员。
-    if (error instanceof Error) {
-      errorMessage.value = error.message
-    } else {
-      errorMessage.value = '保存优先级失败'
-    }
-    const failureMessage = errorMessage.value
+    feedback.error(error, '保存优先级失败')
     plugin.priority = prioritySnapshots.get(plugin.name) ?? plugin.priority
     await loadPlugins()
-    errorMessage.value = failureMessage
   } finally {
     pendingName.value = ''
   }

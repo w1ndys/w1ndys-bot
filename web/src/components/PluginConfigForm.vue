@@ -3,6 +3,7 @@
 import { NAlert, NButton, NEmpty, NForm, NFormItem, NInput, NInputNumber, NSelect, NSkeleton, NSwitch, NTag } from 'naive-ui'
 import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError, getPluginConfig, getPluginConfigSchema, putPluginConfig, type PluginConfigField, type PluginConfigSchema } from '../api'
+import { useAppFeedback } from '../feedback'
 
 const props = defineProps<{ pluginName: string }>()
 const schema = ref<PluginConfigSchema | null>(null)
@@ -14,7 +15,7 @@ const saving = ref(false)
 const unsupported = ref(false)
 const conflict = ref(false)
 const errorMessage = ref('')
-const successMessage = ref('')
+const feedback = useAppFeedback()
 const loadSequence = ref(0)
 const dirty = computed(() => JSON.stringify(draft.value) !== JSON.stringify(baseline.value))
 
@@ -61,7 +62,6 @@ async function loadConfig(): Promise<void> {
   unsupported.value = false
   conflict.value = false
   errorMessage.value = ''
-  successMessage.value = ''
   try {
     const loadedSchema = await getPluginConfigSchema(requestedPlugin)
     const state = await getPluginConfig(requestedPlugin)
@@ -137,7 +137,6 @@ async function saveConfig(): Promise<void> {
   const requestSequence = loadSequence.value
   conflict.value = false
   errorMessage.value = ''
-  successMessage.value = ''
   try {
     const state = await putPluginConfig(requestedPlugin, buildPayload(schema.value.fields), version.value)
     // [决策理由] 保存期间切换插件后，旧插件响应不得覆盖新插件表单。
@@ -148,7 +147,7 @@ async function saveConfig(): Promise<void> {
     draft.value = nextDraft
     baseline.value = { ...nextDraft }
     version.value = state.version
-    successMessage.value = '配置已保存并热应用。'
+    feedback.success('配置已保存并热应用')
   } catch (error) {
     // [决策理由] 路由切换后的旧保存结果不属于当前插件，不显示冲突或错误。
     if (requestSequence !== loadSequence.value || requestedPlugin !== props.pluginName) {
@@ -159,7 +158,7 @@ async function saveConfig(): Promise<void> {
       conflict.value = true
       errorMessage.value = '配置已被其他操作更新，请重新加载后再修改。'
     } else {
-      errorMessage.value = error instanceof Error ? error.message : '保存插件配置失败'
+      feedback.error(error, '保存插件配置失败')
     }
   } finally {
     // [决策理由] 新插件自己的保存状态不能被旧请求结束回调覆盖。
@@ -180,7 +179,6 @@ async function saveConfig(): Promise<void> {
 function resetDraft(): void {
   draft.value = { ...baseline.value }
   errorMessage.value = ''
-  successMessage.value = ''
   conflict.value = false
 
   // >>> 数据演变示例
@@ -208,7 +206,6 @@ onMounted(loadConfig)
       <NAlert v-if="errorMessage" class="config-alert" :type="conflict ? 'warning' : 'error'" title="配置未保存">
         <div class="alert-content"><span>{{ errorMessage }}</span><NButton size="small" secondary @click="loadConfig">重新加载</NButton></div>
       </NAlert>
-      <NAlert v-if="successMessage" class="config-alert" type="success" closable @close="successMessage = ''">{{ successMessage }}</NAlert>
       <NForm v-if="schema && schema.fields.length > 0" label-placement="top" @submit.prevent="saveConfig">
         <NFormItem v-for="field in schema.fields" :key="field.key" :label="field.display_name" :required="field.required" :feedback="field.type === 'secret' ? `${field.description ? `${field.description}；` : ''}留空将保留当前值` : field.description">
           <NSwitch v-if="field.type === 'boolean'" v-model:value="draft[field.key] as boolean" />

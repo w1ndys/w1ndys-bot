@@ -3,18 +3,20 @@
 import { NAlert, NButton, NCard, NEmpty, NInput, NPopconfirm, NSpin, NTag } from 'naive-ui'
 import { onMounted, reactive, ref } from 'vue'
 import { listSettings, resetSetting, setSetting, type SettingState } from '../api'
+import { useAppFeedback } from '../feedback'
 
 const settings = ref<SettingState[]>([])
 const drafts = reactive<Record<string, string>>({})
 const loading = ref(true)
 const pendingKey = ref('')
 const errorMessage = ref('')
+const feedback = useAppFeedback()
 
 // loadPage 加载全部受控设置并同步编辑草稿。
 // @param 无。
-// @returns Promise，在设置读取完成后结束。
+// @returns Promise，设置成功更新到页面时为 true，读取失败时为 false。
 // ⚠️副作用说明：发起网络请求并替换设置列表和草稿。
-async function loadPage(): Promise<void> {
+async function loadPage(): Promise<boolean> {
   loading.value = true
   errorMessage.value = ''
   try {
@@ -28,13 +30,15 @@ async function loadPage(): Promise<void> {
     }
   } catch (error) {
     setError(error, '加载系统设置失败')
+    return false
   } finally {
     loading.value = false
   }
 
   // >>> 数据演变示例
   // 1. prefix="!"+pageSize=20 -> 列表更新 -> drafts为可编辑字符串。
-  // 2. API失败 -> errorMessage更新 -> loading=false。
+  // 2. API失败 -> errorMessage更新 -> loading=false并返回false。
+  return true
 }
 
 // saveSetting 校验草稿类型并保存指定设置。
@@ -56,9 +60,9 @@ async function saveSetting(item: SettingState): Promise<void> {
   try {
     const saved = await setSetting(item.key, value)
     replaceSetting(saved)
+    feedback.success('系统设置已保存并热更新')
   } catch (error) {
-    setError(error, '保存系统设置失败')
-    errorMessage.value += '；数据库状态可能已变化，请刷新确认'
+    feedback.error(error, '保存系统设置失败', '；数据库状态可能已变化，请刷新确认')
   } finally {
     pendingKey.value = ''
   }
@@ -85,10 +89,13 @@ async function restoreSetting(item: SettingState): Promise<void> {
   errorMessage.value = ''
   try {
     await resetSetting(item.key)
-    await loadPage()
+    const refreshed = await loadPage()
+    // [决策理由] 删除覆盖后必须成功重读默认状态才能确认页面已完成恢复。
+    if (refreshed) {
+      feedback.success('系统设置已恢复默认值')
+    }
   } catch (error) {
-    setError(error, '恢复默认值失败')
-    errorMessage.value += '；数据库状态可能已变化，请刷新确认'
+    feedback.error(error, '恢复默认值失败', '；数据库状态可能已变化，请刷新确认')
   } finally {
     pendingKey.value = ''
   }

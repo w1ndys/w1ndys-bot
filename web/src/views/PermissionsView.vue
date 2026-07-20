@@ -4,6 +4,7 @@ import { NAlert, NButton, NCard, NEmpty, NForm, NFormItem, NInput, NModal, NRadi
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { deletePermission, listPermissions, listPluginFeatures, listPlugins, setPermission, type FeatureState, type PermissionState, type PluginState } from '../api'
+import { useAppFeedback } from '../feedback'
 
 const route = useRoute()
 const fixedPluginName = String(route.params.pluginName ?? '')
@@ -27,6 +28,7 @@ const featureRequestSequence = ref(0)
 const featureLoading = ref(false)
 const featureLoadFailed = ref(false)
 const deleteTarget = ref<PermissionState | null>(null)
+const feedback = useAppFeedback()
 
 const roleOptions = [
   { value: 'super_admin', label: '最高管理员' },
@@ -249,8 +251,9 @@ async function submitPermission(): Promise<void> {
     } else {
       permissions.value.push(saved)
     }
+    feedback.success('权限策略已保存')
   } catch (error) {
-    setError(error, '保存权限策略失败')
+    feedback.error(error, '保存权限策略失败')
   } finally {
     saving.value = false
   }
@@ -295,8 +298,9 @@ async function removePermission(): Promise<void> {
     }
     permissions.value = remaining
     deleteTarget.value = null
+    feedback.success('权限策略已删除并恢复回退链')
   } catch (error) {
-    setError(error, '删除权限策略失败')
+    feedback.error(error, '删除权限策略失败')
   } finally {
     pendingID.value = 0
   }

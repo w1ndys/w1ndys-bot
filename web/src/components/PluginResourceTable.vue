@@ -13,6 +13,7 @@ import {
   type PluginConfigField,
   type PluginResourceRecord,
 } from '../api'
+import { useAppFeedback } from '../feedback'
 
 const props = defineProps<{ pluginName: string }>()
 const descriptors = ref<PluginResourceDescriptor[]>([])
@@ -24,7 +25,7 @@ const total = ref(0)
 const loading = ref(true)
 const saving = ref(false)
 const errorMessage = ref('')
-const successMessage = ref('')
+const feedback = useAppFeedback()
 const modalVisible = ref(false)
 const editingRecord = ref<PluginResourceRecord | null>(null)
 const draft = ref<Record<string, unknown>>({})
@@ -75,7 +76,6 @@ async function loadDescriptors(): Promise<void> {
   recordsLoadSequence.value += 1
   loading.value = true
   errorMessage.value = ''
-  successMessage.value = ''
   descriptors.value = []
   records.value = []
   resourceKey.value = ''
@@ -117,16 +117,16 @@ async function loadDescriptors(): Promise<void> {
 
 // loadRecords 读取当前资源分页记录。
 // @param expectedSequence：可选的所属描述加载序号；preserveMessage：刷新时是否保留当前错误提示。
-// @returns Promise，在分页状态更新后结束。
+// @returns Promise，当前请求成功应用到页面时为 true，过期或失败时为 false。
 // ⚠️副作用说明：发起鉴权网络请求并覆盖记录列表。
-async function loadRecords(expectedSequence = loadSequence.value, preserveMessage = false): Promise<void> {
+async function loadRecords(expectedSequence = loadSequence.value, preserveMessage = false): Promise<boolean> {
   const requestedPlugin = props.pluginName
   const requestedResource = resourceKey.value
   const requestedPage = page.value
   const requestSequence = ++recordsLoadSequence.value
   // [决策理由] 未选择资源时没有合法列表端点。
   if (requestedResource === '') {
-    return
+    return false
   }
   loading.value = true
   // [决策理由] 冲突后的权威刷新需要保留解释提示，普通刷新则清理历史错误。
@@ -137,7 +137,7 @@ async function loadRecords(expectedSequence = loadSequence.value, preserveMessag
     const result = await listPluginResourceRecords(requestedPlugin, requestedResource, page.value, pageSize.value)
     // [决策理由] 插件、资源或请求序号变化后旧分页结果已经失效。
     if (requestSequence !== recordsLoadSequence.value || expectedSequence !== loadSequence.value || requestedPlugin !== props.pluginName || requestedResource !== resourceKey.value || requestedPage !== page.value) {
-      return
+      return false
     }
     records.value = result.items
     page.value = result.page
@@ -148,6 +148,7 @@ async function loadRecords(expectedSequence = loadSequence.value, preserveMessag
     if (requestSequence === recordsLoadSequence.value && expectedSequence === loadSequence.value && requestedPlugin === props.pluginName && requestedResource === resourceKey.value && requestedPage === page.value) {
       errorMessage.value = error instanceof Error ? error.message : '加载资源记录失败'
     }
+    return false
   } finally {
     // [决策理由] 当前资源请求完成后才结束加载状态。
     if (requestSequence === recordsLoadSequence.value && expectedSequence === loadSequence.value && requestedPlugin === props.pluginName && requestedResource === resourceKey.value && requestedPage === page.value) {
@@ -157,7 +158,8 @@ async function loadRecords(expectedSequence = loadSequence.value, preserveMessag
 
   // >>> 数据演变示例
   // 1. page=1,size=20 -> 返回8条,total=8 -> 更新分页。
-  // 2. 同页旧请求晚于写后刷新返回 -> requestSequence过期 -> 丢弃旧结果。
+  // 2. 同页旧请求晚于写后刷新返回 -> requestSequence过期 -> 丢弃旧结果并返回false。
+  return true
 }
 
 // switchResource 切换描述器资源并读取首屏。
@@ -167,7 +169,6 @@ async function loadRecords(expectedSequence = loadSequence.value, preserveMessag
 async function switchResource(key: string): Promise<void> {
   resourceKey.value = key
   page.value = 1
-  successMessage.value = ''
   await loadRecords()
 
   // >>> 数据演变示例
@@ -239,29 +240,42 @@ async function saveRecord(): Promise<void> {
   if (descriptor === null || saving.value) {
     return
   }
+  const requestedPlugin = props.pluginName
+  const requestedResource = descriptor.key
+  const requestSequence = loadSequence.value
+  const creating = editingRecord.value === null
   saving.value = true
   errorMessage.value = ''
-  successMessage.value = ''
   try {
     const payload = buildDraftPayload(editableFields.value)
     // [决策理由] 是否存在编辑快照决定调用新增或版本化更新端点。
-    if (editingRecord.value === null) {
-      await createPluginResourceRecord(props.pluginName, descriptor.key, payload)
-      successMessage.value = '记录已新增。'
+    if (creating) {
+      await createPluginResourceRecord(requestedPlugin, requestedResource, payload)
     } else {
-      await updatePluginResourceRecord(props.pluginName, descriptor.key, editingRecord.value.id, payload, editingRecord.value.version)
-      successMessage.value = '记录已更新。'
+      await updatePluginResourceRecord(requestedPlugin, requestedResource, editingRecord.value!.id, payload, editingRecord.value!.version)
+    }
+    // [决策理由] 插件或资源切换后，旧写响应不得关闭新弹窗或显示过期成功Toast。
+    if (requestSequence !== loadSequence.value || requestedPlugin !== props.pluginName || requestedResource !== resourceKey.value) {
+      return
     }
     modalVisible.value = false
-    await loadRecords()
+    const refreshed = await loadRecords(requestSequence)
+    // [决策理由] 只有权威记录列表成功重读后才能确认保存结果已展示。
+    if (refreshed) {
+      feedback.success(creating ? '记录已新增' : '记录已更新')
+    }
   } catch (error) {
+    // [决策理由] 已切换插件或资源的旧写错误不得污染当前页面反馈。
+    if (requestSequence !== loadSequence.value || requestedPlugin !== props.pluginName || requestedResource !== resourceKey.value) {
+      return
+    }
     // [决策理由] 版本冲突必须放弃陈旧编辑上下文并刷新服务端权威列表。
     if (error instanceof ApiError && error.status === 409) {
       modalVisible.value = false
       errorMessage.value = '记录已被其他操作更新，列表已刷新，请重新编辑。'
       await loadRecords(loadSequence.value, true)
     } else {
-      errorMessage.value = error instanceof Error ? error.message : '保存记录失败'
+      feedback.error(error, '保存记录失败')
     }
   } finally {
     saving.value = false
@@ -282,23 +296,36 @@ async function removeRecord(record: PluginResourceRecord): Promise<void> {
   if (descriptor === null || !descriptor.can_delete) {
     return
   }
+  const requestedPlugin = props.pluginName
+  const requestedResource = descriptor.key
+  const requestSequence = loadSequence.value
   errorMessage.value = ''
-  successMessage.value = ''
   try {
-    await deletePluginResourceRecord(props.pluginName, descriptor.key, record.id, record.version)
-    successMessage.value = '记录已删除。'
+    await deletePluginResourceRecord(requestedPlugin, requestedResource, record.id, record.version)
+    // [决策理由] 插件或资源切换后不得使用旧列表长度调整当前分页。
+    if (requestSequence !== loadSequence.value || requestedPlugin !== props.pluginName || requestedResource !== resourceKey.value) {
+      return
+    }
     // [决策理由] 删除当前页最后一项时回退一页，避免停留在空的越界页。
     if (records.value.length === 1 && page.value > 1) {
       page.value -= 1
     }
-    await loadRecords()
+    const refreshed = await loadRecords(requestSequence)
+    // [决策理由] 删除结果必须在权威列表成功重读后才显示成功Toast。
+    if (refreshed) {
+      feedback.success('记录已删除')
+    }
   } catch (error) {
+    // [决策理由] 已切换插件或资源的旧删除错误不得污染当前页面反馈。
+    if (requestSequence !== loadSequence.value || requestedPlugin !== props.pluginName || requestedResource !== resourceKey.value) {
+      return
+    }
     // [决策理由] 删除冲突需要刷新权威列表，避免继续操作陈旧版本。
     if (error instanceof ApiError && error.status === 409) {
       errorMessage.value = '记录已被其他操作更新，列表已刷新。'
       await loadRecords(loadSequence.value, true)
     } else {
-      errorMessage.value = error instanceof Error ? error.message : '删除记录失败'
+      feedback.error(error, '删除记录失败')
     }
   }
 
@@ -340,7 +367,6 @@ onMounted(loadDescriptors)
     <NAlert v-if="errorMessage" class="resource-alert" type="error" title="操作未完成">
       <div class="alert-content"><span>{{ errorMessage }}</span><NButton size="small" secondary @click="loadRecords()">刷新列表</NButton></div>
     </NAlert>
-    <NAlert v-if="successMessage" class="resource-alert" type="success" closable @close="successMessage = ''">{{ successMessage }}</NAlert>
     <NSkeleton v-if="loading" text :repeat="4" />
     <NEmpty v-else-if="descriptors.length === 0" description="该插件未声明可管理的业务资源" />
     <template v-else-if="activeDescriptor">

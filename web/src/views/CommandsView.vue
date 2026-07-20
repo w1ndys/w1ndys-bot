@@ -14,6 +14,7 @@ import {
   type FeatureState,
   type PluginState,
 } from '../api'
+import { useAppFeedback } from '../feedback'
 
 const route = useRoute()
 const fixedPluginName = String(route.params.pluginName ?? '')
@@ -33,6 +34,7 @@ const errorMessage = ref('')
 const featureRequestSequence = ref(0)
 const featureLoaded = ref(false)
 const deleteTarget = ref<CommandState | null>(null)
+const feedback = useAppFeedback()
 
 const pluginOptions = computed(buildPluginOptions)
 const featureOptions = computed(buildFeatureOptions)
@@ -214,8 +216,9 @@ async function submitCommand(): Promise<void> {
     })
     commands.value.push(created)
     commandText.value = ''
+    feedback.success('触发词已新增')
   } catch (error) {
-    setError(error, '新增触发词失败')
+    feedback.error(error, '新增触发词失败')
   } finally {
     saving.value = false
   }
@@ -251,8 +254,9 @@ async function saveCommand(command: CommandState): Promise<void> {
     if (index >= 0) {
       commands.value[index] = updated
     }
+    feedback.success('触发词已保存')
   } catch (error) {
-    setError(error, '保存触发词失败')
+    feedback.error(error, '保存触发词失败')
   } finally {
     pendingID.value = 0
   }
@@ -297,8 +301,9 @@ async function removeCommand(): Promise<void> {
     }
     commands.value = remaining
     deleteTarget.value = null
+    feedback.success('触发词已删除')
   } catch (error) {
-    setError(error, '删除触发词失败')
+    feedback.error(error, '删除触发词失败')
   } finally {
     pendingID.value = 0
   }

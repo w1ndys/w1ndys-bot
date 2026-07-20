@@ -4,6 +4,7 @@ import { NAlert, NButton, NDescriptions, NDescriptionsItem, NEmpty, NInputNumber
 import { onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { listPlugins, patchPlugin, type PluginState } from '../api'
+import { useAppFeedback } from '../feedback'
 import PluginConfigForm from '../components/PluginConfigForm.vue'
 
 const route = useRoute()
@@ -14,7 +15,7 @@ const prioritySaving = ref(false)
 const enabledDraft = ref(false)
 const priorityDraft = ref<number | null>(0)
 const errorMessage = ref('')
-const successMessage = ref('')
+const feedback = useAppFeedback()
 
 // applyPluginState 将服务端权威状态同步到展示值和两个独立草稿。
 // @param state：服务端返回的插件状态。
@@ -38,7 +39,6 @@ async function loadPluginOverview(): Promise<void> {
   const name = String(route.params.pluginName ?? '')
   loading.value = true
   errorMessage.value = ''
-  successMessage.value = ''
   try {
     const states = await listPlugins()
     let matched: PluginState | null = null
@@ -78,15 +78,14 @@ async function savePriority(): Promise<void> {
   }
   prioritySaving.value = true
   errorMessage.value = ''
-  successMessage.value = ''
   try {
     const updated = await patchPlugin(plugin.value.name, { priority: priorityDraft.value })
     applyPluginState(updated)
-    successMessage.value = '优先级已保存并热更新。'
+    feedback.success('优先级已保存并热更新')
   } catch (error) {
     const failureMessage = error instanceof Error ? error.message : '保存插件优先级失败'
     await loadPluginOverview()
-    errorMessage.value = failureMessage
+    feedback.error(error, failureMessage)
   } finally {
     prioritySaving.value = false
   }
@@ -107,15 +106,14 @@ async function saveEnabled(): Promise<void> {
   }
   enabledSaving.value = true
   errorMessage.value = ''
-  successMessage.value = ''
   try {
     const updated = await patchPlugin(plugin.value.name, { enabled: enabledDraft.value })
     applyPluginState(updated)
-    successMessage.value = `插件已${updated.enabled ? '启用' : '停用'}并热更新。`
+    feedback.success(`插件已${updated.enabled ? '启用' : '停用'}并热更新`)
   } catch (error) {
     const failureMessage = error instanceof Error ? error.message : '保存插件启用状态失败'
     await loadPluginOverview()
-    errorMessage.value = failureMessage
+    feedback.error(error, failureMessage)
   } finally {
     enabledSaving.value = false
   }
@@ -140,9 +138,6 @@ onMounted(loadPluginOverview)
           <span>{{ errorMessage }}</span>
           <NButton size="small" secondary @click="loadPluginOverview">重新加载</NButton>
         </div>
-      </NAlert>
-      <NAlert v-if="successMessage" class="workspace-alert" type="success" closable @close="successMessage = ''">
-        {{ successMessage }}
       </NAlert>
 
       <template v-if="plugin">
