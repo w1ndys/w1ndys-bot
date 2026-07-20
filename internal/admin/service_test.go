@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
 type fakeRepository struct {
 	states          []PluginState
+	before          PluginState
 	updated         PluginState
+	updateCalls     int
 	updateActor     Actor
 	updateName      string
 	updatePatch     PluginPatch
@@ -23,6 +26,9 @@ type fakeRepository struct {
 	setting         SettingState
 	settingKey      string
 	err             error
+	errs            []error
+	updateEntered   chan struct{}
+	updateRelease   chan struct{}
 }
 
 // ListPluginFeatures 返回空功能列表以满足管理仓库契约。
@@ -376,20 +382,93 @@ func (f *fakeRepository) ListPlugins(_ context.Context) ([]PluginState, error) {
 // @param ctx：未使用的测试上下文；actor：操作者；name：插件名；patch：变更。
 // @returns 预设插件状态或错误。
 // ⚠️副作用说明：修改 fakeRepository 的调用记录字段。
-func (f *fakeRepository) UpdatePlugin(_ context.Context, actor Actor, name string, patch PluginPatch) (PluginState, error) {
+func (f *fakeRepository) UpdatePlugin(_ context.Context, actor Actor, name string, patch PluginPatch) (PluginState, PluginState, error) {
+	f.updateCalls++
+	// [决策理由] 可选通道用于验证同名插件的完整更新与补偿窗口被串行化。
+	if f.updateEntered != nil {
+		f.updateEntered <- struct{}{}
+		<-f.updateRelease
+	}
 	f.updateActor = actor
 	f.updateName = name
 	f.updatePatch = patch
+	// [决策理由] 错误序列用于区分首次提交和补偿提交的故障。
+	if len(f.errs) >= f.updateCalls {
+		return f.before, f.updated, f.errs[f.updateCalls-1]
+	}
 
 	// >>> 数据演变示例
 	// 1. ping + enabled=true -> 记录参数 -> 返回 updated。
 	// 2. missing + err -> 记录参数 -> 返回 error。
-	return f.updated, f.err
+	return f.before, f.updated, f.err
+}
+
+// TestPluginUpdatesAreSerializedByName 验证同一插件的写入、刷新及补偿窗口不会交错。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：启动两个管理请求 goroutine，并通过通道控制内存仓库时序。
+func TestPluginUpdatesAreSerializedByName(t *testing.T) {
+	repository := &fakeRepository{
+		before:        PluginState{Name: "ping", Enabled: false},
+		updated:       PluginState{Name: "ping", Enabled: true},
+		updateEntered: make(chan struct{}, 2),
+		updateRelease: make(chan struct{}, 2),
+	}
+	service := NewService(repository, &fakeRuntime{}, nil, nil, nil, &fakeAuthorizer{})
+	actor := Actor{ID: "system", Role: "system", Channel: ChannelSystem}
+	results := make(chan error, 2)
+	// 启动第一个插件更新请求。
+	// @param 无。
+	// @returns 无。
+	// ⚠️副作用说明：调用 SetPluginEnabled 并发送错误。
+	go func() {
+		_, err := service.SetPluginEnabled(context.Background(), actor, "ping", true)
+		results <- err
+
+		// >>> 数据演变示例
+		// 1. ping锁空闲 -> 请求一获得锁 -> 进入Repository。
+		// 2. Repository释放 -> Load完成 -> 释放ping锁。
+	}()
+	<-repository.updateEntered
+	// 启动同名插件的第二个更新请求。
+	// @param 无。
+	// @returns 无。
+	// ⚠️副作用说明：调用 SetPluginEnabled 并发送错误。
+	go func() {
+		_, err := service.SetPluginEnabled(context.Background(), actor, "ping", false)
+		results <- err
+
+		// >>> 数据演变示例
+		// 1. 请求一持有ping锁 -> 请求二等待且不进入Repository。
+		// 2. 请求一释放 -> 请求二进入Repository -> 独立完成。
+	}()
+	select {
+	case <-repository.updateEntered:
+		t.Fatal("同名插件第二个请求在首个请求完成前进入仓库")
+	case <-time.After(20 * time.Millisecond):
+		// [决策理由] 未观察到第二次仓库调用证明同名更新锁覆盖了完整请求窗口。
+	}
+	repository.updateRelease <- struct{}{}
+	// [决策理由] 第一个请求完成并释放同名锁后，第二个请求才允许进入仓库。
+	if err := <-results; err != nil {
+		t.Fatal(err)
+	}
+	<-repository.updateEntered
+	repository.updateRelease <- struct{}{}
+	// [决策理由] 第二个串行请求也必须正常完成。
+	if err := <-results; err != nil {
+		t.Fatal(err)
+	}
+
+	// >>> 数据演变示例
+	// 1. ping请求一写库→刷新 -> 解锁 -> ping请求二写库→刷新。
+	// 2. 第二请求启动时第一请求未完成 -> Repository调用数保持1直至释放。
 }
 
 type fakeRuntime struct {
 	loads int
 	err   error
+	errs  []error
 }
 
 type fakeAuthorizer struct {
@@ -415,6 +494,10 @@ func (f *fakeAuthorizer) IsSuperAdmin(userID string) bool {
 // ⚠️副作用说明：递增 loads 计数。
 func (f *fakeRuntime) Load(_ context.Context) error {
 	f.loads++
+	// [决策理由] 错误序列用于分别模拟首次刷新失败与补偿刷新成功或失败。
+	if len(f.errs) >= f.loads {
+		return f.errs[f.loads-1]
+	}
 
 	// >>> 数据演变示例
 	// 1. loads=0 -> Load -> loads=1,nil。
@@ -490,8 +573,8 @@ func TestSetPluginPriorityRejectsInvalidActor(t *testing.T) {
 // @returns 无。
 // ⚠️副作用说明：执行内存替身并可能终止当前测试。
 func TestSetPluginEnabledReturnsRefreshFailure(t *testing.T) {
-	repository := &fakeRepository{updated: PluginState{Name: "ping", Enabled: true}}
-	runtime := &fakeRuntime{err: errors.New("lifecycle failed")}
+	repository := &fakeRepository{before: PluginState{Name: "ping", Enabled: false, Priority: 10}, updated: PluginState{Name: "ping", Enabled: true, Priority: 10}}
+	runtime := &fakeRuntime{errs: []error{errors.New("lifecycle failed"), nil}}
 	service := NewService(repository, runtime, nil, nil, nil, &fakeAuthorizer{})
 	state, err := service.SetPluginEnabled(context.Background(), Actor{ID: "system", Role: "system", Channel: ChannelSystem}, "ping", true)
 	// [决策理由] 热刷新失败不能向管理入口报告完全成功。
@@ -502,14 +585,72 @@ func TestSetPluginEnabledReturnsRefreshFailure(t *testing.T) {
 	if !state.Enabled {
 		t.Fatalf("state = %+v, want committed state", state)
 	}
-	// [决策理由] 刷新失败仍应只尝试一次，避免生命周期回调被隐式重复调用。
-	if runtime.loads != 1 {
-		t.Fatalf("runtime loads = %d, want 1", runtime.loads)
+	// [决策理由] 首次刷新失败后必须写回旧数据库状态并再次刷新运行时。
+	if runtime.loads != 2 || repository.updateCalls != 2 {
+		t.Fatalf("runtime loads/update calls = %d/%d, want 2/2", runtime.loads, repository.updateCalls)
+	}
+	// [决策理由] 第二次仓库更新必须完整恢复事务前的启用状态和优先级。
+	if repository.updatePatch.Enabled == nil || *repository.updatePatch.Enabled || repository.updatePatch.Priority == nil || *repository.updatePatch.Priority != 10 {
+		t.Fatalf("rollback patch = %+v", repository.updatePatch)
 	}
 
 	// >>> 数据演变示例
 	// 1. DB提交true + Load失败 -> 返回 true状态和刷新错误。
-	// 2. lifecycle failed -> 不自动重试 -> loads=1。
+	// 2. lifecycle failed -> DB补偿false:10 -> Load恢复 -> 返回原刷新错误。
+}
+
+// TestSetPluginEnabledJoinsDatabaseRollbackFailure 验证刷新与数据库补偿错误均被保留。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：调用内存仓库和运行时替身。
+func TestSetPluginEnabledJoinsDatabaseRollbackFailure(t *testing.T) {
+	refreshErr := errors.New("刷新失败")
+	rollbackErr := errors.New("补偿写库失败")
+	repository := &fakeRepository{
+		before:  PluginState{Name: "ping", Enabled: false},
+		updated: PluginState{Name: "ping", Enabled: true},
+		errs:    []error{nil, rollbackErr},
+	}
+	runtime := &fakeRuntime{errs: []error{refreshErr}}
+	service := NewService(repository, runtime, nil, nil, nil, &fakeAuthorizer{})
+	_, err := service.SetPluginEnabled(context.Background(), Actor{ID: "system", Role: "system", Channel: ChannelSystem}, "ping", true)
+	// [决策理由] 运维必须能分别识别原刷新故障与数据库补偿故障。
+	if !errors.Is(err, refreshErr) || !errors.Is(err, rollbackErr) {
+		t.Fatalf("SetPluginEnabled() error = %v", err)
+	}
+	// [决策理由] 数据库补偿失败后不能执行基于旧数据库状态的二次刷新。
+	if runtime.loads != 1 || repository.updateCalls != 2 {
+		t.Fatalf("runtime loads/update calls = %d/%d", runtime.loads, repository.updateCalls)
+	}
+
+	// >>> 数据演变示例
+	// 1. DB新值提交→Load失败→DB补偿失败 -> errors.Join保留两个根因。
+	// 2. 补偿未落库 -> 不执行第二次Load -> runtime.loads=1。
+}
+
+// TestSetPluginEnabledJoinsRollbackReloadFailure 验证数据库恢复后运行态恢复失败被聚合。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：调用内存仓库和运行时替身。
+func TestSetPluginEnabledJoinsRollbackReloadFailure(t *testing.T) {
+	refreshErr := errors.New("首次刷新失败")
+	restoreErr := errors.New("恢复刷新失败")
+	repository := &fakeRepository{before: PluginState{Name: "ping", Enabled: false}, updated: PluginState{Name: "ping", Enabled: true}}
+	runtime := &fakeRuntime{errs: []error{refreshErr, restoreErr}}
+	service := NewService(repository, runtime, nil, nil, nil, &fakeAuthorizer{})
+	_, err := service.SetPluginEnabled(context.Background(), Actor{ID: "system", Role: "system", Channel: ChannelSystem}, "ping", true)
+	// [决策理由] 数据库已恢复但运行态恢复失败时，两个阶段错误都需要可分类。
+	if !errors.Is(err, refreshErr) || !errors.Is(err, restoreErr) {
+		t.Fatalf("SetPluginEnabled() error = %v", err)
+	}
+	// [决策理由] 完整补偿路径应包含两次仓库更新和两次运行态加载。
+	if runtime.loads != 2 || repository.updateCalls != 2 {
+		t.Fatalf("runtime loads/update calls = %d/%d", runtime.loads, repository.updateCalls)
+	}
+
+	// >>> 数据演变示例
+	// 1. 首次Load失败→DB恢复成功→第二次Load失败 -> 聚合两个Load根因。
+	// 2. 两次Update+两次Load -> 持久化已恢复但运行态需重启修复。
 }
 
 // TestSetPluginEnabledRejectsUntrustedRole 验证自报角色不能绕过管理员快照。

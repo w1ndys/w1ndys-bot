@@ -19,9 +19,9 @@ var manifest = plugin.Manifest{
 	Name: pluginName, DisplayName: pluginDisplayName, Description: pluginDescription,
 	Priority: pluginPriority, System: true,
 	Features: []plugin.FeatureManifest{
-		{Key: featureList, DisplayName: featureListDisplay, DefaultCommands: []string{featureListCommand}, DefaultPermissions: systemPermissions},
-		{Key: featureEnable, DisplayName: featureEnableDisplay, DefaultCommands: []string{featureEnableCommand}, DefaultPermissions: systemPermissions},
-		{Key: featureDisable, DisplayName: featureDisableDisplay, DefaultCommands: []string{featureDisableCommand}, DefaultPermissions: systemPermissions},
+		{Key: featureList, DisplayName: featureListDisplay, Description: featureListDescription, DefaultCommands: []string{featureListCommand}, DefaultPermissions: systemPermissions},
+		{Key: featureEnable, DisplayName: featureEnableDisplay, Description: featureEnableDescription, DefaultCommands: []string{featureEnableCommand}, DefaultPermissions: systemPermissions},
+		{Key: featureDisable, DisplayName: featureDisableDisplay, Description: featureDisableDescription, DefaultCommands: []string{featureDisableCommand}, DefaultPermissions: systemPermissions},
 	},
 }
 

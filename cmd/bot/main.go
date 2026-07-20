@@ -147,7 +147,7 @@ func main() {
 	})
 	botAPI := onebot.New(wsServer.Actions())
 	for _, registration := range registrations {
-		implementation, err := registration.Factory(plugin.Runtime{Messenger: botAPI, Management: adminService})
+		implementation, err := registration.New(plugin.Runtime{Messenger: botAPI, Management: adminService})
 		// [决策理由] 工厂失败或返回错误实现时该插件不能进入运行路由。
 		if err != nil {
 			projectlogger.Error("创建插件运行实例失败", "plugin", registration.Manifest.Name, "error", err)

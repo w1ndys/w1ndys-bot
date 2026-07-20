@@ -14,7 +14,7 @@ import (
 // Repository 定义管理服务所需的插件持久化能力。
 type Repository interface {
 	ListPlugins(context.Context) ([]PluginState, error)
-	UpdatePlugin(context.Context, Actor, string, PluginPatch) (PluginState, error)
+	UpdatePlugin(context.Context, Actor, string, PluginPatch) (PluginState, PluginState, error)
 	ListPluginFeatures(context.Context, string) ([]FeatureState, error)
 	ListCommands(context.Context) ([]CommandState, error)
 	CreateCommand(context.Context, Actor, CommandCreate, string) (CommandState, error)
@@ -81,19 +81,19 @@ func (r *PostgresRepository) ListPlugins(ctx context.Context) ([]PluginState, er
 
 // UpdatePlugin 在同一事务内更新插件配置并记录成功审计。
 // @param ctx：事务生命周期；actor：操作者；name：插件名；patch：目标字段。
-// @returns 更新后的插件快照，或未找到、事务错误。
+// @returns 事务锁定的更新前快照、更新后快照，或未找到、事务错误。
 // ⚠️副作用说明：更新 plugin_config 并插入 admin_audit_logs。
-func (r *PostgresRepository) UpdatePlugin(ctx context.Context, actor Actor, name string, patch PluginPatch) (PluginState, error) {
+func (r *PostgresRepository) UpdatePlugin(ctx context.Context, actor Actor, name string, patch PluginPatch) (PluginState, PluginState, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	// [决策理由] 无法开启事务时不能保证配置与审计原子写入。
 	if err != nil {
-		return PluginState{}, fmt.Errorf("开启插件管理事务: %w", err)
+		return PluginState{}, PluginState{}, fmt.Errorf("开启插件管理事务: %w", err)
 	}
 	defer tx.Rollback(ctx)
 	before, err := selectPlugin(ctx, tx, name)
 	// [决策理由] 不存在的插件不得产生孤立管理记录。
 	if err != nil {
-		return PluginState{}, err
+		return PluginState{}, PluginState{}, err
 	}
 	after := before
 	// [决策理由] nil 表示调用方未要求修改启用状态。
@@ -107,32 +107,32 @@ func (r *PostgresRepository) UpdatePlugin(ctx context.Context, actor Actor, name
 	_, err = tx.Exec(ctx, `UPDATE plugin_config SET enabled=$2, priority=$3, updated_at=NOW() WHERE plugin_name=$1`, name, after.Enabled, after.Priority)
 	// [决策理由] 配置写入失败时必须回滚，不能留下成功审计。
 	if err != nil {
-		return PluginState{}, fmt.Errorf("更新插件配置: %w", err)
+		return PluginState{}, PluginState{}, fmt.Errorf("更新插件配置: %w", err)
 	}
 	beforeJSON, err := json.Marshal(before)
 	// [决策理由] 审计快照无法序列化时不得提交无法追溯的管理变更。
 	if err != nil {
-		return PluginState{}, fmt.Errorf("编码变更前快照: %w", err)
+		return PluginState{}, PluginState{}, fmt.Errorf("编码变更前快照: %w", err)
 	}
 	afterJSON, err := json.Marshal(after)
 	// [决策理由] 审计快照无法序列化时不得提交无法追溯的管理变更。
 	if err != nil {
-		return PluginState{}, fmt.Errorf("编码变更后快照: %w", err)
+		return PluginState{}, PluginState{}, fmt.Errorf("编码变更后快照: %w", err)
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO admin_audit_logs(actor_id,actor_role,channel,action,target_type,target_id,before_json,after_json,success,request_id) VALUES($1,$2,$3,'plugin.update','plugin',$4,$5,$6,TRUE,NULLIF($7,''))`, actor.ID, actor.Role, actor.Channel, name, beforeJSON, afterJSON, actor.RequestID)
 	// [决策理由] 审计写入失败必须连同配置修改一起回滚。
 	if err != nil {
-		return PluginState{}, fmt.Errorf("写入插件管理审计: %w", err)
+		return PluginState{}, PluginState{}, fmt.Errorf("写入插件管理审计: %w", err)
 	}
 	// [决策理由] 只有配置与审计均成功后才能提交事务。
 	if err := tx.Commit(ctx); err != nil {
-		return PluginState{}, fmt.Errorf("提交插件管理事务: %w", err)
+		return PluginState{}, PluginState{}, fmt.Errorf("提交插件管理事务: %w", err)
 	}
 
 	// >>> 数据演变示例
 	// 1. ping:false + Enabled=true -> UPDATE + audit -> ping:true。
 	// 2. missing + Priority=10 -> SELECT 无行 -> ErrPluginNotFound + 回滚。
-	return after, nil
+	return before, after, nil
 }
 
 // selectPlugin 在事务内锁定并读取一个插件配置。

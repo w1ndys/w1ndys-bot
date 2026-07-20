@@ -4,13 +4,18 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
+	"sync"
+	"time"
 
 	commandregistry "github.com/w1ndys/w1ndys-bot/internal/command"
 	"github.com/w1ndys/w1ndys-bot/internal/permission"
 )
+
+const pluginRefreshRollbackTimeout = 10 * time.Second
 
 // RuntimeRefresher 定义数据库管理变更后的运行时刷新能力。
 type RuntimeRefresher interface {
@@ -30,6 +35,7 @@ type Service struct {
 	permissions RuntimeRefresher
 	settings    RuntimeRefresher
 	authorizer  AdminAuthorizer
+	pluginLocks sync.Map
 }
 
 // NewService 创建管理服务。
@@ -544,7 +550,10 @@ func (s *Service) updatePlugin(ctx context.Context, actor Actor, name string, pa
 	if name == "" {
 		return PluginState{}, fmt.Errorf("%w: 名称为空", ErrPluginNotFound)
 	}
-	state, err := s.repository.UpdatePlugin(ctx, actor, name, patch)
+	updateLock := s.pluginUpdateLock(name)
+	updateLock.Lock()
+	defer updateLock.Unlock()
+	before, state, err := s.repository.UpdatePlugin(ctx, actor, name, patch)
 	// [决策理由] 持久化失败时数据库未形成新目标状态，不应刷新运行时。
 	if err != nil {
 		return PluginState{}, fmt.Errorf("更新插件 %s: %w", name, err)
@@ -555,13 +564,40 @@ func (s *Service) updatePlugin(ctx context.Context, actor Actor, name string, pa
 	}
 	// [决策理由] 写入后立即刷新，使 QQ 与 WebUI 修改无需重启即可生效。
 	if err := s.runtime.Load(ctx); err != nil {
-		return state, fmt.Errorf("刷新插件 %s 运行状态: %w", name, err)
+		refreshErr := fmt.Errorf("刷新插件 %s 运行状态: %w", name, err)
+		rollbackContext, cancelRollback := context.WithTimeout(context.WithoutCancel(ctx), pluginRefreshRollbackTimeout)
+		defer cancelRollback()
+		rollbackPatch := PluginPatch{Enabled: &before.Enabled, Priority: &before.Priority}
+		_, _, rollbackErr := s.repository.UpdatePlugin(rollbackContext, actor, name, rollbackPatch)
+		// [决策理由] 数据库补偿失败时无法恢复持久化来源状态，必须同时返回刷新和补偿根因。
+		if rollbackErr != nil {
+			return state, errors.Join(refreshErr, fmt.Errorf("回滚插件 %s 数据库状态: %w", name, rollbackErr))
+		}
+		// [决策理由] 补偿写回旧状态后再次刷新，确保可能部分迁移的 Manager 回到事务前快照。
+		if rollbackLoadErr := s.runtime.Load(rollbackContext); rollbackLoadErr != nil {
+			return state, errors.Join(refreshErr, fmt.Errorf("恢复插件 %s 运行状态: %w", name, rollbackLoadErr))
+		}
+		return state, refreshErr
 	}
 
 	// >>> 数据演变示例
 	// 1. qq管理员 + ping启用 -> Repository事务 -> Runtime.Load -> 返回新状态。
 	// 2. 非法channel -> 校验拒绝 -> Repository不调用。
 	return state, nil
+}
+
+// pluginUpdateLock 返回同名插件共享的管理更新锁。
+// @param name：插件稳定名称。
+// @returns 当前 Service 内同名插件唯一的互斥锁。
+// ⚠️副作用说明：首次访问插件名时向进程内 sync.Map 保存锁实例。
+func (s *Service) pluginUpdateLock(name string) *sync.Mutex {
+	value, _ := s.pluginLocks.LoadOrStore(name, &sync.Mutex{})
+	lock := value.(*sync.Mutex)
+
+	// >>> 数据演变示例
+	// 1. 首次ping -> 创建锁A -> 返回A。
+	// 2. 并发ping -> 读取锁A -> 写库、刷新与补偿按请求串行。
+	return lock
 }
 
 // authorize 使用服务端身份快照校验管理操作来源和操作者。
