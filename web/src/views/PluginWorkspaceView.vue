@@ -29,6 +29,8 @@ function buildPageHeading(): PageHeading {
     'plugin-features': { breadcrumb: '功能', title: '所属功能', description: '查看当前插件注册并可供命令和权限策略使用的功能。' },
     'plugin-commands': { breadcrumb: '命令', title: '命令管理', description: '维护功能触发词；保存后立即热更新，并在同一作用域内执行重复检测。' },
     'plugin-permissions': { breadcrumb: '权限', title: '权限策略', description: '配置显式规则；未命中时按作用域优先级回退到 Manifest 默认值。' },
+    'plugin-resources': { breadcrumb: '数据', title: '业务数据', description: '管理插件声明的业务记录；修改使用版本检查并由插件执行领域校验。' },
+    'plugin-groups': { breadcrumb: '群控制', title: '群启用策略', description: '配置群默认值与单群覆盖；全局关闭时所有群均不生效。' },
   }
   const routeName = String(route.name ?? '')
   const fallback = headings['plugin-overview']
@@ -147,6 +149,8 @@ watch(pluginName, loadPlugin, { immediate: true })
         <NTab name="plugin-features">所属功能</NTab>
         <NTab name="plugin-commands">命令管理</NTab>
         <NTab name="plugin-permissions">权限策略</NTab>
+        <NTab name="plugin-resources">数据管理</NTab>
+        <NTab v-if="plugin.group_controllable" name="plugin-groups">群控制</NTab>
       </NTabs>
       <div class="workspace-content">
         <RouterView :key="pluginName" />

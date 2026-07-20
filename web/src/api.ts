@@ -49,6 +49,30 @@ export interface PluginConfigState {
   version: number
 }
 
+export interface PluginResourceDescriptor {
+  key: string
+  display_name: string
+  description?: string
+  fields: PluginConfigField[]
+  can_create: boolean
+  can_update: boolean
+  can_delete: boolean
+  max_page_size: number
+}
+
+export interface PluginResourceRecord {
+  id: number
+  data: Record<string, unknown>
+  version: number
+}
+
+export interface PluginResourcePage {
+  items: PluginResourceRecord[]
+  page: number
+  page_size: number
+  total: number
+}
+
 export interface LoginResult {
   token: string
   expires_in: number
@@ -61,6 +85,21 @@ export interface PluginState {
   available: boolean
   enabled: boolean
   priority: number
+  group_controllable: boolean
+}
+
+export interface PluginGroupOverride {
+  group_id: string
+  enabled: boolean
+  version: number
+}
+
+export interface PluginGroupControlState {
+  plugin_name: string
+  plugin_enabled: boolean
+  default_enabled: boolean
+  default_version: number
+  overrides: PluginGroupOverride[]
 }
 
 export interface FeatureState {
@@ -226,6 +265,59 @@ export function patchPlugin(name: string, patch: { enabled: boolean } | { priori
   return result
 }
 
+// getPluginGroupControl 读取插件群默认与单群覆盖。
+// @param name：插件稳定名称。
+// @returns 群控制权威快照。
+// ⚠️副作用说明：发起鉴权网络请求。
+export function getPluginGroupControl(name: string): Promise<PluginGroupControlState> {
+  const result = apiRequest<PluginGroupControlState>(`/api/plugins/${encodeURIComponent(name)}/group-control`)
+
+  // >>> 数据演变示例
+  // 1. keyword_reply -> GET -> default+覆盖。
+  // 2. 不支持 -> 404 -> 抛错。
+  return result
+}
+
+// setPluginGroupDefault 使用版本检查更新群默认值。
+// @param name：插件名；enabled：目标值；version：当前版本。
+// @returns 更新后快照。
+// ⚠️副作用说明：写入后端策略、审计并热刷新。
+export function setPluginGroupDefault(name: string, enabled: boolean, version: number): Promise<PluginGroupControlState> {
+  const result = apiRequest<PluginGroupControlState>(`/api/plugins/${encodeURIComponent(name)}/group-control`, { method: 'PATCH', body: JSON.stringify({ enabled, expected_version: version }) })
+
+  // >>> 数据演变示例
+  // 1. false/v2 -> PATCH -> v3。
+  // 2. 陈旧v1 -> 409 -> 抛错。
+  return result
+}
+
+// setPluginGroupOverride 新增或更新单群覆盖。
+// @param name/groupID：目标；enabled：值；version：0 新增，正数更新。
+// @returns 新覆盖快照。
+// ⚠️副作用说明：写入覆盖、审计并热刷新。
+export function setPluginGroupOverride(name: string, groupID: string, enabled: boolean, version: number): Promise<PluginGroupOverride> {
+  const result = apiRequest<PluginGroupOverride>(`/api/plugins/${encodeURIComponent(name)}/group-overrides/${encodeURIComponent(groupID)}`, { method: 'PUT', body: JSON.stringify({ enabled, expected_version: version }) })
+
+  // >>> 数据演变示例
+  // 1. group100/true/v0 -> PUT -> v1。
+  // 2. 陈旧版本 -> 409 -> 抛错。
+  return result
+}
+
+// deletePluginGroupOverride 删除覆盖以恢复继承。
+// @param name/groupID：目标；version：当前版本。
+// @returns 删除标记。
+// ⚠️副作用说明：删除后端覆盖、审计并热刷新。
+export function deletePluginGroupOverride(name: string, groupID: string, version: number): Promise<{ deleted: boolean }> {
+  const params = new URLSearchParams({ expected_version: String(version) })
+  const result = apiRequest<{ deleted: boolean }>(`/api/plugins/${encodeURIComponent(name)}/group-overrides/${encodeURIComponent(groupID)}?${params.toString()}`, { method: 'DELETE' })
+
+  // >>> 数据演变示例
+  // 1. group100/v2 -> DELETE -> 继承默认。
+  // 2. 陈旧v1 -> 409 -> 抛错。
+  return result
+}
+
 // getPluginConfigSchema 获取插件声明式配置字段。
 // @param name：插件稳定名称。
 // @returns 后端校验过的配置 Schema。
@@ -265,6 +357,79 @@ export function putPluginConfig(name: string, config: Record<string, unknown>, e
   // >>> 数据演变示例
   // 1. prefix=x,expected=2 -> PUT -> 脱敏快照version=3。
   // 2. expected=1但当前=2 -> 409 plugin_config_conflict -> 抛出 ApiError。
+  return result
+}
+
+// listPluginResources 获取插件声明的业务资源描述。
+// @param pluginName：插件稳定名称。
+// @returns 可由通用界面管理的资源列表。
+// ⚠️副作用说明：发起鉴权网络请求。
+export function listPluginResources(pluginName: string): Promise<PluginResourceDescriptor[]> {
+  const result = apiRequest<PluginResourceDescriptor[]>(`/api/plugins/${encodeURIComponent(pluginName)}/resources`)
+
+  // >>> 数据演变示例
+  // 1. 插件声明rules资源 -> GET -> 返回字段与操作能力。
+  // 2. 插件无业务资源 -> GET -> 返回空数组。
+  return result
+}
+
+// listPluginResourceRecords 分页读取插件业务资源记录。
+// @param pluginName：插件稳定名称；resourceKey：资源稳定键；page：页码；pageSize：每页数量。
+// @returns 资源记录分页快照。
+// ⚠️副作用说明：发起鉴权网络请求。
+export function listPluginResourceRecords(pluginName: string, resourceKey: string, page: number, pageSize: number): Promise<PluginResourcePage> {
+  const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+  const result = apiRequest<PluginResourcePage>(`/api/plugins/${encodeURIComponent(pluginName)}/resources/${encodeURIComponent(resourceKey)}?${params.toString()}`)
+
+  // >>> 数据演变示例
+  // 1. rules第1页20条 -> GET?page=1&page_size=20 -> 返回分页记录。
+  // 2. 未注册资源 -> 404 -> 抛出后端错误。
+  return result
+}
+
+// createPluginResourceRecord 新增一条插件业务资源记录。
+// @param pluginName：插件稳定名称；resourceKey：资源稳定键；data：Schema 允许的字段数据。
+// @returns 创建后的权威记录。
+// ⚠️副作用说明：写入插件业务表并产生审计记录。
+export function createPluginResourceRecord(pluginName: string, resourceKey: string, data: Record<string, unknown>): Promise<PluginResourceRecord> {
+  const result = apiRequest<PluginResourceRecord>(`/api/plugins/${encodeURIComponent(pluginName)}/resources/${encodeURIComponent(resourceKey)}`, {
+    method: 'POST',
+    body: JSON.stringify({ data }),
+  })
+
+  // >>> 数据演变示例
+  // 1. {keyword:"你好"} -> POST -> 返回带id与version的记录。
+  // 2. 重复关键词 -> 409 -> 抛出冲突错误。
+  return result
+}
+
+// updatePluginResourceRecord 使用乐观版本更新插件业务资源记录。
+// @param pluginName：插件稳定名称；resourceKey：资源稳定键；id：记录ID；data：编辑字段；expectedVersion：读取版本。
+// @returns 更新后的权威记录。
+// ⚠️副作用说明：更新插件业务表并产生审计记录。
+export function updatePluginResourceRecord(pluginName: string, resourceKey: string, id: number, data: Record<string, unknown>, expectedVersion: number): Promise<PluginResourceRecord> {
+  const result = apiRequest<PluginResourceRecord>(`/api/plugins/${encodeURIComponent(pluginName)}/resources/${encodeURIComponent(resourceKey)}/${encodeURIComponent(String(id))}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ data, expected_version: expectedVersion }),
+  })
+
+  // >>> 数据演变示例
+  // 1. id=2,v1+新回复 -> PATCH -> 返回v2记录。
+  // 2. id=2,v1但服务端v2 -> 409 -> 抛出冲突错误。
+  return result
+}
+
+// deletePluginResourceRecord 使用乐观版本删除插件业务资源记录。
+// @param pluginName：插件稳定名称；resourceKey：资源稳定键；id：记录ID；expectedVersion：读取版本。
+// @returns 删除成功后的空数据。
+// ⚠️副作用说明：删除插件业务记录并产生审计记录。
+export function deletePluginResourceRecord(pluginName: string, resourceKey: string, id: number, expectedVersion: number): Promise<{ deleted: boolean }> {
+  const params = new URLSearchParams({ expected_version: String(expectedVersion) })
+  const result = apiRequest<{ deleted: boolean }>(`/api/plugins/${encodeURIComponent(pluginName)}/resources/${encodeURIComponent(resourceKey)}/${encodeURIComponent(String(id))}?${params.toString()}`, { method: 'DELETE' })
+
+  // >>> 数据演变示例
+  // 1. id=2,v3 -> DELETE -> {deleted:true}并刷新列表。
+  // 2. id=2,v2但服务端v3 -> 409 -> 抛出冲突错误。
   return result
 }
 

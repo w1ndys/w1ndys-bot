@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,29 +15,243 @@ import (
 )
 
 type fakeRepository struct {
-	states          []PluginState
-	before          PluginState
-	updated         PluginState
-	updateCalls     int
-	updateActor     Actor
-	updateName      string
-	updatePatch     PluginPatch
-	commandInput    CommandCreate
-	normalized      string
-	commandID       int64
-	permissionInput PermissionSet
-	permissionID    int64
-	settings        []SettingState
-	setting         SettingState
-	settingKey      string
-	err             error
-	errs            []error
-	updateEntered   chan struct{}
-	updateRelease   chan struct{}
-	configCurrent   PluginConfigState
-	configUpdates   []PluginConfigUpdate
-	configAudits    [][2]json.RawMessage
-	configErrs      []error
+	states            []PluginState
+	before            PluginState
+	updated           PluginState
+	updateCalls       int
+	updateActor       Actor
+	updateName        string
+	updatePatch       PluginPatch
+	commandInput      CommandCreate
+	normalized        string
+	commandID         int64
+	permissionInput   PermissionSet
+	permissionID      int64
+	settings          []SettingState
+	setting           SettingState
+	settingKey        string
+	err               error
+	errs              []error
+	updateEntered     chan struct{}
+	updateRelease     chan struct{}
+	configCurrent     PluginConfigState
+	configUpdates     []PluginConfigUpdate
+	configAudits      [][2]json.RawMessage
+	configErrs        []error
+	groupState        PluginGroupControlState
+	groupOverrides    []PluginGroupOverride
+	groupCalls        int
+	groupErrs         []error
+	groupDeadlines    []bool
+	groupWrites       []string
+	failureAuditCalls int
+	failureAuditErr   error
+}
+
+// RecordPluginGroupRefreshFailure 记录测试群 gate 刷新失败审计。
+// @param ctx/actor/name：未使用。
+// @returns 预设审计错误。
+// ⚠️副作用说明：递增 failureAuditCalls。
+func (f *fakeRepository) RecordPluginGroupRefreshFailure(context.Context, Actor, string) error {
+	f.failureAuditCalls++
+
+	// >>> 数据演变示例
+	// 1. Reload失败 -> calls+1 -> nil。
+	// 2. auditErr=boom -> calls+1 -> boom。
+	return f.failureAuditErr
+}
+
+// TestPluginGroupControlService 验证授权、群号边界、CRUD 委派与默认策略刷新补偿。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：仅调用内存替身。
+func TestPluginGroupControlService(t *testing.T) {
+	actor := Actor{ID: "100", Channel: ChannelWebUI}
+	authorizer := &fakeAuthorizer{allowed: map[string]bool{"100": true}}
+	repository := &fakeRepository{}
+	runtime := &fakeRuntime{}
+	service := NewService(repository, runtime, nil, nil, nil, authorizer)
+	_, err := service.GetPluginGroupControl(context.Background(), Actor{ID: "200", Channel: ChannelWebUI}, "keyword_reply")
+	// [决策理由] 自报身份不得绕过 SUPER_ADMIN 快照。
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("GetPluginGroupControl() error = %v", err)
+	}
+	repository.err = ErrGroupControlNotSupported
+	_, err = service.GetPluginGroupControl(context.Background(), actor, "echo")
+	// [决策理由] Manifest 未声明可控的插件必须保留不支持语义。
+	if !errors.Is(err, ErrGroupControlNotSupported) {
+		t.Fatalf("non-controllable error = %v", err)
+	}
+	repository.err = nil
+	_, err = service.SetPluginGroupOverride(context.Background(), actor, "keyword_reply", "99999999999999999999", true, 0)
+	// [决策理由] 超过 BIGINT 的群号必须在仓库前拒绝。
+	if !errors.Is(err, ErrInvalidGroupControl) {
+		t.Fatalf("overflow group error = %v", err)
+	}
+	created, err := service.SetPluginGroupOverride(context.Background(), actor, "keyword_reply", "100", true, 0)
+	// [决策理由] version=0 应创建 v1 并刷新 gate。
+	if err != nil || created.Version != 1 || runtime.loads != 1 {
+		t.Fatalf("create = %+v, err=%v, loads=%d", created, err, runtime.loads)
+	}
+	updated, err := service.SetPluginGroupOverride(context.Background(), actor, "keyword_reply", "100", false, 1)
+	// [决策理由] 正版本更新应返回递增版本。
+	if err != nil || updated.Version != 2 {
+		t.Fatalf("update = %+v, err=%v", updated, err)
+	}
+	// [决策理由] 删除应委派仓库并刷新 gate。
+	if err := service.DeletePluginGroupOverride(context.Background(), actor, "keyword_reply", "100", 2); err != nil {
+		t.Fatalf("DeletePluginGroupOverride() error = %v", err)
+	}
+
+	auditFailure := errors.New("failure audit unavailable")
+	rollbackRepository := &fakeRepository{groupState: PluginGroupControlState{PluginName: "keyword_reply", PluginEnabled: true, DefaultEnabled: true, DefaultVersion: 1}, failureAuditErr: auditFailure}
+	rollbackRuntime := &fakeRuntime{errs: []error{errors.New("reload failed"), nil}}
+	rollbackService := NewService(rollbackRepository, rollbackRuntime, nil, nil, nil, authorizer)
+	state, err := rollbackService.SetPluginGroupDefault(context.Background(), actor, "keyword_reply", false, 1)
+	// [决策理由] 首次刷新失败必须写回旧默认值并再刷新。
+	if err == nil || !state.DefaultEnabled || rollbackRepository.groupCalls != 2 || rollbackRuntime.loads != 2 {
+		t.Fatalf("rollback state=%+v err=%v calls=%d loads=%d", state, err, rollbackRepository.groupCalls, rollbackRuntime.loads)
+	}
+	// [决策理由] 首次 Reload 失败必须在补偿前尝试一次固定失败审计。
+	if rollbackRepository.failureAuditCalls != 1 {
+		t.Fatalf("failure audit calls = %d", rollbackRepository.failureAuditCalls)
+	}
+	// [决策理由] 失败审计写入错误不阻止补偿，但必须与原刷新错误一起保留。
+	if !errors.Is(err, auditFailure) || rollbackRepository.groupCalls != 2 || rollbackRuntime.loads != 2 {
+		t.Fatalf("joined error=%v calls=%d loads=%d", err, rollbackRepository.groupCalls, rollbackRuntime.loads)
+	}
+	// [决策理由] 原始请求可无 deadline，但数据库补偿与二次 gate 恢复必须分别携带超时。
+	if len(rollbackRepository.groupDeadlines) != 2 || rollbackRepository.groupDeadlines[0] || !rollbackRepository.groupDeadlines[1] || len(rollbackRuntime.groupDeadlines) != 2 || rollbackRuntime.groupDeadlines[0] || !rollbackRuntime.groupDeadlines[1] {
+		t.Fatalf("repository deadlines=%v runtime deadlines=%v", rollbackRepository.groupDeadlines, rollbackRuntime.groupDeadlines)
+	}
+	noRuntimeRepository := &fakeRepository{groupState: PluginGroupControlState{PluginName: "keyword_reply", PluginEnabled: true, DefaultEnabled: true, DefaultVersion: 1}}
+	noRuntimeService := NewService(noRuntimeRepository, nil, nil, nil, nil, authorizer)
+	noRuntimeState, err := noRuntimeService.SetPluginGroupDefault(context.Background(), actor, "keyword_reply", false, 1)
+	// [决策理由] 无运行时的管理进程只持久化一次，不产生伪刷新失败或补偿。
+	if err != nil || noRuntimeState.DefaultEnabled || noRuntimeRepository.groupCalls != 1 || noRuntimeRepository.failureAuditCalls != 0 {
+		t.Fatalf("no runtime state=%+v err=%v calls=%d audits=%d", noRuntimeState, err, noRuntimeRepository.groupCalls, noRuntimeRepository.failureAuditCalls)
+	}
+
+	// >>> 数据演变示例
+	// 1. 管理员+group100 -> create/update/delete -> 每次刷新。
+	// 2. default写入后reload失败 -> 补偿旧值 -> 再reload。
+}
+
+// TestPluginGroupControlMutationsPublishInGlobalOrder 验证跨插件写入与全量 gate 发布严格串行。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：启动两个 goroutine 并使用 channel 确定性阻塞首次 gate 发布。
+func TestPluginGroupControlMutationsPublishInGlobalOrder(t *testing.T) {
+	actor := Actor{ID: "100", Channel: ChannelWebUI}
+	repository := &fakeRepository{groupState: PluginGroupControlState{PluginName: "plugin_a", PluginEnabled: true, DefaultEnabled: true, DefaultVersion: 1}}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	runtimeRefresher := &fakeRuntime{groupReloadEntered: entered, groupReloadRelease: release}
+	runtimeRefresher.groupSnapshot = func() string {
+		return strings.Join(repository.groupWrites, ",")
+	}
+	service := NewService(repository, runtimeRefresher, nil, nil, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
+	aDone := make(chan error, 1)
+	go func() {
+		_, err := service.SetPluginGroupDefault(context.Background(), actor, "plugin_a", false, 1)
+		aDone <- err
+	}()
+	<-entered
+	bStarted := make(chan struct{})
+	bDone := make(chan error, 1)
+	go func() {
+		close(bStarted)
+		_, err := service.SetPluginGroupDefault(context.Background(), actor, "plugin_b", true, 2)
+		bDone <- err
+	}()
+	<-bStarted
+	runtime.Gosched()
+	// [决策理由] A 写入后的首次 Reload 未结束前，B 不得进入 Repository 或发布快照。
+	if repository.groupCalls != 1 || len(runtimeRefresher.groupPublished) != 1 {
+		t.Fatalf("before release calls=%d published=%v", repository.groupCalls, runtimeRefresher.groupPublished)
+	}
+	close(release)
+	// [决策理由] 释放 A 后两个请求必须均成功完成。
+	if err := <-aDone; err != nil {
+		t.Fatalf("A error = %v", err)
+	}
+	if err := <-bDone; err != nil {
+		t.Fatalf("B error = %v", err)
+	}
+	// [决策理由] 第二次全量发布必须包含 A 与 B 两项最新数据库语义。
+	if repository.groupCalls != 2 || len(runtimeRefresher.groupPublished) != 2 || runtimeRefresher.groupPublished[0] != "plugin_a:false" || runtimeRefresher.groupPublished[1] != "plugin_a:false,plugin_b:true" {
+		t.Fatalf("calls=%d writes=%v published=%v", repository.groupCalls, repository.groupWrites, runtimeRefresher.groupPublished)
+	}
+
+	// >>> 数据演变示例
+	// 1. A写入后Reload阻塞 -> B等待 -> 发布[A] -> 发布[A,B]。
+	// 2. 无全局锁 -> B可越过 -> 本测试在release前失败。
+}
+
+// GetPluginGroupControl 返回测试群控制快照。
+// @param ctx：未使用；name：插件名。
+// @returns 预设快照或错误。
+// ⚠️副作用说明：无。
+func (f *fakeRepository) GetPluginGroupControl(_ context.Context, name string) (PluginGroupControlState, error) {
+	state := f.groupState
+	// [决策理由] 零值替身提供可用的默认版本。
+	if state.DefaultVersion == 0 {
+		state = PluginGroupControlState{PluginName: name, PluginEnabled: true, DefaultEnabled: true, DefaultVersion: 1, Overrides: append([]PluginGroupOverride(nil), f.groupOverrides...)}
+	}
+	// >>> 数据演变示例
+	// 1. keyword_reply -> default v1。
+	// 2. err=not supported -> error。
+	return state, f.err
+}
+
+// SetPluginGroupDefault 记录默认策略更新与补偿。
+// @param ctx：未使用；actor/name：未使用；enabled/version：目标。
+// @returns 版本加一快照或按序错误。
+// ⚠️副作用说明：递增 groupCalls。
+func (f *fakeRepository) SetPluginGroupDefault(ctx context.Context, _ Actor, name string, enabled bool, version int64) (PluginGroupControlState, error) {
+	f.groupCalls++
+	f.groupWrites = append(f.groupWrites, name+":"+strconv.FormatBool(enabled))
+	_, hasDeadline := ctx.Deadline()
+	f.groupDeadlines = append(f.groupDeadlines, hasDeadline)
+	// [决策理由] 错误序列区分首次写入与补偿。
+	if len(f.groupErrs) >= f.groupCalls && f.groupErrs[f.groupCalls-1] != nil {
+		return PluginGroupControlState{}, f.groupErrs[f.groupCalls-1]
+	}
+	result := PluginGroupControlState{PluginName: name, PluginEnabled: true, DefaultEnabled: enabled, DefaultVersion: version + 1, Overrides: f.groupOverrides}
+	f.groupState = result
+
+	// >>> 数据演变示例
+	// 1. false/v1 -> false/v2。
+	// 2. 第2次设错 -> 补偿失败。
+	return result, nil
+}
+
+// SetPluginGroupOverride 记录覆盖新增或更新。
+// @param ctx/actor/name：未使用；groupID/enabled/version：目标。
+// @returns 版本加一覆盖或错误。
+// ⚠️副作用说明：记录覆盖。
+func (f *fakeRepository) SetPluginGroupOverride(_ context.Context, _ Actor, _ string, groupID string, enabled bool, version int64) (PluginGroupOverride, error) {
+	f.groupCalls++
+	item := PluginGroupOverride{GroupID: groupID, Enabled: enabled, Version: version + 1}
+	f.groupOverrides = append(f.groupOverrides, item)
+
+	// >>> 数据演变示例
+	// 1. group100/v0 -> v1。
+	// 2. group100/v1 -> v2。
+	return item, f.err
+}
+
+// DeletePluginGroupOverride 记录测试覆盖删除。
+// @param ctx/actor/name/groupID/version：未使用。
+// @returns 预设错误。
+// ⚠️副作用说明：递增 groupCalls。
+func (f *fakeRepository) DeletePluginGroupOverride(context.Context, Actor, string, string, int64) error {
+	f.groupCalls++
+
+	// >>> 数据演变示例
+	// 1. 正常 -> nil。
+	// 2. err=conflict -> conflict。
+	return f.err
 }
 
 // GetPluginConfig 返回测试声明式配置快照。
@@ -506,13 +722,46 @@ func TestPluginUpdatesAreSerializedByName(t *testing.T) {
 }
 
 type fakeRuntime struct {
-	loads       int
-	err         error
-	errs        []error
-	schema      plugin.ConfigSchema
-	applies     []json.RawMessage
-	applyErrs   []error
-	quarantines int
+	loads              int
+	err                error
+	errs               []error
+	schema             plugin.ConfigSchema
+	applies            []json.RawMessage
+	applyErrs          []error
+	quarantines        int
+	groupDeadlines     []bool
+	groupReloadEntered chan struct{}
+	groupReloadRelease chan struct{}
+	groupSnapshot      func() string
+	groupPublished     []string
+}
+
+// ReloadGroupGate 记录群 gate 局部刷新。
+// @param ctx：未使用。
+// @returns 按序预设错误。
+// ⚠️副作用说明：递增 loads。
+func (f *fakeRuntime) ReloadGroupGate(ctx context.Context) error {
+	f.loads++
+	_, hasDeadline := ctx.Deadline()
+	f.groupDeadlines = append(f.groupDeadlines, hasDeadline)
+	// [决策理由] 并发测试在每次发布时记录当前数据库语义。
+	if f.groupSnapshot != nil {
+		f.groupPublished = append(f.groupPublished, f.groupSnapshot())
+	}
+	// [决策理由] 只阻塞首次发布，用于确定性验证第二个写入不能越过。
+	if f.loads == 1 && f.groupReloadEntered != nil && f.groupReloadRelease != nil {
+		close(f.groupReloadEntered)
+		<-f.groupReloadRelease
+	}
+	// [决策理由] 错误序列可区分首次刷新与补偿后刷新。
+	if len(f.errs) >= f.loads {
+		return f.errs[f.loads-1]
+	}
+
+	// >>> 数据演变示例
+	// 1. errs=[] -> nil。
+	// 2. errs=[boom,nil] -> 首次失败、恢复成功。
+	return f.err
 }
 
 // QuarantineConfig 记录测试插件隔离。

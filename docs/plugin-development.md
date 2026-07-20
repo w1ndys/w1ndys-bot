@@ -117,6 +117,7 @@ blank import → init 注册 Registration → 启动同步 Manifest
 - 重复触发词由管理服务在同一作用域内拒绝。
 - 指定用户权限优先于角色权限；群级规则优先于全局规则。
 - `Manifest.Priority` 是首次同步默认优先级，数值较大者先处理广播事件。
+- 群消息插件如需平台统一逐群启停，应声明 `Manifest.GroupControllable: true`；不要在插件业务表或 `config_json` 中重复实现群开关。
 - 定向命令通过 `HandleNamed` 进入目标插件，不依赖广播优先级。
 - 普通业务插件保持 `System: false`；系统插件具有额外禁用保护，不应滥用。
 
@@ -127,6 +128,12 @@ blank import → init 注册 Registration → 启动同步 Manifest
 WebUI 会在插件概览中按 `string`、`multiline`、`integer`、`boolean`、`enum` 和 `secret` 六种字段类型生成通用表单。保存使用读取时的版本号；发生冲突时保留当前草稿并要求重新加载。只有通用字段无法安全表达工作流、图表或多资源事务时，才新增插件专属页面。
 
 启动时，`PluginManager` 会在 `OnEnable` 前恢复并校验 `plugin_config.config_json`。普通小型设置放入该 JSON；持续增长、需要查询关系或独立事务的业务记录仍应使用版本化 SQL Migration 和插件专属 Repository，不要把配置 JSON 当作文档数据库，也不要在 `Handle` 内散落 SQL。
+
+需要管理重复业务记录时，插件可实现 `plugin.AdminResourceProvider`，返回固定资源键、字段描述和插件自有 `AdminResourceHandler`。平台统一处理 WebUI 鉴权、分页边界、严格字段校验、资源路由和 HTTP 错误映射；插件处理器只能使用固定 SQL，并负责在同一事务内完成领域写入、乐观锁和审计。`plugins/keyword_reply/` 是首个完整样板。
+
+关键词回复插件把规则保存在独立表中，运行时使用原子不可变映射执行群消息 `RawMessage` 完全相等匹配。规则 CRUD 提交后根据事务前后像增量发布快照，不在消息热路径查询数据库，也不会对机器人自身的 `message_sent` 事件触发回复。
+
+平台群控制使用“全局开关 → 群开关 → 用户权限 → 插件处理”链路。无单群覆盖时继承 `group_default_enabled`，删除覆盖即恢复继承；管理写入使用独立版本 CAS、事务审计和群门禁局部热刷新。非群插件、系统管理插件和私聊事件不受群门禁影响。
 
 不得把 Token、密码或用户隐私写入 Manifest、日志或错误文本。原始消息、QQ号和URL只应在必要的 debug 场景记录。
 

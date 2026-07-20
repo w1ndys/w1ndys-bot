@@ -119,6 +119,32 @@ function loadPluginFeaturesView() {
   return result
 }
 
+// loadPluginResourcesView 懒加载插件通用业务数据管理页。
+// @param 无。
+// @returns 通用资源页组件模块 Promise。
+// ⚠️副作用说明：首次访问时发起前端代码块请求。
+function loadPluginResourcesView() {
+  const result = import('./views/PluginResourcesView.vue')
+
+  // >>> 数据演变示例
+  // 1. 插件/resources -> 请求资源页代码块 -> 按Descriptor渲染表格。
+  // 2. 已缓存 -> 直接复用模块。
+  return result
+}
+
+// loadPluginGroupsView 懒加载插件群控制页。
+// @param 无。
+// @returns 群控制页组件模块 Promise。
+// ⚠️副作用说明：首次访问时发起代码块请求。
+function loadPluginGroupsView() {
+  const result = import('./views/PluginGroupsView.vue')
+
+  // >>> 数据演变示例
+  // 1. plugin/groups -> 加载页面。
+  // 2. 已缓存 -> 复用模块。
+  return result
+}
+
 const router = createRouter({
   history: createWebHistory(),
   routes: [
@@ -135,6 +161,8 @@ const router = createRouter({
         { path: 'features', name: 'plugin-features', component: loadPluginFeaturesView },
         { path: 'commands', name: 'plugin-commands', component: loadCommandsView },
         { path: 'permissions', name: 'plugin-permissions', component: loadPermissionsView },
+        { path: 'resources', name: 'plugin-resources', component: loadPluginResourcesView },
+        { path: 'groups', name: 'plugin-groups', component: loadPluginGroupsView },
       ],
     },
     { path: '/settings', name: 'settings', component: loadSettingsView, meta: { requiresAuth: true } },

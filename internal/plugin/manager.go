@@ -29,18 +29,23 @@ const lifecycleRollbackTimeout = 10 * time.Second
 
 // Manager 管理插件注册、状态刷新、热开关和事件路由。
 type Manager struct {
-	mu      sync.RWMutex
-	store   StateStore
-	entries map[string]*entry
-	ordered []*entry
+	mu        sync.RWMutex
+	store     StateStore
+	entries   map[string]*entry
+	ordered   []*entry
+	groupGate GroupGate
 }
 
 // NewManager 创建插件管理器。
-// @param store：插件状态持久化仓库，可为 nil。
+// @param store：插件状态持久化仓库，可为nil；gates：可选群门禁，生产环境最多注入一个。
 // @returns 空的并发安全 Manager。
 // ⚠️副作用说明：仅分配内存，不访问数据库或调用插件。
-func NewManager(store StateStore) *Manager {
+func NewManager(store StateStore, gates ...GroupGate) *Manager {
 	manager := &Manager{store: store, entries: make(map[string]*entry)}
+	// [决策理由] 可选参数保持纯内存测试和旧组装兼容，同时生产只注入一个共享门禁。
+	if len(gates) > 0 {
+		manager.groupGate = gates[0]
+	}
 
 	// >>> 数据演变示例
 	// 1. PostgreSQL Store -> 空 entries -> 返回可持久化状态的 Manager。
@@ -92,6 +97,12 @@ func (m *Manager) Load(ctx context.Context) error {
 	if !hasEntries {
 		return nil
 	}
+	// [决策理由] 群门禁必须在插件开始接收事件前发布完整快照，失败时阻止启动。
+	if m.groupGate != nil {
+		if err := m.ReloadGroupGate(ctx); err != nil {
+			return fmt.Errorf("加载插件群门禁: %w", err)
+		}
+	}
 	// [决策理由] 无状态仓库时没有可加载内容，内存插件保持默认禁用。
 	if m.store == nil {
 		return nil
@@ -137,6 +148,166 @@ var ErrConfigValidationFailed = errors.New("插件配置校验失败")
 
 // ErrConfigApplyFailed 表示插件热应用失败，且不携带可能含 secret 的原始错误。
 var ErrConfigApplyFailed = errors.New("插件配置应用失败")
+
+// ErrAdminResourceNotSupported 表示插件未声明通用管理资源。
+var ErrAdminResourceNotSupported = errors.New("插件不支持管理资源")
+
+// ErrAdminResourceNotFound 表示资源键未由目标插件注册。
+var ErrAdminResourceNotFound = errors.New("插件管理资源不存在")
+
+// AdminResources 返回指定插件的已校验资源声明。
+// @param name：插件稳定名称。
+// @returns 资源声明副本，或未注册、不支持及声明无效错误。
+// ⚠️副作用说明：调用插件 AdminResources；不持有 Manager 主锁。
+func (m *Manager) AdminResources(name string) ([]AdminResource, error) {
+	registrations, err := m.adminResourceRegistrations(name)
+	// [决策理由] 未注册与未实现能力必须保留稳定错误语义。
+	if err != nil {
+		return nil, err
+	}
+	result := make([]AdminResource, 0, len(registrations))
+	seen := make(map[string]struct{}, len(registrations))
+	for _, registration := range registrations {
+		// [决策理由] nil 处理器无法安全委派业务操作。
+		if registration.Handler == nil {
+			return nil, fmt.Errorf("插件 %s 资源 %s 处理器为空", name, registration.Descriptor.Key)
+		}
+		// [决策理由] 无效声明不能暴露给 WebUI 或用于路由。
+		if err := registration.Descriptor.Validate(); err != nil {
+			return nil, fmt.Errorf("插件 %s 管理资源无效: %w", name, err)
+		}
+		// [决策理由] 重复键会使 URL 委派产生歧义，必须整组拒绝。
+		if _, exists := seen[registration.Descriptor.Key]; exists {
+			return nil, fmt.Errorf("插件 %s 管理资源 %s 重复", name, registration.Descriptor.Key)
+		}
+		seen[registration.Descriptor.Key] = struct{}{}
+		result = append(result, registration.Descriptor)
+	}
+
+	// >>> 数据演变示例
+	// 1. keyword_reply声明rules -> 校验并复制 -> [rules]。
+	// 2. echo未实现Provider -> 能力断言 -> ErrAdminResourceNotSupported。
+	return result, nil
+}
+
+// AdminResourceHandler 返回固定插件与资源键对应的处理器。
+// @param name：插件名；resourceKey：资源键。
+// @returns 已校验声明、处理器，或稳定查找错误。
+// ⚠️副作用说明：调用插件 AdminResources；不持有 Manager 主锁。
+func (m *Manager) AdminResourceHandler(name, resourceKey string) (AdminResource, AdminResourceHandler, error) {
+	registrations, err := m.adminResourceRegistrations(name)
+	// [决策理由] 插件定位错误必须先于资源键错误返回。
+	if err != nil {
+		return AdminResource{}, nil, err
+	}
+	seen := make(map[string]struct{}, len(registrations))
+	var matched *AdminResourceRegistration
+	for _, registration := range registrations {
+		// [决策理由] CRUD 查找必须与列表使用相同的整组去重规则，不得静默选择首个处理器。
+		if _, exists := seen[registration.Descriptor.Key]; exists {
+			return AdminResource{}, nil, fmt.Errorf("插件 %s 管理资源 %s 重复", name, registration.Descriptor.Key)
+		}
+		seen[registration.Descriptor.Key] = struct{}{}
+		// [决策理由] 整组声明必须先完整校验，避免目标项后的重复键或损坏资源被直接路由绕过。
+		if registration.Handler == nil {
+			return AdminResource{}, nil, fmt.Errorf("插件 %s 资源 %s 处理器为空", name, registration.Descriptor.Key)
+		}
+		// [决策理由] CRUD 与资源列表必须对所有声明采用相同有效性边界。
+		if err := registration.Descriptor.Validate(); err != nil {
+			return AdminResource{}, nil, fmt.Errorf("插件 %s 管理资源无效: %w", name, err)
+		}
+		// [决策理由] 只能委派插件明确注册的稳定键，不从客户端推导表名。
+		if registration.Descriptor.Key == resourceKey {
+			copy := registration
+			matched = &copy
+		}
+	}
+	// [决策理由] 只有整组检查通过后才能返回目标处理器。
+	if matched != nil {
+		return matched.Descriptor, matched.Handler, nil
+	}
+
+	// >>> 数据演变示例
+	// 1. keyword_reply/rules -> 命中注册 -> descriptor+handler。
+	// 2. keyword_reply/tables -> 无注册键 -> ErrAdminResourceNotFound。
+	return AdminResource{}, nil, fmt.Errorf("%w: %s/%s", ErrAdminResourceNotFound, name, resourceKey)
+}
+
+// adminResourceRegistrations 读取插件当前资源注册副本。
+// @param name：插件稳定名称。
+// @returns 注册副本或稳定能力错误。
+// ⚠️副作用说明：调用插件 AdminResources，插件必须并发安全。
+func (m *Manager) adminResourceRegistrations(name string) ([]AdminResourceRegistration, error) {
+	m.mu.RLock()
+	item, exists := m.entries[name]
+	// [决策理由] 在释放主锁前只复制稳定插件接口，避免持锁调用插件代码。
+	if !exists {
+		m.mu.RUnlock()
+		return nil, fmt.Errorf("%w: %s", errNotRegistered, name)
+	}
+	provider, supported := item.plugin.(AdminResourceProvider)
+	m.mu.RUnlock()
+	// [决策理由] 未实现可选能力的插件不应暴露空的可写资源集。
+	if !supported {
+		return nil, fmt.Errorf("%w: %s", ErrAdminResourceNotSupported, name)
+	}
+	registrations, callbackErr := callAdminResources(provider)
+	// [决策理由] 插件声明回调 panic 必须隔离为错误，不得击穿 HTTP 管理请求。
+	if callbackErr != nil {
+		return nil, fmt.Errorf("读取插件 %s 管理资源: %w", name, callbackErr)
+	}
+	result := make([]AdminResourceRegistration, len(registrations))
+	for index, registration := range registrations {
+		registration.Descriptor.Fields = cloneConfigFields(registration.Descriptor.Fields)
+		result[index] = registration
+	}
+
+	// >>> 数据演变示例
+	// 1. Provider返回[rules] -> slice复制 -> 返回可遍历注册。
+	// 2. 未注册插件 -> entries查找失败 -> ErrNotRegistered。
+	return result, nil
+}
+
+// callAdminResources 安全调用插件资源声明回调。
+// @param provider：插件资源提供者。
+// @returns 资源注册或 panic 转换错误。
+// ⚠️副作用说明：调用插件代码并捕获 panic。
+func callAdminResources(provider AdminResourceProvider) (registrations []AdminResourceRegistration, err error) {
+	defer func() {
+		// [决策理由] 任意插件 panic 都不应终止管理服务进程。
+		if recover() != nil {
+			err = errors.New("插件管理资源回调失败")
+		}
+
+		// >>> 数据演变示例
+		// 1. 正常返回[rules] -> 保留注册。
+		// 2. panic("x") -> recover -> 稳定错误。
+	}()
+	registrations = provider.AdminResources()
+
+	// >>> 数据演变示例
+	// 1. Provider[rules] -> [rules],nil。
+	// 2. Provider panic -> defer改写error。
+	return registrations, nil
+}
+
+// cloneConfigFields 深拷贝资源字段及嵌套可变切片。
+// @param fields：插件持有的字段声明。
+// @returns 与插件后续修改隔离的字段副本。
+// ⚠️副作用说明：分配新切片并复制 RawMessage 与 Options。
+func cloneConfigFields(fields []ConfigField) []ConfigField {
+	result := make([]ConfigField, len(fields))
+	for index, field := range fields {
+		field.Default = append([]byte(nil), field.Default...)
+		field.Options = append([]string(nil), field.Options...)
+		result[index] = field
+	}
+
+	// >>> 数据演变示例
+	// 1. enum options[a,b] -> 新Options切片 -> 插件修改不影响响应。
+	// 2. nil fields -> 空副本。
+	return result
+}
 
 // ConfigSchema 返回插件声明的配置 Schema。
 // @param name：插件稳定名称。
@@ -454,12 +625,17 @@ func (m *Manager) Handle(ctx context.Context, event ws.Event) error {
 	ordered := append([]*entry(nil), m.ordered...)
 	m.mu.RUnlock()
 	for _, item := range ordered {
+		allowed, err := m.RouteAllowed(item.name, event)
+		// [决策理由] 广播快照中的插件可能在预检前被禁用或进入迁移，此时安静跳过且不查询群门禁。
+		if err != nil || !allowed {
+			continue
+		}
 		_, ready := m.beginHandling(item)
 		// [决策理由] 状态快照之后插件可能被禁用或进入迁移，此时本轮广播应跳过该插件。
 		if !ready {
 			continue
 		}
-		err := m.invokePlugin(ctx, item, event)
+		err = m.invokePlugin(ctx, item, event)
 		// [决策理由] 插件显式中止传播代表事件已完整消费，不应作为错误上报。
 		if errors.Is(err, ErrStopPropagation) {
 			return nil
@@ -539,20 +715,24 @@ func (m *Manager) finishHandling(item *entry) {
 // @returns 未注册、未启用或插件处理错误。
 // ⚠️副作用说明：调用目标插件 Handle。
 func (m *Manager) HandleNamed(ctx context.Context, name string, event ws.Event) error {
-	m.mu.RLock()
-	item, exists := m.entries[name]
-	// [决策理由] 锁内复制接口和状态，避免执行插件代码时长期持锁。
-	if !exists {
-		m.mu.RUnlock()
-		return fmt.Errorf("%w: %s", errNotRegistered, name)
+	allowed, err := m.RouteAllowed(name, event)
+	// [决策理由] 定向路由需保留未注册和未启用错误语义，并在这些状态下避免调用群门禁。
+	if err != nil {
+		return err
 	}
+	// [决策理由] 群策略关闭属于正常业务短路，不应作为命令处理错误。
+	if !allowed {
+		return nil
+	}
+	m.mu.RLock()
+	item := m.entries[name]
 	m.mu.RUnlock()
 	_, ready := m.beginHandling(item)
 	// [决策理由] 命令不能绕过插件关闭、迁移或故障隔离状态。
 	if !ready {
 		return fmt.Errorf("插件 %s 未启用或正在切换状态", name)
 	}
-	err := m.invokePlugin(ctx, item, event)
+	err = m.invokePlugin(ctx, item, event)
 	// [决策理由] 定向处理中的停止传播表示成功消费。
 	if errors.Is(err, ErrStopPropagation) {
 		return nil
@@ -566,6 +746,66 @@ func (m *Manager) HandleNamed(ctx context.Context, name string, event ws.Event) 
 	// 1. enabled ping + event -> ping.Handle -> nil。
 	// 2. disabled ping -> 不调用 Handle -> 返回未启用错误。
 	return nil
+}
+
+// RouteAllowed 在不登记在途调用的前提下按全局状态和群策略顺序预检路由。
+// @param name：插件稳定名称；event：待路由事件。
+// @returns 全局启用稳定且群策略放行时返回true；未注册或未启用/迁移返回错误。
+// ⚠️副作用说明：读取Manager状态和群门禁快照；不增加inFlight，调用前仍须beginHandling二次确认。
+func (m *Manager) RouteAllowed(name string, event ws.Event) (bool, error) {
+	m.mu.RLock()
+	item, exists := m.entries[name]
+	// [决策理由] 未注册插件必须保持定向路由原有稳定错误语义，并且不能查询无意义的群策略。
+	if !exists {
+		m.mu.RUnlock()
+		return false, fmt.Errorf("%w: %s", errNotRegistered, name)
+	}
+	ready := item.enabled && !item.transitioning
+	m.mu.RUnlock()
+	// [决策理由] 全局禁用或迁移隔离优先于群门禁，避免权限链和gate承担无效工作。
+	if !ready {
+		return false, fmt.Errorf("插件 %s 未启用或正在切换状态", name)
+	}
+	allowed := m.GroupAllowed(name, event)
+
+	// >>> 数据演变示例
+	// 1. enabled稳定+群100开启 -> true,nil且不登记inFlight。
+	// 2. disabled或transitioning -> false,error且不调用GroupGate。
+	return allowed, nil
+}
+
+// GroupAllowed 判断插件是否允许处理事件所属群。
+// @param name：插件稳定名称；event：待路由事件。
+// @returns 未注入门禁、私聊、非群事件或策略放行时返回true。
+// ⚠️副作用说明：无；仅读取群门禁原子快照。
+func (m *Manager) GroupAllowed(name string, event ws.Event) bool {
+	// [决策理由] 未配置群门禁的测试和内存运行模式保持原有全局行为。
+	if m.groupGate == nil {
+		return true
+	}
+	result := m.groupGate.Allowed(name, event)
+
+	// >>> 数据演变示例
+	// 1. keyword_reply+关闭群100 -> false。
+	// 2. 私聊或echo非可控 -> true。
+	return result
+}
+
+// ReloadGroupGate 从持久化状态重建并原子发布群门禁快照。
+// @param ctx：控制数据库查询生命周期。
+// @returns 未配置门禁时nil，否则返回加载错误。
+// ⚠️副作用说明：调用GroupGate.Load，成功后影响后续群事件路由。
+func (m *Manager) ReloadGroupGate(ctx context.Context) error {
+	// [决策理由] 未注入门禁的内存模式没有可刷新状态，应保持幂等成功。
+	if m.groupGate == nil {
+		return nil
+	}
+	err := m.groupGate.Load(ctx)
+
+	// >>> 数据演变示例
+	// 1. DB群100由开改关 -> Load新快照 -> 后续GroupAllowed=false。
+	// 2. 无GroupGate -> 不访问外部状态 -> nil。
+	return err
 }
 
 // ErrNotRegistered 表示目标插件未编译注册到当前运行时。

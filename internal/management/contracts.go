@@ -4,8 +4,18 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 )
+
+// ErrResourceRecordNotFound 表示插件业务记录不存在。
+var ErrResourceRecordNotFound = errors.New("插件资源记录不存在")
+
+// ErrInvalidResourceData 表示插件业务数据未通过领域校验。
+var ErrInvalidResourceData = errors.New("插件资源数据无效")
+
+// ErrResourceConflict 表示唯一约束或乐观锁版本冲突。
+var ErrResourceConflict = errors.New("插件资源冲突")
 
 // Channel 表示管理操作来源。
 type Channel string
@@ -26,13 +36,15 @@ type Actor struct {
 
 // PluginState 是管理端使用的插件运行配置快照。
 type PluginState struct {
-	Name        string
-	DisplayName string
-	Description string
-	Available   bool
-	Enabled     bool
-	Priority    int
-	ConfigJSON  json.RawMessage
+	Name                string
+	DisplayName         string
+	Description         string
+	Available           bool
+	Enabled             bool
+	Priority            int
+	GroupControllable   bool
+	GroupDefaultEnabled bool
+	ConfigJSON          json.RawMessage
 }
 
 // PluginConfigState 是插件声明式配置的脱敏管理快照。
@@ -46,6 +58,43 @@ type PluginConfigState struct {
 type PluginConfigUpdate struct {
 	ConfigJSON      json.RawMessage
 	ExpectedVersion int64
+}
+
+// ResourceQuery 描述平台校验后的业务资源分页查询。
+type ResourceQuery struct {
+	Page     int
+	PageSize int
+}
+
+// ResourceRecord 是通用管理页中带乐观锁版本的一条记录。
+type ResourceRecord struct {
+	ID      int64
+	Version int64
+	Data    json.RawMessage
+}
+
+// ResourcePage 是插件业务资源的有界分页结果。
+type ResourcePage struct {
+	Items    []ResourceRecord
+	Page     int
+	PageSize int
+	Total    int64
+}
+
+// PluginGroupControlState 表示插件的群默认策略与单群覆盖快照。
+type PluginGroupControlState struct {
+	PluginName     string                `json:"plugin_name"`
+	PluginEnabled  bool                  `json:"plugin_enabled"`
+	DefaultEnabled bool                  `json:"default_enabled"`
+	DefaultVersion int64                 `json:"default_version"`
+	Overrides      []PluginGroupOverride `json:"overrides"`
+}
+
+// PluginGroupOverride 表示一条带乐观锁的单群开关。
+type PluginGroupOverride struct {
+	GroupID string `json:"group_id"`
+	Enabled bool   `json:"enabled"`
+	Version int64  `json:"version"`
 }
 
 // FeatureState 表示插件 Manifest 同步后的功能元数据。

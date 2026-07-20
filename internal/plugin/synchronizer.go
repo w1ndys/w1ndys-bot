@@ -88,15 +88,16 @@ func (s *Synchronizer) Sync(ctx context.Context, manifests []Manifest) error {
 func syncManifest(ctx context.Context, transaction pgx.Tx, manifest Manifest) error {
 	_, err := transaction.Exec(ctx, `
         INSERT INTO plugin_definitions
-            (plugin_name, display_name, description, priority, available)
-		VALUES ($1, $2, $3, $4, TRUE)
+            (plugin_name, display_name, description, priority, group_controllable, available)
+		VALUES ($1, $2, $3, $4, $5, TRUE)
         ON CONFLICT (plugin_name) DO UPDATE SET
             display_name = EXCLUDED.display_name,
             description = EXCLUDED.description,
 			priority = EXCLUDED.priority,
+			group_controllable = EXCLUDED.group_controllable,
 			available = TRUE,
 			updated_at = NOW()`,
-		manifest.Name, manifest.DisplayName, manifest.Description, manifest.Priority)
+		manifest.Name, manifest.DisplayName, manifest.Description, manifest.Priority, manifest.GroupControllable)
 	// [决策理由] 插件定义是功能外键父记录，失败后不能继续写功能。
 	if err != nil {
 		return fmt.Errorf("同步插件 %s 定义: %w", manifest.Name, err)

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/w1ndys/w1ndys-bot/internal/management"
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 )
@@ -22,6 +23,7 @@ type Messenger interface {
 type Runtime struct {
 	Messenger  Messenger
 	Management management.Controller
+	Database   *pgxpool.Pool
 }
 
 // Factory 使用运行时依赖创建插件实例。

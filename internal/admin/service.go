@@ -188,13 +188,14 @@ func mapRuntimeConfigError(err error) error {
 
 // Service 是 QQ 管理命令与 WebUI 共用的管理业务入口。
 type Service struct {
-	repository  Repository
-	runtime     RuntimeRefresher
-	commands    RuntimeRefresher
-	permissions RuntimeRefresher
-	settings    RuntimeRefresher
-	authorizer  AdminAuthorizer
-	pluginLocks sync.Map
+	repository     Repository
+	runtime        RuntimeRefresher
+	commands       RuntimeRefresher
+	permissions    RuntimeRefresher
+	settings       RuntimeRefresher
+	authorizer     AdminAuthorizer
+	pluginLocks    sync.Map
+	groupControlMu sync.Mutex
 }
 
 // NewService 创建管理服务。

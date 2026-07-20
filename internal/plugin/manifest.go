@@ -31,12 +31,13 @@ type FeatureManifest struct {
 
 // Manifest 描述编译进二进制的插件及其管理元数据。
 type Manifest struct {
-	Name        string
-	DisplayName string
-	Description string
-	Priority    int
-	System      bool
-	Features    []FeatureManifest
+	Name              string
+	DisplayName       string
+	Description       string
+	Priority          int
+	System            bool
+	GroupControllable bool
+	Features          []FeatureManifest
 }
 
 // Validate 校验插件及功能标识的稳定性和唯一性。

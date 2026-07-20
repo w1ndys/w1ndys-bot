@@ -52,6 +52,15 @@ type ManagementController interface {
 	SetPluginPriority(context.Context, management.Actor, string, int) (management.PluginState, error)
 	GetPluginConfig(context.Context, management.Actor, string) (plugin.ConfigSchema, management.PluginConfigState, error)
 	SetPluginConfig(context.Context, management.Actor, string, management.PluginConfigUpdate) (management.PluginConfigState, error)
+	ListPluginResources(context.Context, management.Actor, string) ([]plugin.AdminResource, error)
+	ListPluginResourceRecords(context.Context, management.Actor, string, string, management.ResourceQuery) (management.ResourcePage, error)
+	CreatePluginResourceRecord(context.Context, management.Actor, string, string, json.RawMessage) (management.ResourceRecord, error)
+	UpdatePluginResourceRecord(context.Context, management.Actor, string, string, int64, int64, json.RawMessage) (management.ResourceRecord, error)
+	DeletePluginResourceRecord(context.Context, management.Actor, string, string, int64, int64) error
+	GetPluginGroupControl(context.Context, management.Actor, string) (management.PluginGroupControlState, error)
+	SetPluginGroupDefault(context.Context, management.Actor, string, bool, int64) (management.PluginGroupControlState, error)
+	SetPluginGroupOverride(context.Context, management.Actor, string, string, bool, int64) (management.PluginGroupOverride, error)
+	DeletePluginGroupOverride(context.Context, management.Actor, string, string, int64) error
 	ListPluginFeatures(context.Context, management.Actor, string) ([]management.FeatureState, error)
 	ListCommands(context.Context, management.Actor) ([]management.CommandState, error)
 	CreateCommand(context.Context, management.Actor, management.CommandCreate) (management.CommandState, error)
@@ -107,12 +116,13 @@ type pluginPatchRequest struct {
 }
 
 type pluginResponse struct {
-	Name        string `json:"name"`
-	DisplayName string `json:"display_name"`
-	Description string `json:"description"`
-	Available   bool   `json:"available"`
-	Enabled     bool   `json:"enabled"`
-	Priority    int    `json:"priority"`
+	Name              string `json:"name"`
+	DisplayName       string `json:"display_name"`
+	Description       string `json:"description"`
+	Available         bool   `json:"available"`
+	Enabled           bool   `json:"enabled"`
+	Priority          int    `json:"priority"`
+	GroupControllable bool   `json:"group_controllable"`
 }
 
 type pluginConfigResponse struct {
@@ -124,6 +134,28 @@ type pluginConfigResponse struct {
 type pluginConfigUpdateRequest struct {
 	Config          json.RawMessage `json:"config"`
 	ExpectedVersion int64           `json:"expected_version"`
+}
+
+type resourceDataRequest struct {
+	Data json.RawMessage `json:"data"`
+}
+
+type resourceUpdateRequest struct {
+	Data            json.RawMessage `json:"data"`
+	ExpectedVersion int64           `json:"expected_version"`
+}
+
+type resourceRecordResponse struct {
+	ID      int64           `json:"id"`
+	Version int64           `json:"version"`
+	Data    json.RawMessage `json:"data"`
+}
+
+type resourcePageResponse struct {
+	Items    []resourceRecordResponse `json:"items"`
+	Page     int                      `json:"page"`
+	PageSize int                      `json:"page_size"`
+	Total    int64                    `json:"total"`
 }
 
 type featureResponse struct {
@@ -272,6 +304,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/plugins/{plugin_name}/config/schema", s.authenticate(http.HandlerFunc(s.getPluginConfigSchema)))
 	mux.Handle("GET /api/plugins/{plugin_name}/config", s.authenticate(http.HandlerFunc(s.getPluginConfig)))
 	mux.Handle("PUT /api/plugins/{plugin_name}/config", s.authenticate(http.HandlerFunc(s.putPluginConfig)))
+	mux.Handle("GET /api/plugins/{plugin_name}/resources", s.authenticate(http.HandlerFunc(s.listPluginResources)))
+	mux.Handle("GET /api/plugins/{plugin_name}/resources/{resource_key}", s.authenticate(http.HandlerFunc(s.listPluginResourceRecords)))
+	mux.Handle("POST /api/plugins/{plugin_name}/resources/{resource_key}", s.authenticate(http.HandlerFunc(s.createPluginResourceRecord)))
+	mux.Handle("PATCH /api/plugins/{plugin_name}/resources/{resource_key}/{record_id}", s.authenticate(http.HandlerFunc(s.updatePluginResourceRecord)))
+	mux.Handle("DELETE /api/plugins/{plugin_name}/resources/{resource_key}/{record_id}", s.authenticate(http.HandlerFunc(s.deletePluginResourceRecord)))
+	mux.Handle("GET /api/plugins/{plugin_name}/group-control", s.authenticate(http.HandlerFunc(s.getPluginGroupControl)))
+	mux.Handle("PATCH /api/plugins/{plugin_name}/group-control", s.authenticate(http.HandlerFunc(s.patchPluginGroupDefault)))
+	mux.Handle("PUT /api/plugins/{plugin_name}/group-overrides/{group_id}", s.authenticate(http.HandlerFunc(s.putPluginGroupOverride)))
+	mux.Handle("DELETE /api/plugins/{plugin_name}/group-overrides/{group_id}", s.authenticate(http.HandlerFunc(s.deletePluginGroupOverride)))
 	mux.Handle("GET /api/commands", s.authenticate(http.HandlerFunc(s.listCommands)))
 	mux.Handle("POST /api/commands", s.authenticate(http.HandlerFunc(s.createCommand)))
 	mux.Handle("PATCH /api/commands/{command_id}", s.authenticate(http.HandlerFunc(s.renameCommand)))
@@ -1174,7 +1215,7 @@ func actorFromRequest(request *http.Request) management.Actor {
 // @returns 不暴露内部字段命名的插件响应。
 // ⚠️副作用说明：复制 JSON 配置字节，避免响应持有共享切片。
 func pluginView(state management.PluginState) pluginResponse {
-	view := pluginResponse{Name: state.Name, DisplayName: state.DisplayName, Description: state.Description, Available: state.Available, Enabled: state.Enabled, Priority: state.Priority}
+	view := pluginResponse{Name: state.Name, DisplayName: state.DisplayName, Description: state.Description, Available: state.Available, Enabled: state.Enabled, Priority: state.Priority, GroupControllable: state.GroupControllable}
 
 	// >>> 数据演变示例
 	// 1. ping+内部config -> snake_case DTO且不包含配置。
@@ -1224,6 +1265,51 @@ func featureView(state management.FeatureState) featureResponse {
 // @returns 无。
 // ⚠️副作用说明：写入 JSON 错误响应，并可能记录服务端错误日志。
 func writeManagementError(writer http.ResponseWriter, err error) {
+	// [决策理由] 未实现群控制的插件没有该子资源。
+	if errors.Is(err, admin.ErrGroupControlNotSupported) {
+		writeError(writer, http.StatusNotFound, "group_control_not_supported", "插件不支持群控制")
+		return
+	}
+	// [决策理由] 群号和版本格式错误属于可修正输入。
+	if errors.Is(err, admin.ErrInvalidGroupControl) {
+		writeError(writer, http.StatusBadRequest, "invalid_group_control", "插件群控制参数无效")
+		return
+	}
+	// [决策理由] 陈旧默认值或覆盖版本要求前端刷新。
+	if errors.Is(err, admin.ErrGroupControlConflict) {
+		writeError(writer, http.StatusConflict, "group_control_conflict", "插件群控制已被其他操作更新")
+		return
+	}
+	// [决策理由] 覆盖不存在时前端应移除陈旧行。
+	if errors.Is(err, admin.ErrGroupOverrideNotFound) {
+		writeError(writer, http.StatusNotFound, "group_override_not_found", "插件群覆盖不存在")
+		return
+	}
+	// [决策理由] 未实现通用资源能力的插件没有可访问子资源。
+	if errors.Is(err, admin.ErrPluginResourceNotSupported) {
+		writeError(writer, http.StatusNotFound, "plugin_resource_not_supported", "插件不支持通用管理资源")
+		return
+	}
+	// [决策理由] 未注册资源键必须返回 404，不允许动态解释表名。
+	if errors.Is(err, admin.ErrPluginResourceNotFound) {
+		writeError(writer, http.StatusNotFound, "plugin_resource_not_found", "插件管理资源不存在")
+		return
+	}
+	// [决策理由] 记录被删除后前端应刷新当前页。
+	if errors.Is(err, admin.ErrResourceRecordNotFound) {
+		writeError(writer, http.StatusNotFound, "resource_record_not_found", "插件资源记录不存在")
+		return
+	}
+	// [决策理由] 业务字段、分页和能力参数错误属于可修正输入。
+	if errors.Is(err, admin.ErrInvalidResourceData) {
+		writeError(writer, http.StatusBadRequest, "invalid_resource_data", "插件资源数据无效")
+		return
+	}
+	// [决策理由] 唯一约束或版本冲突需前端刷新后重试。
+	if errors.Is(err, admin.ErrPluginResourceConflict) {
+		writeError(writer, http.StatusConflict, "plugin_resource_conflict", "插件资源已被其他操作更新或存在重复")
+		return
+	}
 	// [决策理由] 无声明式能力是目标子资源不存在，不应伪装为空 Schema。
 	if errors.Is(err, admin.ErrPluginConfigNotSupported) {
 		writeError(writer, http.StatusNotFound, "plugin_config_not_supported", "插件不支持声明式配置")

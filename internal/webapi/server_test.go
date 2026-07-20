@@ -49,6 +49,128 @@ type fakePlugins struct {
 	configSchema    plugin.ConfigSchema
 	configState     management.PluginConfigState
 	configUpdated   management.PluginConfigState
+	resources       []plugin.AdminResource
+	resourcePage    management.ResourcePage
+	resourceRecord  management.ResourceRecord
+	resourceKey     string
+	recordID        int64
+	recordVersion   int64
+	resourceData    json.RawMessage
+	groupControl    management.PluginGroupControlState
+	groupOverride   management.PluginGroupOverride
+}
+
+// GetPluginGroupControl 返回测试群控制快照。
+// @param ctx：未使用；actor：操作者；name：插件名。
+// @returns 预设快照或错误。
+// ⚠️副作用说明：记录 Actor 和插件名。
+func (f *fakePlugins) GetPluginGroupControl(_ context.Context, actor management.Actor, name string) (management.PluginGroupControlState, error) {
+	f.actor, f.name = actor, name
+	// >>> 数据演变示例
+	// 1. keyword_reply -> groupControl。
+	// 2. err -> error。
+	return f.groupControl, f.err
+}
+
+// SetPluginGroupDefault 记录测试默认策略更新。
+// @param ctx：未使用；actor：操作者；name：插件名；enabled/version：更新。
+// @returns 预设快照或错误。
+// ⚠️副作用说明：记录目标。
+func (f *fakePlugins) SetPluginGroupDefault(_ context.Context, actor management.Actor, name string, _ bool, _ int64) (management.PluginGroupControlState, error) {
+	f.actor, f.name = actor, name
+	// >>> 数据演变示例
+	// 1. false/v1 -> groupControl。
+	// 2. conflict -> error。
+	return f.groupControl, f.err
+}
+
+// SetPluginGroupOverride 记录测试单群覆盖。
+// @param ctx：未使用；actor：操作者；name/groupID：目标；enabled/version：更新。
+// @returns 预设覆盖或错误。
+// ⚠️副作用说明：记录目标。
+func (f *fakePlugins) SetPluginGroupOverride(_ context.Context, actor management.Actor, name, groupID string, _ bool, _ int64) (management.PluginGroupOverride, error) {
+	f.actor, f.name, f.resourceKey = actor, name, groupID
+	// >>> 数据演变示例
+	// 1. group100 -> groupOverride。
+	// 2. conflict -> error。
+	return f.groupOverride, f.err
+}
+
+// DeletePluginGroupOverride 记录测试覆盖删除。
+// @param ctx：未使用；actor：操作者；name/groupID：目标；version：版本。
+// @returns 预设错误。
+// ⚠️副作用说明：记录目标。
+func (f *fakePlugins) DeletePluginGroupOverride(_ context.Context, actor management.Actor, name, groupID string, _ int64) error {
+	f.actor, f.name, f.resourceKey = actor, name, groupID
+	// >>> 数据演变示例
+	// 1. group100 -> nil。
+	// 2. conflict -> error。
+	return f.err
+}
+
+// ListPluginResources 返回测试资源声明。
+// @param ctx：未使用；actor：操作者；name：插件名。
+// @returns 预设声明或错误。
+// ⚠️副作用说明：记录 Actor 和插件名。
+func (f *fakePlugins) ListPluginResources(_ context.Context, actor management.Actor, name string) ([]plugin.AdminResource, error) {
+	f.actor, f.name = actor, name
+
+	// >>> 数据演变示例
+	// 1. keyword_reply -> [rules]。
+	// 2. err=not supported -> error。
+	return f.resources, f.err
+}
+
+// ListPluginResourceRecords 返回测试资源分页。
+// @param ctx：未使用；actor：操作者；name/key：路由键；query：分页。
+// @returns 预设记录页或错误。
+// ⚠️副作用说明：记录路由键。
+func (f *fakePlugins) ListPluginResourceRecords(_ context.Context, actor management.Actor, name, key string, _ management.ResourceQuery) (management.ResourcePage, error) {
+	f.actor, f.name, f.resourceKey = actor, name, key
+
+	// >>> 数据演变示例
+	// 1. rules+page1 -> resourcePage。
+	// 2. unknown -> err。
+	return f.resourcePage, f.err
+}
+
+// CreatePluginResourceRecord 记录测试新增输入。
+// @param ctx：未使用；actor：操作者；name/key：路由键；data：业务数据。
+// @returns 预设记录或错误。
+// ⚠️副作用说明：记录业务数据。
+func (f *fakePlugins) CreatePluginResourceRecord(_ context.Context, actor management.Actor, name, key string, data json.RawMessage) (management.ResourceRecord, error) {
+	f.actor, f.name, f.resourceKey, f.resourceData = actor, name, key, data
+
+	// >>> 数据演变示例
+	// 1. data{keyword:x} -> resourceRecord。
+	// 2. duplicate -> err。
+	return f.resourceRecord, f.err
+}
+
+// UpdatePluginResourceRecord 记录测试 CAS 更新。
+// @param ctx：未使用；actor：操作者；name/key：路由键；id/version：CAS；data：业务数据。
+// @returns 预设记录或错误。
+// ⚠️副作用说明：记录更新参数。
+func (f *fakePlugins) UpdatePluginResourceRecord(_ context.Context, actor management.Actor, name, key string, id, version int64, data json.RawMessage) (management.ResourceRecord, error) {
+	f.actor, f.name, f.resourceKey, f.recordID, f.recordVersion, f.resourceData = actor, name, key, id, version, data
+
+	// >>> 数据演变示例
+	// 1. id1/v1 -> resourceRecord v2。
+	// 2. stale -> err。
+	return f.resourceRecord, f.err
+}
+
+// DeletePluginResourceRecord 记录测试 CAS 删除。
+// @param ctx：未使用；actor：操作者；name/key：路由键；id/version：CAS。
+// @returns 预设错误。
+// ⚠️副作用说明：记录删除参数。
+func (f *fakePlugins) DeletePluginResourceRecord(_ context.Context, actor management.Actor, name, key string, id, version int64) error {
+	f.actor, f.name, f.resourceKey, f.recordID, f.recordVersion = actor, name, key, id, version
+
+	// >>> 数据演变示例
+	// 1. id1/v1 -> nil。
+	// 2. stale -> err。
+	return f.err
 }
 
 // GetPluginConfig 返回测试 Schema 与脱敏配置。
@@ -1083,6 +1205,96 @@ func TestPluginFeatureRouteReturnsMetadata(t *testing.T) {
 	// >>> 数据演变示例
 	// 1. GET ping/features -> [ping默认命令和权限] -> 200。
 	// 2. 控制器收到pluginName=ping -> 精确查询对应功能。
+}
+
+// TestPluginResourceRoutes 验证资源声明、分页、严格写入、CAS 删除与冲突映射。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行 Argon2id 哈希并创建内存 HTTP 请求。
+func TestPluginResourceRoutes(t *testing.T) {
+	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
+	controller := &fakePlugins{resources: []plugin.AdminResource{{Key: "rules", DisplayName: "规则", MaxPageSize: 50}}, resourcePage: management.ResourcePage{Items: []management.ResourceRecord{{ID: 1, Version: 2, Data: json.RawMessage(`{"keyword":"hi"}`)}}, Page: 2, PageSize: 10, Total: 11}, resourceRecord: management.ResourceRecord{ID: 1, Version: 3, Data: json.RawMessage(`{"keyword":"hello"}`)}}
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller)
+	// [决策理由] 资源路由测试需要完整认证和管理依赖。
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	token, err := server.sign("100")
+	// [决策理由] 所有资源读写都必须使用已鉴权管理员。
+	if err != nil {
+		t.Fatalf("sign() error = %v", err)
+	}
+	listed := requestAPI(server, token, http.MethodGet, "/api/plugins/keyword_reply/resources/rules?page=2&page_size=10", "", "req-list")
+	// [决策理由] 分页路由必须传递固定插件/资源键并转换记录 DTO。
+	if listed.Code != http.StatusOK || controller.name != "keyword_reply" || controller.resourceKey != "rules" || !strings.Contains(listed.Body.String(), `"version":2`) {
+		t.Fatalf("list status=%d name=%s key=%s body=%s", listed.Code, controller.name, controller.resourceKey, listed.Body.String())
+	}
+	invalid := requestAPI(server, token, http.MethodPost, "/api/plugins/keyword_reply/resources/rules", `{"data":{},"table":"admin_audit_logs"}`, "req-invalid")
+	// [决策理由] 外层未知字段可能试图控制 SQL 目标，必须严格拒绝。
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+	deleted := requestAPI(server, token, http.MethodDelete, "/api/plugins/keyword_reply/resources/rules/1?expected_version=3", "", "req-delete")
+	// [决策理由] DELETE 必须将 int64 ID 与查询版本传递给插件。
+	if deleted.Code != http.StatusOK || controller.recordID != 1 || controller.recordVersion != 3 {
+		t.Fatalf("delete status=%d id=%d version=%d body=%s", deleted.Code, controller.recordID, controller.recordVersion, deleted.Body.String())
+	}
+	controller.err = admin.ErrPluginResourceConflict
+	conflict := requestAPI(server, token, http.MethodPatch, "/api/plugins/keyword_reply/resources/rules/1", `{"data":{"keyword":"hello"},"expected_version":2}`, "req-conflict")
+	// [决策理由] 插件 CAS 冲突必须映射为 409 而非泛化 500。
+	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), `"plugin_resource_conflict"`) {
+		t.Fatalf("conflict status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+
+	// >>> 数据演变示例
+	// 1. GET page2 -> DTO页；DELETE id1/v3 -> deleted:true。
+	// 2. POST含table字段 -> 400；PATCH陈旧版本 -> 409。
+}
+
+// TestPluginGroupControlRoutes 验证群控制读写、CAS 冲突与 DELETE 严格查询。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行 Argon2id 哈希并创建内存 HTTP 请求。
+func TestPluginGroupControlRoutes(t *testing.T) {
+	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
+	controller := &fakePlugins{groupControl: management.PluginGroupControlState{PluginName: "keyword_reply", PluginEnabled: true, DefaultEnabled: true, DefaultVersion: 2}, groupOverride: management.PluginGroupOverride{GroupID: "100", Enabled: false, Version: 1}}
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller)
+	// [决策理由] 路由测试需要完整认证依赖。
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	token, err := server.sign("100")
+	// [决策理由] 群控制不得匿名访问。
+	if err != nil {
+		t.Fatalf("sign() error = %v", err)
+	}
+	read := requestAPI(server, token, http.MethodGet, "/api/plugins/keyword_reply/group-control", "", "req-group-read")
+	// [决策理由] 读取应返回 snake_case 版本快照。
+	if read.Code != http.StatusOK || !strings.Contains(read.Body.String(), `"default_version":2`) {
+		t.Fatalf("read status=%d body=%s", read.Code, read.Body.String())
+	}
+	created := requestAPI(server, token, http.MethodPut, "/api/plugins/keyword_reply/group-overrides/100", `{"enabled":false,"expected_version":0}`, "req-group-create")
+	// [决策理由] version=0 必须传递给新增语义。
+	if created.Code != http.StatusOK || controller.resourceKey != "100" {
+		t.Fatalf("create status=%d group=%s body=%s", created.Code, controller.resourceKey, created.Body.String())
+	}
+	invalidDelete := requestAPI(server, token, http.MethodDelete, "/api/plugins/keyword_reply/group-overrides/100?expected_version=1&expected_version=2", "", "req-group-delete")
+	// [决策理由] 重复 CAS 查询参数必须严格拒绝。
+	if invalidDelete.Code != http.StatusBadRequest {
+		t.Fatalf("delete status=%d body=%s", invalidDelete.Code, invalidDelete.Body.String())
+	}
+	controller.err = admin.ErrGroupControlConflict
+	conflict := requestAPI(server, token, http.MethodPatch, "/api/plugins/keyword_reply/group-control", `{"enabled":false,"expected_version":2}`, "req-group-conflict")
+	// [决策理由] 默认策略 CAS 冲突必须映射 409。
+	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), `"group_control_conflict"`) {
+		t.Fatalf("conflict status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+
+	// >>> 数据演变示例
+	// 1. GET+PUT -> 200快照。
+	// 2. DELETE重复version -> 400；PATCH冲突 -> 409。
 }
 
 // requestLogin 使用固定测试远端地址执行登录请求。

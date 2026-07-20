@@ -25,6 +25,7 @@ import (
 	projectlogger "github.com/w1ndys/w1ndys-bot/pkg/logger"
 	_ "github.com/w1ndys/w1ndys-bot/plugins/admin"
 	_ "github.com/w1ndys/w1ndys-bot/plugins/echo"
+	_ "github.com/w1ndys/w1ndys-bot/plugins/keyword_reply"
 )
 
 // main 启动机器人基础设施。
@@ -101,7 +102,7 @@ func main() {
 		projectlogger.Error("加载系统设置失败", "error", err)
 		return
 	}
-	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool))
+	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool), plugin.NewPostgresGroupGate(pool))
 	adminService := admin.NewService(adminRepository, pluginManager, commands, permissions, settingsResolver, adminResolver)
 	webServer, err := webapi.New(cfg.WebUIPassword, cfg.JWTSecret, adminResolver, adminService)
 	// [决策理由] WebUI 认证配置不安全时不得开放包含管理能力的 HTTP 服务。
@@ -126,6 +127,15 @@ func main() {
 		if !found {
 			return fmt.Errorf("命令目标 %s 不存在", binding.Target())
 		}
+		allowed, routeErr := pluginManager.RouteAllowed(binding.PluginName, event)
+		// [决策理由] 命令在权限解析前统一执行全局状态和群策略预检，保持全局→群→权限→处理顺序。
+		if routeErr != nil {
+			return routeErr
+		}
+		// [决策理由] 群策略关闭是安静忽略命令，不进入身份与权限计算。
+		if !allowed {
+			return nil
+		}
 		role := messageRole(message)
 		// [决策理由] NapCat 群角色不包含系统最高管理员，必须用服务端身份快照提升对应 QQ 权限角色。
 		if adminResolver.IsSuperAdmin(strconv.FormatInt(message.UserID, 10)) {
@@ -138,16 +148,16 @@ func main() {
 		}
 		arguments := commandregistry.ExtractArguments(message.RawMessage, settingsResolver.CommandPrefix(), binding.NormalizedCommand)
 		routedContext := plugin.WithInvocation(ctx, plugin.Invocation{FeatureKey: binding.FeatureKey, Command: binding.Command, Arguments: arguments})
-		routeErr := pluginManager.HandleNamed(routedContext, binding.PluginName, event)
+		handleErr := pluginManager.HandleNamed(routedContext, binding.PluginName, event)
 
 		// >>> 数据演变示例
 		// 1. /echo Hello -> Command Binding -> Invocation{echo,Hello} -> echo.HandleNamed。
 		// 2. 未匹配消息 -> PluginManager 广播给观察型插件。
-		return routeErr
+		return handleErr
 	})
 	botAPI := onebot.New(wsServer.Actions())
 	for _, registration := range registrations {
-		implementation, err := registration.New(plugin.Runtime{Messenger: botAPI, Management: adminService})
+		implementation, err := registration.New(plugin.Runtime{Messenger: botAPI, Management: adminService, Database: pool})
 		// [决策理由] 工厂失败或返回错误实现时该插件不能进入运行路由。
 		if err != nil {
 			projectlogger.Error("创建插件运行实例失败", "plugin", registration.Manifest.Name, "error", err)
