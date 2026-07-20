@@ -94,14 +94,14 @@ pre {
 }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
   background: var(--color-bg-canvas);
 }
 
 .topbar {
-  position: sticky;
+  position: relative;
   z-index: 100;
-  top: 0;
   height: 56px;
   display: flex;
   align-items: center;
@@ -138,12 +138,18 @@ pre {
 }
 
 .admin-layout {
-  min-height: calc(100vh - 56px);
+  height: calc(100dvh - 56px);
+  min-height: 0;
   background: var(--color-bg-canvas);
 }
 
 .desktop-sider {
+  height: 100%;
   background: var(--color-bg-surface);
+}
+
+.desktop-sider .n-layout-sider-scroll-container {
+  overflow-y: auto;
 }
 
 .sidebar-caption {
@@ -159,7 +165,12 @@ pre {
 }
 
 .admin-content {
+  height: 100%;
   background: var(--color-bg-canvas);
+}
+
+.admin-content > .n-layout-scroll-container {
+  overflow-y: auto;
 }
 
 .page-container {
@@ -185,8 +196,35 @@ pre {
 }
 
 @media (max-width: 1023px) {
+  .app-shell {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+
+  .topbar {
+    position: sticky;
+    top: 0;
+  }
+
+  .admin-layout {
+    height: auto;
+    min-height: calc(100dvh - 56px);
+    overflow: visible;
+  }
+
   .desktop-sider {
     display: none;
+  }
+
+  .admin-content {
+    height: auto;
+    overflow: visible;
+  }
+
+  .admin-content > .n-layout-scroll-container {
+    height: auto;
+    overflow: visible;
   }
 
   .mobile-menu-button {

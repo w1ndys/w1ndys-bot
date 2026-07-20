@@ -240,7 +240,7 @@ onMounted(loadPluginMenu)
               <NAlert v-if="menuError" class="menu-alert" type="error" size="small"><NButton text type="primary" @click="loadPluginMenu">重试加载插件</NButton></NAlert>
               <NMenu :value="activeMenuKey" :options="menuOptions" :default-expanded-keys="['plugins']" @update:value="navigateMenu" />
             </NLayoutSider>
-            <NLayoutContent class="admin-content" content-style="min-height: calc(100vh - 56px);">
+            <NLayoutContent class="admin-content" native-scrollbar>
               <main class="page-container">
                 <RouterView />
               </main>

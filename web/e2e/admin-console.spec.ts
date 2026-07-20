@@ -253,9 +253,46 @@ async function testResponsiveNavigation({ page }: { page: Page }): Promise<void>
   // 2. Desktop宽度1280 -> 使用常驻侧栏 -> 点击审计日志。
 }
 
+// testResponsiveScrollBoundary 验证桌面仅滚动主面板且移动端使用页面滚动。
+// @param page：Playwright注入的浏览器页面。
+// @returns Promise，在桌面或移动端滚动边界断言完成后结束。
+// ⚠️副作用说明：向测试页面插入占位元素并改变滚动位置。
+async function testResponsiveScrollBoundary({ page }: { page: Page }): Promise<void> {
+  await seedSession(page)
+  await mockManagementAPI(page)
+  await page.goto('/plugins')
+  await page.locator('.page-container').evaluate((container) => {
+    const spacer = document.createElement('div')
+    spacer.dataset.testid = 'scroll-spacer'
+    spacer.style.height = '1800px'
+    container.appendChild(spacer)
+  })
+  const viewport = page.viewportSize()
+  // [决策理由] 断点以下不渲染常驻侧栏，应由浏览器文档承担纵向滚动。
+  if (viewport !== null && viewport.width <= 1023) {
+    await expect(page.locator('.desktop-sider')).toBeHidden()
+    await page.evaluate(() => window.scrollTo(0, 500))
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
+    return
+  }
+
+  const sider = page.locator('.desktop-sider')
+  const content = page.locator('.admin-content > .n-layout-scroll-container')
+  const initialSiderTop = await sider.evaluate((element) => element.getBoundingClientRect().top)
+  await content.evaluate((element) => { element.scrollTop = 500 })
+  await expect.poll(() => content.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0)
+  await expect.poll(() => sider.evaluate((element) => element.getBoundingClientRect().top)).toBe(initialSiderTop)
+
+  // >>> 数据演变示例
+  // 1. 桌面主面板scrollTop=0 -> 滚动至500 -> window.scrollY=0且侧栏top不变。
+  // 2. 手机/平板window.scrollY=0 -> 页面滚动至500 -> 常驻侧栏隐藏且window.scrollY>0。
+}
+
 test('登录后进入插件管理', testLoginAndNavigation)
 test('错误密码保持未登录状态', testFailedLogin)
 test('会话失效后返回登录页', testExpiredSessionRedirect)
 test('命令页首次加载插件功能', testPluginFeatureInitialization)
 test('审计列表和详情保持只读脱敏', testAuditListAndDetail)
 test('桌面侧栏与移动抽屉导航', testResponsiveNavigation)
+test('桌面固定侧栏且移动端页面可滚动', testResponsiveScrollBoundary)
