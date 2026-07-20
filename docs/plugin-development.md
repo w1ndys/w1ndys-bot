@@ -124,6 +124,8 @@ blank import → init 注册 Registration → 启动同步 Manifest
 
 普通插件可选择实现 `plugin.Configurable`，通过 `ConfigSchema` 声明扁平配置字段，并在 `ValidateConfig` 中执行领域校验、在 `ApplyConfig` 中原子发布不可变运行快照。平台提供 Schema、脱敏读取和带 `config_version` 乐观锁的更新接口；省略 `secret` 字段表示保留原值，读取响应和审计均不会包含秘密。`ApplyConfig` 返回错误时不得部分提交，平台会补偿数据库旧快照并再次恢复运行态。
 
+WebUI 会在插件概览中按 `string`、`multiline`、`integer`、`boolean`、`enum` 和 `secret` 六种字段类型生成通用表单。保存使用读取时的版本号；发生冲突时保留当前草稿并要求重新加载。只有通用字段无法安全表达工作流、图表或多资源事务时，才新增插件专属页面。
+
 启动时，`PluginManager` 会在 `OnEnable` 前恢复并校验 `plugin_config.config_json`。普通小型设置放入该 JSON；持续增长、需要查询关系或独立事务的业务记录仍应使用版本化 SQL Migration 和插件专属 Repository，不要把配置 JSON 当作文档数据库，也不要在 `Handle` 内散落 SQL。
 
 不得把 Token、密码或用户隐私写入 Manifest、日志或错误文本。原始消息、QQ号和URL只应在必要的 debug 场景记录。

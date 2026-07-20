@@ -4,6 +4,7 @@ import { NAlert, NButton, NDescriptions, NDescriptionsItem, NEmpty, NInputNumber
 import { onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { listPlugins, patchPlugin, type PluginState } from '../api'
+import PluginConfigForm from '../components/PluginConfigForm.vue'
 
 const route = useRoute()
 const plugin = ref<PluginState | null>(null)
@@ -191,6 +192,7 @@ onMounted(loadPluginOverview)
           </div>
         </section>
 
+        <PluginConfigForm :plugin-name="plugin.name" />
       </template>
 
       <NEmpty v-else-if="!errorMessage" description="没有可展示的插件概览" />

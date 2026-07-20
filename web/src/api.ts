@@ -7,6 +7,48 @@ export interface ApiEnvelope<T> {
   data: T
 }
 
+export class ApiError extends Error {
+  readonly status: number
+  readonly code: string
+
+  // constructor 创建保留 HTTP 状态与业务码的 API 错误。
+  // @param status：HTTP 状态；code：后端业务码；message：用户可读消息。
+  // @returns ApiError 实例。
+  // ⚠️副作用说明：创建错误对象，不修改外部状态。
+  constructor(status: number, code: string, message: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+
+    // >>> 数据演变示例
+    // 1. 409+plugin_config_conflict+版本冲突 -> 可按 code 识别的 Error。
+    // 2. 404+plugin_config_not_supported+暂无配置 -> 可按 status 识别的 Error。
+  }
+}
+
+export type PluginConfigFieldType = 'string' | 'multiline' | 'integer' | 'boolean' | 'enum' | 'secret'
+
+export interface PluginConfigField {
+  key: string
+  display_name: string
+  description?: string
+  type: PluginConfigFieldType
+  required: boolean
+  default?: unknown
+  options?: string[]
+}
+
+export interface PluginConfigSchema {
+  fields: PluginConfigField[]
+}
+
+export interface PluginConfigState {
+  plugin_name: string
+  config: Record<string, unknown>
+  version: number
+}
+
 export interface LoginResult {
   token: string
   expires_in: number
@@ -129,7 +171,7 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   }
   // [决策理由] HTTP 状态和业务码必须同时成功，防止代理异常被误作业务数据。
   if (!response.ok || envelope.code !== 'ok') {
-    throw new Error(envelope.message || '请求失败')
+    throw new ApiError(response.status, envelope.code, envelope.message || '请求失败')
   }
 
   // >>> 数据演变示例
@@ -181,6 +223,48 @@ export function patchPlugin(name: string, patch: { enabled: boolean } | { priori
   // >>> 数据演变示例
   // 1. ping+enabled=true -> PATCH -> 返回启用状态。
   // 2. admin+enabled=false -> 409 -> 抛出保护错误。
+  return result
+}
+
+// getPluginConfigSchema 获取插件声明式配置字段。
+// @param name：插件稳定名称。
+// @returns 后端校验过的配置 Schema。
+// ⚠️副作用说明：发起鉴权网络请求。
+export function getPluginConfigSchema(name: string): Promise<PluginConfigSchema> {
+  const result = apiRequest<PluginConfigSchema>(`/api/plugins/${encodeURIComponent(name)}/config/schema`)
+
+  // >>> 数据演变示例
+  // 1. echo -> GET schema -> response_prefix 字段。
+  // 2. legacy -> 404 plugin_config_not_supported -> 抛出 ApiError。
+  return result
+}
+
+// getPluginConfig 获取插件脱敏配置快照。
+// @param name：插件稳定名称。
+// @returns 配置对象及乐观锁版本。
+// ⚠️副作用说明：发起鉴权网络请求；secret 不由后端返回。
+export function getPluginConfig(name: string): Promise<PluginConfigState> {
+  const result = apiRequest<PluginConfigState>(`/api/plugins/${encodeURIComponent(name)}/config`)
+
+  // >>> 数据演变示例
+  // 1. echo:v2 -> GET config -> {config:{response_prefix:""},version:2}。
+  // 2. 不支持配置 -> 404 -> 抛出 ApiError。
+  return result
+}
+
+// putPluginConfig 使用版本检查保存完整插件配置。
+// @param name：插件稳定名称；config：非 secret 完整草稿与待更新 secret；expectedVersion：读取时版本。
+// @returns 保存并热应用后的脱敏配置快照。
+// ⚠️副作用说明：更新数据库、审计和插件运行配置。
+export function putPluginConfig(name: string, config: Record<string, unknown>, expectedVersion: number): Promise<PluginConfigState> {
+  const result = apiRequest<PluginConfigState>(`/api/plugins/${encodeURIComponent(name)}/config`, {
+    method: 'PUT',
+    body: JSON.stringify({ config, expected_version: expectedVersion }),
+  })
+
+  // >>> 数据演变示例
+  // 1. prefix=x,expected=2 -> PUT -> 脱敏快照version=3。
+  // 2. expected=1但当前=2 -> 409 plugin_config_conflict -> 抛出 ApiError。
   return result
 }
 
