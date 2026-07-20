@@ -1,0 +1,4 @@
+interface:
+  display_name: "插件开发"
+  short_description: "面向机器人插件的声明式配置、通用管理资源与生命周期开发"
+  default_prompt: "Use $plugin-development to design or implement a plugin with schema-driven configuration and admin CRUD."
