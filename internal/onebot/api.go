@@ -4,6 +4,7 @@ package onebot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
@@ -19,6 +20,33 @@ type API struct {
 	caller ActionCaller
 }
 
+// Action 是 NapCat OpenAPI 路径对应的 OneBot Action 名。
+type Action string
+
+// NapCatOpenAPIVersion 是本包 Action 与路径清单对齐的官方文档版本。
+const NapCatOpenAPIVersion = "4.18.13"
+
+// ActionError 表示 NapCat 已响应但拒绝执行操作。
+type ActionError struct {
+	Action  Action
+	RetCode int
+	Message string
+	Wording string
+}
+
+// Error 返回稳定且包含 NapCat 诊断信息的错误文本。
+// @param 无。
+// @returns OneBot Action 失败说明。
+// ⚠️副作用说明：无。
+func (e *ActionError) Error() string {
+	result := fmt.Sprintf("OneBot Action %s 失败: retcode=%d message=%s wording=%s", e.Action, e.RetCode, e.Message, e.Wording)
+
+	// >>> 数据演变示例
+	// 1. send_msg,retcode=100 -> 带 Action 与错误码的诊断文本。
+	// 2. wording 为空 -> 保留空字段 -> 调用方仍可定位 Action。
+	return result
+}
+
 // New 创建类型化 BotAPI。
 // @param caller：负责 echo 和 WebSocket 请求响应的 ActionCaller。
 // @returns API。
@@ -30,6 +58,47 @@ func New(caller ActionCaller) *API {
 	// 1. ActionClient -> API{caller} -> 可发送消息。
 	// 2. fakeCaller -> API{fake} -> 可单元测试请求参数。
 	return result
+}
+
+// Call 调用任意 NapCat Action，并将成功响应的 data 解码到 result。
+// @param ctx：控制请求取消；action：OpenAPI 路径去掉前导斜杠后的 Action；params：请求参数；result：data 的解码目标，可为 nil。
+// @returns 传输、NapCat 业务或 JSON 解码错误。
+// ⚠️副作用说明：通过 ActionCaller 发送请求；具体外部副作用由 action 决定。
+func (a *API) Call(ctx context.Context, action Action, params any, result any) error {
+	// [决策理由] 空 Action 无法路由，且不应占用 ActionClient 的 pending 资源。
+	if action == "" {
+		return errors.New("Action 名称不能为空")
+	}
+	// [决策理由] 未注入调用器时返回可诊断错误，避免配置或测试错误触发 nil panic。
+	if a == nil || a.caller == nil {
+		return errors.New("ActionCaller 未配置")
+	}
+	response, err := a.caller.Call(ctx, string(action), params)
+	// [决策理由] 传输或等待失败时不存在可信业务数据。
+	if err != nil {
+		return err
+	}
+	// [决策理由] HTTP/WebSocket 返回成功不代表 NapCat 业务执行成功。
+	if !response.OK() {
+		return &ActionError{Action: action, RetCode: response.RetCode, Message: response.Message, Wording: response.Wording}
+	}
+	// [决策理由] 无返回值 Action 或调用方不关心 data 时无需强制解析 null/空数据。
+	if result == nil {
+		return nil
+	}
+	// [决策理由] 空 data 对有结果目标的调用属于协议不完整，必须显式暴露。
+	if len(response.Data) == 0 {
+		return fmt.Errorf("解析 %s 响应: data 为空", action)
+	}
+	// [决策理由] 类型化 API 必须在边界处报告响应结构漂移。
+	if err := json.Unmarshal(response.Data, result); err != nil {
+		return fmt.Errorf("解析 %s 响应: %w", action, err)
+	}
+
+	// >>> 数据演变示例
+	// 1. get_login_info + data{user_id:1} -> 解码到 LoginInfo -> nil。
+	// 2. status=failed,retcode=100 -> ActionError -> 不解析 data。
+	return nil
 }
 
 // SendMessageResult 表示 NapCat 发送消息后的返回数据。
@@ -138,19 +207,11 @@ func (a *API) ReplyToMessage(ctx context.Context, event *ws.MessageEvent, comman
 // @returns SendMessageResult 或网络、OneBot 业务与 JSON 错误。
 // ⚠️副作用说明：通过 ActionCaller 发送 OneBot 请求。
 func (a *API) callAndDecode(ctx context.Context, action string, params any) (SendMessageResult, error) {
-	response, err := a.caller.Call(ctx, action, params)
-	// [决策理由] 传输或等待错误时没有可信 Action 响应可解析。
+	var result SendMessageResult
+	err := a.Call(ctx, Action(action), params, &result)
+	// [决策理由] 兼容方法需要同时返回结果零值与底层错误。
 	if err != nil {
 		return SendMessageResult{}, err
-	}
-	// [决策理由] 收到响应不代表 NapCat 操作成功，必须检查 status 和 retcode。
-	if !response.OK() {
-		return SendMessageResult{}, fmt.Errorf("OneBot Action %s 失败: retcode=%d message=%s wording=%s", action, response.RetCode, response.Message, response.Wording)
-	}
-	var result SendMessageResult
-	// [决策理由] 发送成功必须解析 message_id，供撤回和后续业务引用。
-	if err := json.Unmarshal(response.Data, &result); err != nil {
-		return SendMessageResult{}, fmt.Errorf("解析 %s 响应: %w", action, err)
 	}
 
 	// >>> 数据演变示例

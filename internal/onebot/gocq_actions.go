@@ -1,0 +1,32 @@
+// 📌 影响范围：声明 NapCat 4.18.13 Go-CQHTTP 兼容 Action；外部副作用由调用的具体 Action 决定。
+package onebot
+
+const (
+	ActionSetQQProfile              Action = "set_qq_profile"
+	ActionDeleteFriend              Action = "delete_friend"
+	ActionCheckURLSafely            Action = "check_url_safely"
+	ActionGetOnlineClients          Action = "get_online_clients"
+	ActionGetGroupHonorInfo         Action = "get_group_honor_info"
+	ActionSendGroupNotice           Action = "_send_group_notice"
+	ActionGetGroupAtAllRemain       Action = "get_group_at_all_remain"
+	ActionSendForwardMessage        Action = "send_forward_msg"
+	ActionSendGroupForwardMessage   Action = "send_group_forward_msg"
+	ActionSendPrivateForwardMessage Action = "send_private_forward_msg"
+	ActionGetStrangerInfo           Action = "get_stranger_info"
+	ActionDownloadFile              Action = "download_file"
+	ActionUploadGroupFile           Action = "upload_group_file"
+	ActionGetGroupMessageHistory    Action = "get_group_msg_history"
+	ActionGetForwardMessage         Action = "get_forward_msg"
+	ActionGetFriendMessageHistory   Action = "get_friend_msg_history"
+	ActionHandleQuickOperation      Action = ".handle_quick_operation"
+	ActionGetGroupRootFiles         Action = "get_group_root_files"
+	ActionSetGroupPortrait          Action = "set_group_portrait"
+	ActionUploadPrivateFile         Action = "upload_private_file"
+	ActionGetModelShow              Action = "_get_model_show"
+	ActionSetModelShow              Action = "_set_model_show"
+	ActionDeleteGroupFile           Action = "delete_group_file"
+	ActionCreateGroupFileFolder     Action = "create_group_file_folder"
+	ActionDeleteGroupFolder         Action = "delete_group_folder"
+	ActionGetGroupFileSystemInfo    Action = "get_group_file_system_info"
+	ActionGetGroupFilesByFolder     Action = "get_group_files_by_folder"
+)

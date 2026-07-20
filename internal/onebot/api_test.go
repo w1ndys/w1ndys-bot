@@ -4,6 +4,7 @@ package onebot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
@@ -14,6 +15,115 @@ type fakeCaller struct {
 	params any
 	result ws.ActionResponse
 	err    error
+}
+
+// TestCallDecodesDataAndReturnsTypedActionError 验证公共调用层统一处理成功数据与业务错误。
+// @param testing.T：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：修改 fakeCaller 请求记录。
+func TestCallDecodesDataAndReturnsTypedActionError(t *testing.T) {
+	caller := &fakeCaller{result: ws.ActionResponse{Status: "ok", Data: json.RawMessage(`{"user_id":123,"nickname":"bot"}`)}}
+	api := New(caller)
+	var login LoginInfo
+	err := api.Call(context.Background(), ActionGetLoginInfo, nil, &login)
+	// [决策理由] 成功响应必须按调用方提供的类型解码 data。
+	if err != nil || login.UserID != 123 || login.Nickname != "bot" {
+		t.Fatalf("Call() login=%+v err=%v", login, err)
+	}
+	caller.result = ws.ActionResponse{Status: "failed", RetCode: 1400, Message: "bad request", Wording: "参数错误"}
+	err = api.Call(context.Background(), ActionGetStatus, nil, nil)
+	var actionErr *ActionError
+	// [决策理由] 调用方需要用 errors.As 稳定区分 NapCat 业务错误与网络错误。
+	if !errors.As(err, &actionErr) || actionErr.Action != ActionGetStatus || actionErr.RetCode != 1400 {
+		t.Fatalf("Call() error=%T %v", err, err)
+	}
+
+	// >>> 数据演变示例
+	// 1. ok,data{user_id:123} -> LoginInfo{UserID:123}。
+	// 2. failed,retcode=1400 -> *ActionError{Action:get_status,RetCode:1400}。
+}
+
+// TestCallValidatesActionAndResponseData 验证空 Action 与不完整 data 在本地失败。
+// @param testing.T：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：读取并修改 fakeCaller 请求记录。
+func TestCallValidatesActionAndResponseData(t *testing.T) {
+	caller := &fakeCaller{result: ws.ActionResponse{Status: "ok"}}
+	api := New(caller)
+	err := api.Call(context.Background(), "", nil, nil)
+	// [决策理由] 空 Action 必须在调用 ActionCaller 前被拒绝。
+	if err == nil || caller.action != "" {
+		t.Fatalf("empty action error=%v called=%q", err, caller.action)
+	}
+	err = api.Call(context.Background(), ActionGetStatus, nil, &Status{})
+	// [决策理由] 调用方要求结果时空 data 不能被误判为成功零值。
+	if err == nil {
+		t.Fatal("empty data error=nil")
+	}
+
+	// >>> 数据演变示例
+	// 1. action="" -> 本地错误 -> caller 未调用。
+	// 2. status=ok,data 缺失 -> data 为空错误。
+}
+
+// TestMessageMethodsRejectNonScalarIDs 验证强类型消息入口拒绝 OpenAPI 未允许的 ID 类型。
+// @param testing.T：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：读取 fakeCaller 请求记录。
+func TestMessageMethodsRejectNonScalarIDs(t *testing.T) {
+	caller := &fakeCaller{}
+	api := New(caller)
+	_, err := api.GetMessage(context.Background(), map[string]any{"id": 1})
+	// [决策理由] object 不属于 number|string，不得发送给 NapCat。
+	if err == nil || caller.action != "" {
+		t.Fatalf("GetMessage() error=%v action=%q", err, caller.action)
+	}
+	err = api.SetMessageEmojiLike(context.Background(), SetMessageEmojiLikeParams{MessageID: 1, EmojiID: []int{2}, Set: true})
+	// [决策理由] 数组表情 ID 同样必须在本地拒绝。
+	if err == nil || caller.action != "" {
+		t.Fatalf("SetMessageEmojiLike() error=%v action=%q", err, caller.action)
+	}
+
+	// >>> 数据演变示例
+	// 1. message_id=object -> 参数错误 -> action 为空。
+	// 2. emoji_id=array -> 参数错误 -> action 为空。
+}
+
+// TestValidStringOrNumberAcceptsProtocolScalarTypes 验证 ID 校验兼容官方联合类型与业务命名类型。
+// @param testing.T：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：无。
+func TestValidStringOrNumberAcceptsProtocolScalarTypes(t *testing.T) {
+	type namedID int64
+	type namedString string
+	values := []any{"88", int64(88), json.Number("88"), namedID(88), namedString("88")}
+	for _, value := range values {
+		// [决策理由] 每种值都可合法编码为 OpenAPI 允许的 string 或 number。
+		if !validStringOrNumber(value) {
+			t.Errorf("validStringOrNumber(%T(%v)) = false", value, value)
+		}
+	}
+
+	// >>> 数据演变示例
+	// 1. namedID(88) -> reflect.Int64 -> true。
+	// 2. json.Number("88") -> JSON number 特例 -> true。
+}
+
+// TestGetLoginInfoPreservesOfficialUserFields 验证 OB11User 官方扩展字段不会被类型化入口丢弃。
+// @param testing.T：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：修改 fakeCaller 请求记录。
+func TestGetLoginInfoPreservesOfficialUserFields(t *testing.T) {
+	caller := &fakeCaller{result: ws.ActionResponse{Status: "ok", Data: json.RawMessage(`{"user_id":123,"nickname":"bot","phone_num":"10086","categoryName":"默认分组","categoryId":7}`)}}
+	result, err := New(caller).GetLoginInfo(context.Background())
+	// [决策理由] OpenAPI OB11User 的 camelCase 与 snake_case 字段都必须按原名解码。
+	if err != nil || result.PhoneNumber != "10086" || result.CategoryName != "默认分组" || result.CategoryIDV2 != 7 {
+		t.Fatalf("GetLoginInfo() result=%+v err=%v", result, err)
+	}
+
+	// >>> 数据演变示例
+	// 1. phone_num=10086 -> UserInfo.PhoneNumber=10086。
+	// 2. categoryName/categoryId -> UserInfo.CategoryName/CategoryIDV2。
 }
 
 // Call 记录 Action 并返回预设响应。

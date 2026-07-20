@@ -1,0 +1,33 @@
+// 📌 影响范围：声明 NapCat 4.18.13 文件及流式 Action；文件读写和网络访问由调用的 NapCat 接口决定。
+package onebot
+
+const (
+	ActionGetFile                  Action = "get_file"
+	ActionGetImage                 Action = "get_image"
+	ActionGetRecord                Action = "get_record"
+	ActionGetGroupFileURL          Action = "get_group_file_url"
+	ActionGetPrivateFileURL        Action = "get_private_file_url"
+	ActionMoveGroupFile            Action = "move_group_file"
+	ActionRenameGroupFile          Action = "rename_group_file"
+	ActionTransferGroupFile        Action = "trans_group_file"
+	ActionCreateFlashTask          Action = "create_flash_task"
+	ActionGetFlashFileList         Action = "get_flash_file_list"
+	ActionGetFlashFileURL          Action = "get_flash_file_url"
+	ActionSendFlashMessage         Action = "send_flash_msg"
+	ActionGetShareLink             Action = "get_share_link"
+	ActionGetFileSetInfo           Action = "get_fileset_info"
+	ActionGetOnlineFileMessage     Action = "get_online_file_msg"
+	ActionSendOnlineFile           Action = "send_online_file"
+	ActionSendOnlineFolder         Action = "send_online_folder"
+	ActionReceiveOnlineFile        Action = "receive_online_file"
+	ActionRefuseOnlineFile         Action = "refuse_online_file"
+	ActionCancelOnlineFile         Action = "cancel_online_file"
+	ActionDownloadFileSet          Action = "download_fileset"
+	ActionGetFileSetID             Action = "get_fileset_id"
+	ActionCleanStreamTemporaryFile Action = "clean_stream_temp_file"
+	ActionDownloadFileRecordStream Action = "download_file_record_stream"
+	ActionDownloadFileImageStream  Action = "download_file_image_stream"
+	ActionTestDownloadStream       Action = "test_download_stream"
+	ActionDownloadFileStream       Action = "download_file_stream"
+	ActionUploadFileStream         Action = "upload_file_stream"
+)
