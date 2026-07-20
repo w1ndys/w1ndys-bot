@@ -3,6 +3,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
@@ -88,9 +89,11 @@ func InvocationFromContext(ctx context.Context) (Invocation, bool) {
 
 // State 表示数据库持久化的插件运行状态。
 type State struct {
-	Name     string
-	Enabled  bool
-	Priority int
+	Name          string
+	Enabled       bool
+	Priority      int
+	ConfigJSON    json.RawMessage
+	ConfigVersion int64
 }
 
 // StateStore 定义插件状态持久化能力。

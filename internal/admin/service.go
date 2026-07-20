@@ -13,6 +13,7 @@ import (
 
 	commandregistry "github.com/w1ndys/w1ndys-bot/internal/command"
 	"github.com/w1ndys/w1ndys-bot/internal/permission"
+	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 )
 
 const pluginRefreshRollbackTimeout = 10 * time.Second
@@ -22,9 +23,167 @@ type RuntimeRefresher interface {
 	Load(context.Context) error
 }
 
+// ConfigRuntime 定义声明式配置发现、校验与原子热应用能力。
+type ConfigRuntime interface {
+	ConfigSchema(string) (plugin.ConfigSchema, error)
+	ValidateConfig(context.Context, string, json.RawMessage) error
+	ApplyConfig(context.Context, string, json.RawMessage) error
+	QuarantineConfig(string) error
+}
+
+var _ ConfigRuntime = (*plugin.Manager)(nil)
+
 // AdminAuthorizer 定义最高管理员身份校验能力。
 type AdminAuthorizer interface {
 	IsSuperAdmin(string) bool
+}
+
+// GetPluginConfig 返回插件 Schema 与脱敏配置快照。
+// @param ctx：查询生命周期；actor：操作者；name：插件稳定名称。
+// @returns Schema、脱敏配置和版本，或授权、不支持、数据错误。
+// ⚠️副作用说明：读取运行时插件契约与 PostgreSQL 配置；不会返回 secret 字段。
+func (s *Service) GetPluginConfig(ctx context.Context, actor Actor, name string) (plugin.ConfigSchema, PluginConfigState, error) {
+	// [决策理由] 插件配置即使脱敏也属于管理信息，读取必须鉴权。
+	if err := s.authorize(actor); err != nil {
+		return plugin.ConfigSchema{}, PluginConfigState{}, err
+	}
+	runtime, ok := s.runtime.(ConfigRuntime)
+	// [决策理由] 不具备配置运行时的进程不能安全解释数据库 JSON。
+	if !ok {
+		return plugin.ConfigSchema{}, PluginConfigState{}, ErrPluginConfigNotSupported
+	}
+	schema, err := runtime.ConfigSchema(name)
+	// [决策理由] 运行时负责区分未注册与不支持配置的插件。
+	if err != nil {
+		return plugin.ConfigSchema{}, PluginConfigState{}, mapRuntimeConfigError(err)
+	}
+	state, err := s.repository.GetPluginConfig(ctx, name)
+	// [决策理由] 数据库读取失败时不能构造虚假版本。
+	if err != nil {
+		return plugin.ConfigSchema{}, PluginConfigState{}, err
+	}
+	redacted, err := plugin.RedactConfig(schema, state.ConfigJSON)
+	// [决策理由] 无法安全脱敏时必须关闭输出，绝不能回退原始配置。
+	if err != nil {
+		return plugin.ConfigSchema{}, PluginConfigState{}, fmt.Errorf("%w: %v", ErrInvalidPluginConfig, err)
+	}
+	state.ConfigJSON = redacted
+
+	// >>> 数据演变示例
+	// 1. echo{prefix,token}:v2 -> 删除token -> schema+公开配置:v2。
+	// 2. 非Configurable插件 -> ErrPluginConfigNotSupported -> 不读数据库。
+	return schema, state, nil
+}
+
+// SetPluginConfig 使用乐观锁保存配置并原子热应用，失败时补偿旧快照。
+// @param ctx：操作生命周期；actor：操作者；name：插件名；update：客户端配置与期望版本。
+// @returns 已脱敏的新配置快照，或校验、冲突、热应用及补偿错误。
+// ⚠️副作用说明：写入配置与脱敏审计、调用插件 ApplyConfig；应用失败会以新版本执行补偿写入并恢复旧配置。
+func (s *Service) SetPluginConfig(ctx context.Context, actor Actor, name string, update PluginConfigUpdate) (PluginConfigState, error) {
+	// [决策理由] 所有管理写入必须先验证服务端身份。
+	if err := s.authorize(actor); err != nil {
+		return PluginConfigState{}, err
+	}
+	runtime, ok := s.runtime.(ConfigRuntime)
+	// [决策理由] 没有热应用能力时不能仅修改数据库制造状态分叉。
+	if !ok {
+		return PluginConfigState{}, ErrPluginConfigNotSupported
+	}
+	lock := s.pluginUpdateLock(name)
+	lock.Lock()
+	defer lock.Unlock()
+	schema, err := runtime.ConfigSchema(name)
+	// [决策理由] 非声明式插件不接受配置写入。
+	if err != nil {
+		return PluginConfigState{}, mapRuntimeConfigError(err)
+	}
+	current, err := s.repository.GetPluginConfig(ctx, name)
+	// [决策理由] 合并 secret 必须基于可信完整旧快照。
+	if err != nil {
+		return PluginConfigState{}, err
+	}
+	// [决策理由] 在调用插件代码前快速拒绝陈旧版本，仓库仍会再次执行权威 CAS。
+	if current.Version != update.ExpectedVersion {
+		return PluginConfigState{}, fmt.Errorf("%w: 当前版本 %d", ErrPluginConfigConflict, current.Version)
+	}
+	merged, err := plugin.MergeConfigUpdate(schema, current.ConfigJSON, update.ConfigJSON)
+	// [决策理由] 未知字段、错误类型和缺失必填项不能进入插件或数据库。
+	if err != nil {
+		return PluginConfigState{}, fmt.Errorf("%w: %v", ErrInvalidPluginConfig, err)
+	}
+	err = runtime.ValidateConfig(ctx, name, merged)
+	// [决策理由] 插件领域校验是持久化前的最后一道约束。
+	if err != nil {
+		return PluginConfigState{}, fmt.Errorf("%w: %v", ErrInvalidPluginConfig, err)
+	}
+	normalized := merged
+	beforeAudit, err := plugin.RedactConfig(schema, current.ConfigJSON)
+	// [决策理由] 审计脱敏失败时拒绝写入，避免秘密进入永久日志。
+	if err != nil {
+		return PluginConfigState{}, fmt.Errorf("%w: %v", ErrInvalidPluginConfig, err)
+	}
+	afterAudit, err := plugin.RedactConfig(schema, normalized)
+	// [决策理由] 新快照也必须在事务前完成脱敏。
+	if err != nil {
+		return PluginConfigState{}, fmt.Errorf("%w: %v", ErrInvalidPluginConfig, err)
+	}
+	saved, err := s.repository.UpdatePluginConfig(ctx, actor, name, PluginConfigUpdate{ConfigJSON: normalized, ExpectedVersion: current.Version}, beforeAudit, afterAudit)
+	// [决策理由] 持久化失败时运行时仍保持旧快照，无需补偿。
+	if err != nil {
+		return PluginConfigState{}, err
+	}
+	// [决策理由] 成功持久化后立即发布运行时快照。
+	if err := runtime.ApplyConfig(ctx, name, saved.ConfigJSON); err != nil {
+		applyErr := fmt.Errorf("热应用插件 %s 配置: %w", name, err)
+		rollbackContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), pluginRefreshRollbackTimeout)
+		defer cancel()
+		rollback, rollbackErr := s.repository.UpdatePluginConfig(rollbackContext, actor, name, PluginConfigUpdate{ConfigJSON: current.ConfigJSON, ExpectedVersion: saved.Version}, afterAudit, beforeAudit)
+		// [决策理由] CAS 补偿失败表示数据库与运行时可能分叉，必须返回全部根因。
+		if rollbackErr != nil {
+			quarantineErr := runtime.QuarantineConfig(name)
+			// [决策理由] 隔离本身失败时必须与应用、补偿根因一起返回。
+			if quarantineErr != nil {
+				return PluginConfigState{}, errors.Join(applyErr, fmt.Errorf("补偿插件 %s 配置: %w", name, rollbackErr), fmt.Errorf("隔离插件 %s: %w", name, quarantineErr))
+			}
+			return PluginConfigState{}, errors.Join(applyErr, fmt.Errorf("补偿插件 %s 配置: %w", name, rollbackErr))
+		}
+		// [决策理由] 即使 Apply 声明失败不应部分提交，仍显式恢复旧快照以加固第三方实现。
+		if restoreErr := runtime.ApplyConfig(rollbackContext, name, rollback.ConfigJSON); restoreErr != nil {
+			quarantineErr := runtime.QuarantineConfig(name)
+			// [决策理由] 恢复失败后必须隔离未知运行态，隔离失败也需保留证据。
+			if quarantineErr != nil {
+				return PluginConfigState{}, errors.Join(applyErr, fmt.Errorf("恢复插件 %s 配置: %w", name, restoreErr), fmt.Errorf("隔离插件 %s: %w", name, quarantineErr))
+			}
+			return PluginConfigState{}, errors.Join(applyErr, fmt.Errorf("恢复插件 %s 配置: %w", name, restoreErr))
+		}
+		return PluginConfigState{}, applyErr
+	}
+	saved.ConfigJSON = afterAudit
+
+	// >>> 数据演变示例
+	// 1. v2+prefix新值 -> CAS写v3 -> Apply成功 -> 返回脱敏v3。
+	// 2. v2写v3后Apply失败 -> CAS写回旧值v4 -> Apply旧值 -> 返回热应用错误。
+	return saved, nil
+}
+
+// mapRuntimeConfigError 将插件运行时错误转换为稳定管理领域错误。
+// @param err：Manager 返回的配置能力错误。
+// @returns 可供 HTTP 层 errors.Is 判断的管理错误。
+// ⚠️副作用说明：无。
+func mapRuntimeConfigError(err error) error {
+	// [决策理由] 未注册名称在管理语义中属于插件不存在。
+	if errors.Is(err, plugin.ErrNotRegistered) {
+		return fmt.Errorf("%w: %v", ErrPluginNotFound, err)
+	}
+	// [决策理由] 已注册但未实现 Configurable 应映射专用能力错误。
+	if errors.Is(err, plugin.ErrConfigNotSupported) {
+		return fmt.Errorf("%w: %v", ErrPluginConfigNotSupported, err)
+	}
+
+	// >>> 数据演变示例
+	// 1. ErrNotRegistered -> ErrPluginNotFound包装。
+	// 2. 其他运行时错误 -> 原样保留供服务端诊断。
+	return err
 }
 
 // Service 是 QQ 管理命令与 WebUI 共用的管理业务入口。

@@ -19,7 +19,6 @@ export interface PluginState {
   available: boolean
   enabled: boolean
   priority: number
-  config: Record<string, unknown>
 }
 
 export interface FeatureState {

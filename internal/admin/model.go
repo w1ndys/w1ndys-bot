@@ -18,11 +18,16 @@ var ErrInvalidCommand = errors.New("命令参数无效")
 var ErrPermissionNotFound = errors.New("权限策略不存在")
 var ErrInvalidPermission = errors.New("权限策略参数无效")
 var ErrFeatureNotFound = errors.New("插件功能不存在")
+var ErrPluginConfigNotSupported = errors.New("插件不支持声明式配置")
+var ErrInvalidPluginConfig = errors.New("插件配置无效")
+var ErrPluginConfigConflict = errors.New("插件配置版本冲突")
 
 type Channel = management.Channel
 type Actor = management.Actor
 type PluginState = management.PluginState
 type FeatureState = management.FeatureState
+type PluginConfigState = management.PluginConfigState
+type PluginConfigUpdate = management.PluginConfigUpdate
 type CommandState = management.CommandState
 type CommandCreate = management.CommandCreate
 type PermissionState = management.PermissionState

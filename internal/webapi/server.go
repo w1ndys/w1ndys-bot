@@ -22,6 +22,7 @@ import (
 	"github.com/w1ndys/w1ndys-bot/internal/admin"
 	projectauth "github.com/w1ndys/w1ndys-bot/internal/auth"
 	"github.com/w1ndys/w1ndys-bot/internal/management"
+	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 	projectlogger "github.com/w1ndys/w1ndys-bot/pkg/logger"
 )
 
@@ -49,6 +50,8 @@ type ManagementController interface {
 	ListPlugins(context.Context, management.Actor) ([]management.PluginState, error)
 	SetPluginEnabled(context.Context, management.Actor, string, bool) (management.PluginState, error)
 	SetPluginPriority(context.Context, management.Actor, string, int) (management.PluginState, error)
+	GetPluginConfig(context.Context, management.Actor, string) (plugin.ConfigSchema, management.PluginConfigState, error)
+	SetPluginConfig(context.Context, management.Actor, string, management.PluginConfigUpdate) (management.PluginConfigState, error)
 	ListPluginFeatures(context.Context, management.Actor, string) ([]management.FeatureState, error)
 	ListCommands(context.Context, management.Actor) ([]management.CommandState, error)
 	CreateCommand(context.Context, management.Actor, management.CommandCreate) (management.CommandState, error)
@@ -104,13 +107,23 @@ type pluginPatchRequest struct {
 }
 
 type pluginResponse struct {
-	Name        string          `json:"name"`
-	DisplayName string          `json:"display_name"`
-	Description string          `json:"description"`
-	Available   bool            `json:"available"`
-	Enabled     bool            `json:"enabled"`
-	Priority    int             `json:"priority"`
-	Config      json.RawMessage `json:"config"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+	Description string `json:"description"`
+	Available   bool   `json:"available"`
+	Enabled     bool   `json:"enabled"`
+	Priority    int    `json:"priority"`
+}
+
+type pluginConfigResponse struct {
+	PluginName string          `json:"plugin_name"`
+	Config     json.RawMessage `json:"config"`
+	Version    int64           `json:"version"`
+}
+
+type pluginConfigUpdateRequest struct {
+	Config          json.RawMessage `json:"config"`
+	ExpectedVersion int64           `json:"expected_version"`
 }
 
 type featureResponse struct {
@@ -256,6 +269,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/plugins", s.authenticate(http.HandlerFunc(s.listPlugins)))
 	mux.Handle("PATCH /api/plugins/{plugin_name}", s.authenticate(http.HandlerFunc(s.patchPlugin)))
 	mux.Handle("GET /api/plugins/{plugin_name}/features", s.authenticate(http.HandlerFunc(s.listPluginFeatures)))
+	mux.Handle("GET /api/plugins/{plugin_name}/config/schema", s.authenticate(http.HandlerFunc(s.getPluginConfigSchema)))
+	mux.Handle("GET /api/plugins/{plugin_name}/config", s.authenticate(http.HandlerFunc(s.getPluginConfig)))
+	mux.Handle("PUT /api/plugins/{plugin_name}/config", s.authenticate(http.HandlerFunc(s.putPluginConfig)))
 	mux.Handle("GET /api/commands", s.authenticate(http.HandlerFunc(s.listCommands)))
 	mux.Handle("POST /api/commands", s.authenticate(http.HandlerFunc(s.createCommand)))
 	mux.Handle("PATCH /api/commands/{command_id}", s.authenticate(http.HandlerFunc(s.renameCommand)))
@@ -453,6 +469,71 @@ func (s *Server) listPlugins(writer http.ResponseWriter, request *http.Request) 
 	// >>> 数据演变示例
 	// 1. Service[ping,admin] -> DTO转换 -> 200插件数组。
 	// 2. Repository失败 -> management error -> 500统一错误。
+}
+
+// getPluginConfigSchema 返回插件声明式配置字段定义。
+// @param writer：响应写入器；request：携带插件名的已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：读取运行时 Schema 并写入 JSON 响应，不返回持久化 secret。
+func (s *Server) getPluginConfigSchema(writer http.ResponseWriter, request *http.Request) {
+	schema, _, err := s.management.GetPluginConfig(request.Context(), actorFromRequest(request), request.PathValue("plugin_name"))
+	// [决策理由] 不存在或不支持配置必须使用稳定管理错误响应。
+	if err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	writeSuccess(writer, schema)
+
+	// >>> 数据演变示例
+	// 1. GET echo/schema -> ConfigSchema{response_prefix} -> 200。
+	// 2. GET admin/schema -> 不支持配置 -> 404稳定错误。
+}
+
+// getPluginConfig 返回插件脱敏配置和乐观锁版本。
+// @param writer：响应写入器；request：携带插件名的已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：读取 PostgreSQL 配置并写入 JSON 响应；secret 字段已由服务层删除。
+func (s *Server) getPluginConfig(writer http.ResponseWriter, request *http.Request) {
+	_, state, err := s.management.GetPluginConfig(request.Context(), actorFromRequest(request), request.PathValue("plugin_name"))
+	// [决策理由] 服务层脱敏或查询失败时不得返回任何配置字节。
+	if err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	writeSuccess(writer, pluginConfigView(state))
+
+	// >>> 数据演变示例
+	// 1. echo公开配置:v3 -> DTO -> 200。
+	// 2. 损坏配置 -> invalid_plugin_config -> 不泄露原始JSON。
+}
+
+// putPluginConfig 更新插件完整声明式配置并触发热应用。
+// @param writer：响应写入器；request：携带插件名、配置对象与期望版本的已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：可能写入 PostgreSQL 配置与审计并切换插件运行时配置。
+func (s *Server) putPluginConfig(writer http.ResponseWriter, request *http.Request) {
+	var input pluginConfigUpdateRequest
+	// [决策理由] 配置外层结构必须严格且受统一 4KiB 请求限制。
+	if err := decodeJSON(writer, request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "请求格式无效")
+		return
+	}
+	// [决策理由] config 必须显式提供 JSON 值，避免空字段被解释为清空配置。
+	if len(input.Config) == 0 || input.ExpectedVersion <= 0 {
+		writeError(writer, http.StatusBadRequest, "invalid_plugin_config", "插件配置或版本无效")
+		return
+	}
+	state, err := s.management.SetPluginConfig(request.Context(), actorFromRequest(request), request.PathValue("plugin_name"), management.PluginConfigUpdate{ConfigJSON: input.Config, ExpectedVersion: input.ExpectedVersion})
+	// [决策理由] 校验、冲突和热应用错误分别由统一映射处理。
+	if err != nil {
+		writeManagementError(writer, err)
+		return
+	}
+	writeSuccess(writer, pluginConfigView(state))
+
+	// >>> 数据演变示例
+	// 1. config{prefix:"[x]"},expected=2 -> CAS+Apply -> 200 version=3。
+	// 2. expected=1而当前=2 -> 409 plugin_config_conflict。
 }
 
 // listPluginFeatures 返回指定插件的 Manifest 功能元数据。
@@ -1093,16 +1174,29 @@ func actorFromRequest(request *http.Request) management.Actor {
 // @returns 不暴露内部字段命名的插件响应。
 // ⚠️副作用说明：复制 JSON 配置字节，避免响应持有共享切片。
 func pluginView(state management.PluginState) pluginResponse {
+	view := pluginResponse{Name: state.Name, DisplayName: state.DisplayName, Description: state.Description, Available: state.Available, Enabled: state.Enabled, Priority: state.Priority}
+
+	// >>> 数据演变示例
+	// 1. ping+内部config -> snake_case DTO且不包含配置。
+	// 2. secret配置 -> 列表只返回运行元数据 -> 无泄露。
+	return view
+}
+
+// pluginConfigView 将脱敏配置状态转换为 API DTO。
+// @param state：服务层已脱敏的配置状态。
+// @returns 带插件名、配置副本和版本的响应。
+// ⚠️副作用说明：复制 JSON 字节，避免响应持有共享切片。
+func pluginConfigView(state management.PluginConfigState) pluginConfigResponse {
 	config := append(json.RawMessage(nil), state.ConfigJSON...)
-	// [决策理由] 数据库历史空值不是合法 JSON，API 应稳定返回空对象。
+	// [决策理由] 空配置需稳定呈现为 JSON 对象。
 	if len(config) == 0 {
 		config = json.RawMessage(`{}`)
 	}
-	view := pluginResponse{Name: state.Name, DisplayName: state.DisplayName, Description: state.Description, Available: state.Available, Enabled: state.Enabled, Priority: state.Priority, Config: config}
+	view := pluginConfigResponse{PluginName: state.PluginName, Config: config, Version: state.Version}
 
 	// >>> 数据演变示例
-	// 1. ping+config{} -> snake_case DTO+独立JSON副本。
-	// 2. config空 -> 默认{} -> 保持合法JSON响应。
+	// 1. echo:{prefix:"x"}:3 -> 独立DTO副本version=3。
+	// 2. 空config:1 -> config={} -> 合法JSON响应。
 	return view
 }
 
@@ -1130,6 +1224,21 @@ func featureView(state management.FeatureState) featureResponse {
 // @returns 无。
 // ⚠️副作用说明：写入 JSON 错误响应，并可能记录服务端错误日志。
 func writeManagementError(writer http.ResponseWriter, err error) {
+	// [决策理由] 无声明式能力是目标子资源不存在，不应伪装为空 Schema。
+	if errors.Is(err, admin.ErrPluginConfigNotSupported) {
+		writeError(writer, http.StatusNotFound, "plugin_config_not_supported", "插件不支持声明式配置")
+		return
+	}
+	// [决策理由] Schema 或插件领域校验失败属于客户端配置错误。
+	if errors.Is(err, admin.ErrInvalidPluginConfig) {
+		writeError(writer, http.StatusBadRequest, "invalid_plugin_config", "插件配置无效")
+		return
+	}
+	// [决策理由] 乐观锁版本陈旧需要前端重新读取再合并。
+	if errors.Is(err, admin.ErrPluginConfigConflict) {
+		writeError(writer, http.StatusConflict, "plugin_config_conflict", "插件配置已被其他操作更新")
+		return
+	}
 	// [决策理由] 领域错误使用 errors.Is 穿透服务层上下文包装。
 	if errors.Is(err, admin.ErrPluginNotFound) {
 		writeError(writer, http.StatusNotFound, "plugin_not_found", "插件不存在")

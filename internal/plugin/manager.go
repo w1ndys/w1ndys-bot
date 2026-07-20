@@ -1,8 +1,9 @@
-// 📌 影响范围：调用已注册插件及 StateStore；并发修改内存中的插件启用状态和优先级。
+// 📌 影响范围：调用已注册插件及 StateStore；并发修改插件启用状态、优先级和运行配置。
 package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -101,6 +102,18 @@ func (m *Manager) Load(ctx context.Context) error {
 		return fmt.Errorf("加载插件状态: %w", err)
 	}
 	for _, state := range states {
+		_, configurableErr := m.configurable(state.Name)
+		// [决策理由] 未注册状态属于旧二进制残留，应与启停加载一致地忽略。
+		if errors.Is(configurableErr, errNotRegistered) {
+			continue
+		}
+		// [决策理由] 声明配置能力的插件必须通过统一互斥入口恢复快照，避免与事件处理或其他热应用并发。
+		if configurableErr == nil && state.Enabled {
+			// [决策理由] 启用插件必须在生命周期回调前恢复完整有效配置。
+			if applyErr := m.ApplyConfig(ctx, state.Name, state.ConfigJSON); applyErr != nil {
+				return fmt.Errorf("恢复插件 %s 配置: %w", state.Name, applyErr)
+			}
+		}
 		// [决策理由] 数据库可能保留当前二进制未集成的插件，刷新时应忽略而非阻断启动。
 		if err := m.apply(ctx, state.Name, state.Enabled, state.Priority, false); err != nil && !errors.Is(err, errNotRegistered) {
 			return err
@@ -111,6 +124,299 @@ func (m *Manager) Load(ctx context.Context) error {
 	// 1. DB{sign_in:true,priority:10} -> 查找注册项 -> OnEnable -> 更新排序。
 	// 2. DB{removed_plugin:true} -> 未注册 -> 忽略 -> 其他插件继续加载。
 	return nil
+}
+
+// ErrConfigNotSupported 表示插件未声明配置能力。
+var ErrConfigNotSupported = errors.New("插件不支持配置")
+
+// ErrConfigCallbackPanic 表示插件配置回调发生 panic。
+var ErrConfigCallbackPanic = errors.New("插件配置回调发生 panic")
+
+// ErrConfigValidationFailed 表示插件领域校验拒绝配置，且不携带可能含 secret 的原始错误。
+var ErrConfigValidationFailed = errors.New("插件配置校验失败")
+
+// ErrConfigApplyFailed 表示插件热应用失败，且不携带可能含 secret 的原始错误。
+var ErrConfigApplyFailed = errors.New("插件配置应用失败")
+
+// ConfigSchema 返回插件声明的配置 Schema。
+// @param name：插件稳定名称。
+// @returns 配置 Schema，或未注册、不支持配置错误。
+// ⚠️副作用说明：调用插件 ConfigSchema；不持有 Manager 主锁。
+func (m *Manager) ConfigSchema(name string) (ConfigSchema, error) {
+	configurable, err := m.configurable(name)
+	// [决策理由] 未注册或未实现配置契约时必须保留可判定的根因。
+	if err != nil {
+		return ConfigSchema{}, err
+	}
+	schema, err := callConfigSchema(configurable)
+	// [决策理由] 插件 Schema 回调 panic 必须转成错误，不能终止管理进程。
+	if err != nil {
+		return ConfigSchema{}, fmt.Errorf("读取插件 %s 配置 Schema: %w", name, err)
+	}
+	// [决策理由] 无效 Schema 不能交给管理端渲染或用于接受配置。
+	if err := schema.Validate(); err != nil {
+		return ConfigSchema{}, fmt.Errorf("插件 %s 配置 Schema 无效: %w", name, err)
+	}
+
+	// >>> 数据演变示例
+	// 1. echo实现Configurable -> 校验Schema -> 返回response_prefix字段。
+	// 2. 普通插件 -> 接口断言失败 -> 返回ErrConfigNotSupported。
+	return schema, nil
+}
+
+// ValidateConfig 规范化并执行插件领域配置校验。
+// @param ctx：校验上下文；name：插件名；raw：完整配置 JSON。
+// @returns Schema、JSON 或插件领域校验错误；成功时返回 nil。
+// ⚠️副作用说明：调用插件 ConfigSchema 和 ValidateConfig；不持有 Manager 主锁。
+func (m *Manager) ValidateConfig(ctx context.Context, name string, raw json.RawMessage) error {
+	configurable, err := m.configurable(name)
+	// [决策理由] 只有声明配置能力的已注册插件才能校验配置。
+	if err != nil {
+		return err
+	}
+	schema, err := callConfigSchema(configurable)
+	// [决策理由] Schema 回调失败时无法安全解释配置对象。
+	if err != nil {
+		return fmt.Errorf("读取插件 %s 配置 Schema: %w", name, err)
+	}
+	normalized, err := NormalizeConfig(schema, raw)
+	// [决策理由] Schema 基础校验失败时不能调用依赖完整类型的插件校验代码。
+	if err != nil {
+		return fmt.Errorf("规范化插件 %s 配置: %w", name, err)
+	}
+	// [决策理由] 插件领域约束错误需要携带插件名供管理 API 定位。
+	if err := callValidateConfig(ctx, configurable, normalized); err != nil {
+		return fmt.Errorf("校验插件 %s 配置: %w", name, err)
+	}
+
+	// >>> 数据演变示例
+	// 1. echo+{} -> 补齐response_prefix默认值 -> 领域校验通过。
+	// 2. echo+未知字段 -> NormalizeConfig拒绝 -> 不调用领域校验。
+	return nil
+}
+
+// ApplyConfig 原子切换插件运行配置并与生命周期和事件处理互斥。
+// @param ctx：控制等待与热应用；name：插件名；raw：已持久化的完整配置 JSON。
+// @returns 未注册、不支持、配置无效、等待取消或插件应用错误。
+// ⚠️副作用说明：暂停目标插件事件路由，等待在途调用结束并调用插件 ApplyConfig。
+func (m *Manager) ApplyConfig(ctx context.Context, name string, raw json.RawMessage) error {
+	currentPlugin, handling := ctx.Value(handlingPluginContextKey{}).(string)
+	// [决策理由] 插件在自身 Handle 中同步热应用会等待当前调用结束而死锁，必须快速拒绝。
+	if handling && currentPlugin == name {
+		return fmt.Errorf("插件 %s 不能在自身 Handle 中同步应用配置", name)
+	}
+	m.mu.Lock()
+	item, exists := m.entries[name]
+	// [决策理由] 配置只能应用到编译进当前二进制的插件实例。
+	if !exists {
+		m.mu.Unlock()
+		return fmt.Errorf("%w: %s", errNotRegistered, name)
+	}
+	configurable, supported := item.plugin.(Configurable)
+	// [决策理由] 未声明配置能力时不能假装热应用成功。
+	if !supported {
+		m.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrConfigNotSupported, name)
+	}
+	// [决策理由] 配置切换必须与生命周期及其他配置切换串行，快速失败可避免回调重入死锁。
+	if item.transitioning {
+		m.mu.Unlock()
+		return fmt.Errorf("插件 %s 正在切换状态", name)
+	}
+	item.transitioning = true
+	waitForIdle := item.idle
+	m.mu.Unlock()
+	defer m.finishConfigTransition(name)
+	// [决策理由] 不可变快照发布前等待旧快照处理完成，保证热应用与事件处理边界清晰。
+	if waitForIdle != nil {
+		select {
+		case <-waitForIdle:
+		case <-ctx.Done():
+			return fmt.Errorf("等待插件 %s 在途调用结束: %w", name, ctx.Err())
+		}
+	}
+	schema, err := callConfigSchema(configurable)
+	// [决策理由] Schema panic 或错误不能让插件永久停留在迁移状态。
+	if err != nil {
+		return fmt.Errorf("读取插件 %s 配置 Schema: %w", name, err)
+	}
+	normalized, err := NormalizeConfig(schema, raw)
+	// [决策理由] 管理层可能直接调用 ApplyConfig，运行时仍必须防御无效快照。
+	if err != nil {
+		return fmt.Errorf("规范化插件 %s 配置: %w", name, err)
+	}
+	// [决策理由] Apply 前重复领域校验确保运行时入口自身完整，不依赖调用方顺序。
+	if err := callValidateConfig(ctx, configurable, normalized); err != nil {
+		return fmt.Errorf("校验插件 %s 配置: %w", name, err)
+	}
+	err = callApplyConfig(ctx, configurable, normalized)
+	// [决策理由] 插件承诺失败时不部分发布，错误应保留根因交由服务层补偿持久化。
+	if err != nil {
+		return fmt.Errorf("应用插件 %s 配置: %w", name, err)
+	}
+
+	// >>> 数据演变示例
+	// 1. enabled echo+prefix=[bot] -> 暂停路由 -> 原子发布 -> 恢复路由。
+	// 2. ctx取消等待 -> 清除transitioning -> 保留旧配置并返回取消错误。
+	return nil
+}
+
+// QuarantineConfig 将配置状态未知的插件隔离出事件路由。
+// @param name：插件稳定名称。
+// @returns 插件未注册错误。
+// ⚠️副作用说明：将目标插件保持为 transitioning；当前进程需重启并从持久化快照重新初始化后才能解除隔离。
+func (m *Manager) QuarantineConfig(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	item, exists := m.entries[name]
+	// [决策理由] 只能隔离当前二进制中已注册的插件。
+	if !exists {
+		return fmt.Errorf("%w: %s", errNotRegistered, name)
+	}
+	item.transitioning = true
+
+	// >>> 数据演变示例
+	// 1. echo运行态未知 -> transitioning=true -> 后续Handle跳过。
+	// 2. missing -> ErrNotRegistered -> 注册表不变。
+	return nil
+}
+
+// callConfigSchema 安全调用插件 Schema 回调。
+// @param configurable：目标配置插件。
+// @returns Schema 或 panic 转换错误。
+// ⚠️副作用说明：调用插件代码并捕获 panic。
+func callConfigSchema(configurable Configurable) (schema ConfigSchema, err error) {
+	defer func() {
+		recovered := recover()
+		// [决策理由] 插件 panic 不应终止机器人进程，需转换为稳定可判定错误。
+		if recovered != nil {
+			err = ErrConfigCallbackPanic
+		}
+
+		// >>> 数据演变示例
+		// 1. ConfigSchema正常返回 -> 保留Schema,nil。
+		// 2. ConfigSchema panic("x") -> 零值Schema,ErrConfigCallbackPanic。
+	}()
+	schema = configurable.ConfigSchema()
+
+	// >>> 数据演变示例
+	// 1. echo -> response_prefix Schema,nil。
+	// 2. panic插件 -> defer恢复 -> 返回稳定错误。
+	return schema, nil
+}
+
+// callValidateConfig 安全调用插件领域校验回调。
+// @param ctx：校验上下文；configurable：目标插件；raw：规范化配置。
+// @returns 插件校验错误或 panic 转换错误。
+// ⚠️副作用说明：调用插件代码并捕获 panic。
+func callValidateConfig(ctx context.Context, configurable Configurable, raw json.RawMessage) (err error) {
+	defer func() {
+		recovered := recover()
+		// [决策理由] 校验 panic 属于插件故障，必须隔离为错误而非崩溃进程。
+		if recovered != nil {
+			err = ErrConfigCallbackPanic
+		}
+
+		// >>> 数据演变示例
+		// 1. ValidateConfig返回invalid -> 保留invalid。
+		// 2. ValidateConfig panic -> 返回ErrConfigCallbackPanic。
+	}()
+
+	// >>> 数据演变示例
+	// 1. 合法配置 -> ValidateConfig -> nil。
+	// 2. 领域配置错误 -> ValidateConfig -> 原错误。
+	err = configurable.ValidateConfig(ctx, raw)
+	// [决策理由] 上下文错误不含配置值，应保留取消语义供调用方判断。
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	// [决策理由] 仅返回标准超时 sentinel，避免插件包装文本携带 secret。
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	// [决策理由] 插件原始错误可能拼接 secret，只允许安全 sentinel 跨越运行时边界。
+	if err != nil {
+		return ErrConfigValidationFailed
+	}
+	return nil
+}
+
+// callApplyConfig 安全调用插件原子配置发布回调。
+// @param ctx：应用上下文；configurable：目标插件；raw：规范化配置。
+// @returns 插件应用错误或 panic 转换错误。
+// ⚠️副作用说明：调用插件代码并捕获 panic；插件仍须保证失败不改变旧快照。
+func callApplyConfig(ctx context.Context, configurable Configurable, raw json.RawMessage) (err error) {
+	defer func() {
+		recovered := recover()
+		// [决策理由] 应用 panic 必须转成错误，让 Manager 的 defer 恢复路由状态。
+		if recovered != nil {
+			err = ErrConfigCallbackPanic
+		}
+
+		// >>> 数据演变示例
+		// 1. ApplyConfig返回失败 -> 保留失败错误。
+		// 2. ApplyConfig panic -> 返回ErrConfigCallbackPanic。
+	}()
+
+	// >>> 数据演变示例
+	// 1. 新快照发布成功 -> nil。
+	// 2. 插件拒绝配置 -> 返回插件错误。
+	err = configurable.ApplyConfig(ctx, raw)
+	// [决策理由] 上下文错误可安全保留，并维持取消与超时语义。
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	// [决策理由] 规范化超时错误可保留 errors.Is 语义且删除插件不可信文本。
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	// [决策理由] 插件原始应用错误可能包含 secret，跨边界只返回安全 sentinel。
+	if err != nil {
+		return ErrConfigApplyFailed
+	}
+	return nil
+}
+
+// configurable 获取插件配置能力且不在调用插件代码期间持锁。
+// @param name：插件稳定名称。
+// @returns Configurable实例，或未注册、不支持错误。
+// ⚠️副作用说明：无；仅读取注册表。
+func (m *Manager) configurable(name string) (Configurable, error) {
+	m.mu.RLock()
+	item, exists := m.entries[name]
+	m.mu.RUnlock()
+	// [决策理由] 未注册名称必须与不支持配置区分，便于 API 映射正确状态码。
+	if !exists {
+		return nil, fmt.Errorf("%w: %s", errNotRegistered, name)
+	}
+	configurable, supported := item.plugin.(Configurable)
+	// [决策理由] 配置能力是可选接口，普通插件应返回稳定可判定错误。
+	if !supported {
+		return nil, fmt.Errorf("%w: %s", ErrConfigNotSupported, name)
+	}
+
+	// >>> 数据演变示例
+	// 1. echo -> 类型断言成功 -> 返回Configurable。
+	// 2. legacy -> 类型断言失败 -> 返回ErrConfigNotSupported。
+	return configurable, nil
+}
+
+// finishConfigTransition 结束配置热应用并恢复事件路由资格。
+// @param name：插件稳定名称。
+// @returns 无。
+// ⚠️副作用说明：清除目标插件的迁移标记。
+func (m *Manager) finishConfigTransition(name string) {
+	m.mu.Lock()
+	item, exists := m.entries[name]
+	// [决策理由] 注册项当前不会删除，但防御未来卸载能力避免空指针。
+	if exists {
+		item.transitioning = false
+	}
+	m.mu.Unlock()
+
+	// >>> 数据演变示例
+	// 1. echo transitioning=true -> false -> 后续事件可进入。
+	// 2. 未来已卸载echo -> exists=false -> 安全忽略。
 }
 
 // SetEnabled 热切换插件状态并持久化。
@@ -262,7 +568,10 @@ func (m *Manager) HandleNamed(ctx context.Context, name string, event ws.Event) 
 	return nil
 }
 
-var errNotRegistered = errors.New("插件未注册")
+// ErrNotRegistered 表示目标插件未编译注册到当前运行时。
+var ErrNotRegistered = errors.New("插件未注册")
+
+var errNotRegistered = ErrNotRegistered
 var errLifecyclePanic = errors.New("插件生命周期发生 panic")
 
 // apply 执行状态迁移并更新优先级。

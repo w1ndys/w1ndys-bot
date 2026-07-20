@@ -35,6 +35,19 @@ type PluginState struct {
 	ConfigJSON  json.RawMessage
 }
 
+// PluginConfigState 是插件声明式配置的脱敏管理快照。
+type PluginConfigState struct {
+	PluginName string
+	ConfigJSON json.RawMessage
+	Version    int64
+}
+
+// PluginConfigUpdate 描述带乐观锁版本的完整配置更新。
+type PluginConfigUpdate struct {
+	ConfigJSON      json.RawMessage
+	ExpectedVersion int64
+}
+
 // FeatureState 表示插件 Manifest 同步后的功能元数据。
 type FeatureState struct {
 	PluginName         string

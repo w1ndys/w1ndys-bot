@@ -13,6 +13,7 @@ import (
 
 	"github.com/w1ndys/w1ndys-bot/internal/admin"
 	"github.com/w1ndys/w1ndys-bot/internal/management"
+	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 )
 
 type fakeAdmins struct {
@@ -45,6 +46,45 @@ type fakePlugins struct {
 	audit           management.AuditState
 	auditQuery      management.AuditQuery
 	auditID         int64
+	configSchema    plugin.ConfigSchema
+	configState     management.PluginConfigState
+	configUpdated   management.PluginConfigState
+}
+
+// GetPluginConfig 返回测试 Schema 与脱敏配置。
+// @param ctx：未使用；actor：操作者；name：插件名。
+// @returns 最小 Schema、空配置版本1或预设错误。
+// ⚠️副作用说明：记录 Actor 和插件名。
+func (f *fakePlugins) GetPluginConfig(_ context.Context, actor management.Actor, name string) (plugin.ConfigSchema, management.PluginConfigState, error) {
+	f.actor, f.name = actor, name
+
+	// >>> 数据演变示例
+	// 1. echo -> 空Schema+{}:v1。
+	// 2. err=boom -> 返回预设错误。
+	state := f.configState
+	// [决策理由] 零值替身保持通用合法配置响应。
+	if state.Version == 0 {
+		state = management.PluginConfigState{PluginName: name, ConfigJSON: json.RawMessage(`{}`), Version: 1}
+	}
+	return f.configSchema, state, f.err
+}
+
+// SetPluginConfig 记录并返回测试配置更新。
+// @param ctx：未使用；actor：操作者；name：插件名；update：配置更新。
+// @returns 版本递增的配置状态或预设错误。
+// ⚠️副作用说明：记录 Actor 和插件名。
+func (f *fakePlugins) SetPluginConfig(_ context.Context, actor management.Actor, name string, update management.PluginConfigUpdate) (management.PluginConfigState, error) {
+	f.actor, f.name = actor, name
+
+	// >>> 数据演变示例
+	// 1. echo:v1 -> 保存 -> echo:v2。
+	// 2. err=conflict -> 返回预设错误。
+	state := f.configUpdated
+	// [决策理由] 未预设更新结果时按期望版本构造通用成功响应。
+	if state.Version == 0 {
+		state = management.PluginConfigState{PluginName: name, ConfigJSON: update.ConfigJSON, Version: update.ExpectedVersion + 1}
+	}
+	return state, f.err
 }
 
 // ListPluginFeatures 返回测试功能元数据并记录 Actor 与插件名。
@@ -435,6 +475,10 @@ func TestPluginRoutesListAndPatch(t *testing.T) {
 	if strings.Contains(listRecorder.Body.String(), `"version"`) {
 		t.Fatalf("插件列表仍暴露 version: body=%s", listRecorder.Body.String())
 	}
+	// [决策理由] 通用插件列表不得携带可能含 secret 的原始配置。
+	if strings.Contains(listRecorder.Body.String(), `"config"`) {
+		t.Fatalf("插件列表仍暴露 config: body=%s", listRecorder.Body.String())
+	}
 	patchRequest := httptest.NewRequest(http.MethodPatch, "/api/plugins/ping", strings.NewReader(`{"enabled":true}`))
 	patchRequest.Header.Set("Authorization", "Bearer "+token)
 	patchRequest.Header.Set("X-Request-ID", "req-patch")
@@ -448,6 +492,55 @@ func TestPluginRoutesListAndPatch(t *testing.T) {
 	// >>> 数据演变示例
 	// 1. GET+Token -> Actor100:req-list -> Service列表 -> 200 DTO。
 	// 2. PATCH ping enabled=true -> Actor100:req-patch -> Service热更新 -> 200。
+}
+
+// TestPluginConfigRoutes 验证配置 Schema、脱敏快照、更新与冲突错误映射。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行 Argon2id 哈希并创建内存 HTTP 请求。
+func TestPluginConfigRoutes(t *testing.T) {
+	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
+	controller := &fakePlugins{
+		configSchema:  plugin.ConfigSchema{Fields: []plugin.ConfigField{{Key: "token", DisplayName: "令牌", Type: plugin.FieldSecret}}},
+		configState:   management.PluginConfigState{PluginName: "echo", ConfigJSON: json.RawMessage(`{}`), Version: 2},
+		configUpdated: management.PluginConfigState{PluginName: "echo", ConfigJSON: json.RawMessage(`{"response_prefix":"x"}`), Version: 3},
+	}
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller)
+	// [决策理由] 合法依赖必须成功构造配置 API。
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	token, err := server.sign("100")
+	// [决策理由] 配置端点必须使用有效管理员凭证。
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := requestAPI(server, token, http.MethodGet, "/api/plugins/echo/config/schema", "", "req-schema")
+	// [决策理由] Schema 应返回 write-only 类型且不能携带 secret 默认值。
+	if schema.Code != http.StatusOK || !strings.Contains(schema.Body.String(), `"type":"secret"`) || strings.Contains(schema.Body.String(), `"default"`) {
+		t.Fatalf("schema status=%d body=%s", schema.Code, schema.Body.String())
+	}
+	config := requestAPI(server, token, http.MethodGet, "/api/plugins/echo/config", "", "req-config")
+	// [决策理由] 配置读取必须携带版本且不出现秘密值。
+	if config.Code != http.StatusOK || !strings.Contains(config.Body.String(), `"version":2`) || strings.Contains(config.Body.String(), "secret-value") {
+		t.Fatalf("config status=%d body=%s", config.Code, config.Body.String())
+	}
+	updated := requestAPI(server, token, http.MethodPut, "/api/plugins/echo/config", `{"config":{"response_prefix":"x"},"expected_version":2}`, "req-put")
+	// [决策理由] 合法 PUT 应返回热应用后的递增版本。
+	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), `"version":3`) {
+		t.Fatalf("updated status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	controller.err = admin.ErrPluginConfigConflict
+	conflict := requestAPI(server, token, http.MethodPut, "/api/plugins/echo/config", `{"config":{},"expected_version":2}`, "req-conflict")
+	// [决策理由] 陈旧版本必须稳定映射 409 而非通用 500。
+	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), `"code":"plugin_config_conflict"`) {
+		t.Fatalf("conflict status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+
+	// >>> 数据演变示例
+	// 1. GET schema/config -> 200且secret write-only -> 无秘密。
+	// 2. PUT stale version -> ErrPluginConfigConflict -> 409。
 }
 
 // TestPatchPluginRejectsAmbiguousAndProtectedChanges 验证冲突字段与受保护插件错误映射。

@@ -3,7 +3,9 @@ package echo
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
@@ -23,6 +25,11 @@ var manifest = plugin.Manifest{
 
 type implementation struct {
 	messenger plugin.Messenger
+	config    atomic.Pointer[configSnapshot]
+}
+
+type configSnapshot struct {
+	ResponsePrefix string `json:"response_prefix"`
 }
 
 // Name 返回插件稳定名称。
@@ -56,6 +63,11 @@ func (p *implementation) Handle(ctx context.Context, event ws.Event) error {
 	if invocation.Arguments == "" {
 		response = fmt.Sprintf("用法：%s <要重复的内容>", invocation.Command)
 	}
+	currentConfig := p.config.Load()
+	// [决策理由] Factory 会发布默认快照；防御零值测试实例时仍保持旧行为。
+	if currentConfig != nil {
+		response = currentConfig.ResponsePrefix + response
+	}
 	_, err := p.messenger.ReplyToMessage(ctx, message, message.MessageID, response)
 	// [决策理由] NapCat发送失败必须带插件上下文返回统一日志链路。
 	if err != nil {
@@ -66,6 +78,68 @@ func (p *implementation) Handle(ctx context.Context, event ws.Event) error {
 	// 1. /echo Hello World -> Invocation.Arguments="Hello World" -> 引用回复同一文本。
 	// 2. /echo -> Arguments为空 -> 引用回复当前命令用法并停止传播。
 	return plugin.ErrStopPropagation
+}
+
+// ConfigSchema 声明 Echo 的通用 WebUI 配置字段。
+// @param 无。
+// @returns 包含回复前缀的稳定配置 Schema。
+// ⚠️副作用说明：无。
+func (p *implementation) ConfigSchema() plugin.ConfigSchema {
+	schema := plugin.ConfigSchema{Fields: []plugin.ConfigField{{
+		Key: "response_prefix", DisplayName: "回复前缀", Description: "添加到每条 Echo 回复之前的文本", Type: plugin.FieldString, Default: json.RawMessage(`""`),
+	}}}
+
+	// >>> 数据演变示例
+	// 1. 新实例 -> ConfigSchema -> response_prefix默认空字符串。
+	// 2. WebUI读取 -> string字段 -> 渲染普通文本输入框。
+	return schema
+}
+
+// ValidateConfig 校验 Echo 运行配置的领域约束。
+// @param ctx：校验上下文；raw：经 Schema 规范化的完整 JSON。
+// @returns JSON 解码或前缀长度错误。
+// ⚠️副作用说明：无。
+func (p *implementation) ValidateConfig(ctx context.Context, raw json.RawMessage) error {
+	// [决策理由] 已取消请求不应继续消耗插件校验资源。
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var candidate configSnapshot
+	// [决策理由] 插件仍需使用自己的强类型结构防御绕过平台的调用。
+	if err := json.Unmarshal(raw, &candidate); err != nil {
+		return fmt.Errorf("解析echo配置: %w", err)
+	}
+	// [决策理由] 限制前缀长度可避免单次命令无界放大回复负载。
+	if len([]rune(candidate.ResponsePrefix)) > 100 {
+		return fmt.Errorf("response_prefix 不能超过100个字符")
+	}
+
+	// >>> 数据演变示例
+	// 1. {response_prefix:"[bot] "} -> 长度6 -> nil。
+	// 2. 101个字符 -> 超过边界 -> 返回错误。
+	return nil
+}
+
+// ApplyConfig 原子发布 Echo 的不可变配置快照。
+// @param ctx：应用上下文；raw：经 Schema 规范化的完整 JSON。
+// @returns 取消或 JSON 解码错误。
+// ⚠️副作用说明：原子替换后续 Handle 读取的配置快照。
+func (p *implementation) ApplyConfig(ctx context.Context, raw json.RawMessage) error {
+	// [决策理由] 请求取消后不得发布调用方已放弃的新快照。
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var candidate configSnapshot
+	// [决策理由] 只有完整解码成功后才能一次性发布，失败时必须保留旧快照。
+	if err := json.Unmarshal(raw, &candidate); err != nil {
+		return fmt.Errorf("解析echo配置: %w", err)
+	}
+	p.config.Store(&candidate)
+
+	// >>> 数据演变示例
+	// 1. 旧前缀空+新前缀[bot] -> Store新快照 -> 后续回复带前缀。
+	// 2. JSON损坏 -> 不Store -> 后续回复继续使用旧前缀。
+	return nil
 }
 
 // OnEnable 初始化echo插件生命周期。
@@ -100,6 +174,7 @@ func newPlugin(runtime plugin.Runtime) (plugin.Plugin, error) {
 		return nil, fmt.Errorf("%s 缺少 Messenger", pluginName)
 	}
 	result := &implementation{messenger: runtime.Messenger}
+	result.config.Store(&configSnapshot{})
 
 	// >>> 数据演变示例
 	// 1. Runtime{Messenger} -> echo implementation -> nil错误。

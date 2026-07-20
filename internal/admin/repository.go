@@ -15,6 +15,8 @@ import (
 type Repository interface {
 	ListPlugins(context.Context) ([]PluginState, error)
 	UpdatePlugin(context.Context, Actor, string, PluginPatch) (PluginState, PluginState, error)
+	GetPluginConfig(context.Context, string) (PluginConfigState, error)
+	UpdatePluginConfig(context.Context, Actor, string, PluginConfigUpdate, json.RawMessage, json.RawMessage) (PluginConfigState, error)
 	ListPluginFeatures(context.Context, string) ([]FeatureState, error)
 	ListCommands(context.Context) ([]CommandState, error)
 	CreateCommand(context.Context, Actor, CommandCreate, string) (CommandState, error)
@@ -28,6 +30,75 @@ type Repository interface {
 	DeleteSystemSetting(context.Context, Actor, string) error
 	ListAuditLogs(context.Context, AuditQuery) (AuditPage, error)
 	GetAuditLog(context.Context, int64) (AuditState, error)
+}
+
+// GetPluginConfig 读取插件内部完整配置与乐观锁版本。
+// @param ctx：查询生命周期；name：插件稳定名称。
+// @returns 完整配置快照或未找到、数据库错误。
+// ⚠️副作用说明：执行 PostgreSQL 只读查询；返回值只能在服务端校验与应用，不能直接输出到 API。
+func (r *PostgresRepository) GetPluginConfig(ctx context.Context, name string) (PluginConfigState, error) {
+	var state PluginConfigState
+	err := r.pool.QueryRow(ctx, `SELECT plugin_name,config_json,config_version FROM plugin_config WHERE plugin_name=$1`, name).Scan(&state.PluginName, &state.ConfigJSON, &state.Version)
+	// [决策理由] 稳定领域错误让 API 不依赖数据库驱动错误类型。
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PluginConfigState{}, fmt.Errorf("%w: %s", ErrPluginNotFound, name)
+	}
+	// [决策理由] 查询异常时不能返回不完整配置快照。
+	if err != nil {
+		return PluginConfigState{}, fmt.Errorf("读取插件声明式配置: %w", err)
+	}
+
+	// >>> 数据演变示例
+	// 1. echo:{response_prefix:"[bot]"}:3 -> 扫描 -> 完整快照version=3。
+	// 2. missing -> pgx.ErrNoRows -> ErrPluginNotFound。
+	return state, nil
+}
+
+// UpdatePluginConfig 使用版本 CAS 原子更新完整配置并写入脱敏审计。
+// @param ctx：事务生命周期；actor：操作者；name：插件名；update：完整配置及期望版本；beforeAudit、afterAudit：已脱敏审计快照。
+// @returns 更新后的内部完整配置与递增版本，或冲突、数据库错误。
+// ⚠️副作用说明：更新 plugin_config 并插入 admin_audit_logs；审计内容由调用方预先脱敏。
+func (r *PostgresRepository) UpdatePluginConfig(ctx context.Context, actor Actor, name string, update PluginConfigUpdate, beforeAudit, afterAudit json.RawMessage) (PluginConfigState, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	// [决策理由] 配置与审计必须在同一事务提交。
+	if err != nil {
+		return PluginConfigState{}, fmt.Errorf("开启插件配置事务: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var currentVersion int64
+	err = tx.QueryRow(ctx, `SELECT config_version FROM plugin_config WHERE plugin_name=$1 FOR UPDATE`, name).Scan(&currentVersion)
+	// [决策理由] 不存在的插件不能产生孤立配置。
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PluginConfigState{}, fmt.Errorf("%w: %s", ErrPluginNotFound, name)
+	}
+	// [决策理由] 锁定失败时不能执行不可靠的版本判断。
+	if err != nil {
+		return PluginConfigState{}, fmt.Errorf("锁定插件配置: %w", err)
+	}
+	// [决策理由] 陈旧页面不得覆盖其他管理员已保存的配置。
+	if currentVersion != update.ExpectedVersion {
+		return PluginConfigState{}, fmt.Errorf("%w: 当前版本 %d", ErrPluginConfigConflict, currentVersion)
+	}
+	var state PluginConfigState
+	err = tx.QueryRow(ctx, `UPDATE plugin_config SET config_json=$2,config_version=config_version+1,updated_at=NOW() WHERE plugin_name=$1 RETURNING plugin_name,config_json,config_version`, name, update.ConfigJSON).Scan(&state.PluginName, &state.ConfigJSON, &state.Version)
+	// [决策理由] 更新失败时不得留下成功审计。
+	if err != nil {
+		return PluginConfigState{}, fmt.Errorf("更新插件声明式配置: %w", err)
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO admin_audit_logs(actor_id,actor_role,channel,action,target_type,target_id,before_json,after_json,success,request_id) VALUES($1,$2,$3,'plugin.config.update','plugin_config',$4,$5,$6,TRUE,NULLIF($7,''))`, actor.ID, actor.Role, actor.Channel, name, beforeAudit, afterAudit, actor.RequestID)
+	// [决策理由] 审计失败必须回滚配置更新。
+	if err != nil {
+		return PluginConfigState{}, fmt.Errorf("写入插件配置审计: %w", err)
+	}
+	// [决策理由] 仅在配置与审计都成功后提交。
+	if err := tx.Commit(ctx); err != nil {
+		return PluginConfigState{}, fmt.Errorf("提交插件配置事务: %w", err)
+	}
+
+	// >>> 数据演变示例
+	// 1. version=3,expected=3 -> 写入配置+审计 -> version=4。
+	// 2. version=4,expected=3 -> 冲突 -> 事务回滚且不写审计。
+	return state, nil
 }
 
 // PostgresRepository 使用 PostgreSQL 原子保存插件配置和审计记录。
@@ -109,12 +180,16 @@ func (r *PostgresRepository) UpdatePlugin(ctx context.Context, actor Actor, name
 	if err != nil {
 		return PluginState{}, PluginState{}, fmt.Errorf("更新插件配置: %w", err)
 	}
-	beforeJSON, err := json.Marshal(before)
+	beforeAudit := before
+	beforeAudit.ConfigJSON = nil
+	afterAudit := after
+	afterAudit.ConfigJSON = nil
+	beforeJSON, err := json.Marshal(beforeAudit)
 	// [决策理由] 审计快照无法序列化时不得提交无法追溯的管理变更。
 	if err != nil {
 		return PluginState{}, PluginState{}, fmt.Errorf("编码变更前快照: %w", err)
 	}
-	afterJSON, err := json.Marshal(after)
+	afterJSON, err := json.Marshal(afterAudit)
 	// [决策理由] 审计快照无法序列化时不得提交无法追溯的管理变更。
 	if err != nil {
 		return PluginState{}, PluginState{}, fmt.Errorf("编码变更后快照: %w", err)
@@ -130,7 +205,7 @@ func (r *PostgresRepository) UpdatePlugin(ctx context.Context, actor Actor, name
 	}
 
 	// >>> 数据演变示例
-	// 1. ping:false + Enabled=true -> UPDATE + audit -> ping:true。
+	// 1. ping:false+secret配置 + Enabled=true -> UPDATE + 不含配置的audit -> ping:true。
 	// 2. missing + Priority=10 -> SELECT 无行 -> ErrPluginNotFound + 回滚。
 	return before, after, nil
 }

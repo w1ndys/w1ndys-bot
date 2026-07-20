@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 )
 
 type fakeRepository struct {
@@ -29,6 +32,43 @@ type fakeRepository struct {
 	errs            []error
 	updateEntered   chan struct{}
 	updateRelease   chan struct{}
+	configCurrent   PluginConfigState
+	configUpdates   []PluginConfigUpdate
+	configAudits    [][2]json.RawMessage
+	configErrs      []error
+}
+
+// GetPluginConfig 返回测试声明式配置快照。
+// @param ctx：未使用；name：未使用。
+// @returns 空配置版本1或预设错误。
+// ⚠️副作用说明：无。
+func (f *fakeRepository) GetPluginConfig(_ context.Context, _ string) (PluginConfigState, error) {
+	// [决策理由] 显式预设用于覆盖 secret 与版本场景，零值则保持通用默认。
+	if f.configCurrent.Version > 0 {
+		return f.configCurrent, f.err
+	}
+	// >>> 数据演变示例
+	// 1. echo -> {}:v1。
+	// 2. err=boom -> 返回boom。
+	return PluginConfigState{PluginName: "echo", ConfigJSON: json.RawMessage(`{}`), Version: 1}, f.err
+}
+
+// UpdatePluginConfig 返回测试配置更新结果。
+// @param ctx：未使用；actor：未使用；name：插件名；update：更新；beforeAudit、afterAudit：脱敏快照。
+// @returns 版本递增的配置状态或预设错误。
+// ⚠️副作用说明：无。
+func (f *fakeRepository) UpdatePluginConfig(_ context.Context, _ Actor, name string, update PluginConfigUpdate, beforeAudit, afterAudit json.RawMessage) (PluginConfigState, error) {
+	f.configUpdates = append(f.configUpdates, update)
+	f.configAudits = append(f.configAudits, [2]json.RawMessage{append(json.RawMessage(nil), beforeAudit...), append(json.RawMessage(nil), afterAudit...)})
+	call := len(f.configUpdates)
+	// [决策理由] 错误序列用于区分首次 CAS 与补偿 CAS。
+	if len(f.configErrs) >= call {
+		return PluginConfigState{}, f.configErrs[call-1]
+	}
+	// >>> 数据演变示例
+	// 1. echo:v1 -> 更新 -> echo:v2。
+	// 2. err=boom -> 返回boom。
+	return PluginConfigState{PluginName: name, ConfigJSON: update.ConfigJSON, Version: update.ExpectedVersion + 1}, f.err
 }
 
 // ListPluginFeatures 返回空功能列表以满足管理仓库契约。
@@ -466,9 +506,68 @@ func TestPluginUpdatesAreSerializedByName(t *testing.T) {
 }
 
 type fakeRuntime struct {
-	loads int
-	err   error
-	errs  []error
+	loads       int
+	err         error
+	errs        []error
+	schema      plugin.ConfigSchema
+	applies     []json.RawMessage
+	applyErrs   []error
+	quarantines int
+}
+
+// QuarantineConfig 记录测试插件隔离。
+// @param name：未使用的插件名。
+// @returns nil。
+// ⚠️副作用说明：递增 quarantines。
+func (f *fakeRuntime) QuarantineConfig(_ string) error {
+	f.quarantines++
+
+	// >>> 数据演变示例
+	// 1. 配置恢复失败 -> quarantines 0→1。
+	// 2. 再次隔离 -> quarantines 1→2。
+	return nil
+}
+
+// ConfigSchema 返回测试声明式配置结构。
+// @param name：未使用的插件名。
+// @returns 预设 Schema。
+// ⚠️副作用说明：无。
+func (f *fakeRuntime) ConfigSchema(_ string) (plugin.ConfigSchema, error) {
+	// >>> 数据演变示例
+	// 1. schema{token} -> 返回该Schema。
+	// 2. 空schema -> 返回无字段Schema。
+	return f.schema, nil
+}
+
+// ValidateConfig 使用平台 Schema 规范化测试配置。
+// @param ctx：未使用；name：未使用；raw：配置JSON。
+// @returns 规范化配置或校验错误。
+// ⚠️副作用说明：无。
+func (f *fakeRuntime) ValidateConfig(_ context.Context, _ string, raw json.RawMessage) error {
+	_, err := plugin.NormalizeConfig(f.schema, raw)
+
+	// >>> 数据演变示例
+	// 1. 合法对象 -> Normalize -> 完整JSON。
+	// 2. 未知字段 -> Normalize -> 错误。
+	return err
+}
+
+// ApplyConfig 记录测试热应用快照并按序返回错误。
+// @param ctx：未使用；name：未使用；raw：完整配置。
+// @returns 预设的本次应用错误。
+// ⚠️副作用说明：追加配置副本到 applies。
+func (f *fakeRuntime) ApplyConfig(_ context.Context, _ string, raw json.RawMessage) error {
+	f.applies = append(f.applies, append(json.RawMessage(nil), raw...))
+	call := len(f.applies)
+	// [决策理由] 错误序列用于分别模拟新配置应用失败与旧配置恢复结果。
+	if len(f.applyErrs) >= call {
+		return f.applyErrs[call-1]
+	}
+
+	// >>> 数据演变示例
+	// 1. applyErrs=[] -> 记录快照 -> nil。
+	// 2. applyErrs=[boom,nil] -> 首次失败、恢复成功。
+	return nil
 }
 
 type fakeAuthorizer struct {
@@ -503,6 +602,75 @@ func (f *fakeRuntime) Load(_ context.Context) error {
 	// 1. loads=0 -> Load -> loads=1,nil。
 	// 2. err=boom -> Load -> loads+1,boom。
 	return f.err
+}
+
+// TestSetPluginConfigPreservesSecretAndRedactsAudit 验证 write-only secret 合并及审计脱敏。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：调用内存 Repository 与 Runtime 替身。
+func TestSetPluginConfigPreservesSecretAndRedactsAudit(t *testing.T) {
+	schema := plugin.ConfigSchema{Fields: []plugin.ConfigField{{Key: "prefix", DisplayName: "前缀", Type: plugin.FieldString, Default: json.RawMessage(`""`)}, {Key: "token", DisplayName: "令牌", Type: plugin.FieldSecret}}}
+	repository := &fakeRepository{configCurrent: PluginConfigState{PluginName: "echo", ConfigJSON: json.RawMessage(`{"prefix":"old","token":"secret-value"}`), Version: 2}}
+	runtime := &fakeRuntime{schema: schema}
+	service := NewService(repository, runtime, nil, nil, nil, &fakeAuthorizer{})
+	state, err := service.SetPluginConfig(context.Background(), Actor{ID: "system", Channel: ChannelSystem}, "echo", PluginConfigUpdate{ConfigJSON: json.RawMessage(`{"prefix":"new"}`), ExpectedVersion: 2})
+	// [决策理由] 合法更新必须成功并递增版本。
+	if err != nil || state.Version != 3 {
+		t.Fatalf("SetPluginConfig() = %+v, %v", state, err)
+	}
+	// [决策理由] 内部持久化必须保留省略的 secret，而响应与审计不得出现秘密。
+	if !strings.Contains(string(repository.configUpdates[0].ConfigJSON), "secret-value") || strings.Contains(string(state.ConfigJSON), "secret-value") || strings.Contains(string(repository.configAudits[0][0]), "secret-value") || strings.Contains(string(repository.configAudits[0][1]), "secret-value") {
+		t.Fatalf("secret boundary violated: update=%s state=%s audits=%s/%s", repository.configUpdates[0].ConfigJSON, state.ConfigJSON, repository.configAudits[0][0], repository.configAudits[0][1])
+	}
+
+	// >>> 数据演变示例
+	// 1. old含token+update省略token -> 持久化保留 -> 响应审计删除token。
+	// 2. version2 -> CAS成功 -> 返回version3。
+}
+
+// TestSetPluginConfigCompensatesApplyFailure 验证热应用失败后以新版本补偿旧快照。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行两次内存配置写入与两次运行时应用。
+func TestSetPluginConfigCompensatesApplyFailure(t *testing.T) {
+	schema := plugin.ConfigSchema{Fields: []plugin.ConfigField{{Key: "prefix", DisplayName: "前缀", Type: plugin.FieldString, Default: json.RawMessage(`""`)}}}
+	current := PluginConfigState{PluginName: "echo", ConfigJSON: json.RawMessage(`{"prefix":"old"}`), Version: 4}
+	repository := &fakeRepository{configCurrent: current}
+	runtime := &fakeRuntime{schema: schema, applyErrs: []error{errors.New("apply failed"), nil}}
+	service := NewService(repository, runtime, nil, nil, nil, &fakeAuthorizer{})
+	_, err := service.SetPluginConfig(context.Background(), Actor{ID: "system", Channel: ChannelSystem}, "echo", PluginConfigUpdate{ConfigJSON: json.RawMessage(`{"prefix":"new"}`), ExpectedVersion: 4})
+	// [决策理由] 初次 Apply 失败即使补偿成功也必须报告失败。
+	if err == nil || len(repository.configUpdates) != 2 || len(runtime.applies) != 2 {
+		t.Fatalf("error=%v updates=%d applies=%d", err, len(repository.configUpdates), len(runtime.applies))
+	}
+	// [决策理由] 补偿必须以首次写入后的版本5为条件并恢复原始 JSON。
+	if repository.configUpdates[1].ExpectedVersion != 5 || string(repository.configUpdates[1].ConfigJSON) != string(current.ConfigJSON) {
+		t.Fatalf("rollback = %+v", repository.configUpdates[1])
+	}
+
+	// >>> 数据演变示例
+	// 1. v4写new -> v5 Apply失败 -> v5条件写old形成v6。
+	// 2. 恢复Apply成功 -> 运行态与数据库重新一致 -> 返回初始Apply错误。
+}
+
+// TestSetPluginConfigQuarantinesWhenRestoreFails 验证补偿后旧运行快照恢复失败会隔离插件。
+// @param t：Go 测试上下文。
+// @returns 无。
+// ⚠️副作用说明：执行两次内存热应用并记录隔离动作。
+func TestSetPluginConfigQuarantinesWhenRestoreFails(t *testing.T) {
+	schema := plugin.ConfigSchema{Fields: []plugin.ConfigField{{Key: "prefix", DisplayName: "前缀", Type: plugin.FieldString, Default: json.RawMessage(`""`)}}}
+	repository := &fakeRepository{configCurrent: PluginConfigState{PluginName: "echo", ConfigJSON: json.RawMessage(`{"prefix":"old"}`), Version: 1}}
+	runtime := &fakeRuntime{schema: schema, applyErrs: []error{errors.New("new failed"), errors.New("old failed")}}
+	service := NewService(repository, runtime, nil, nil, nil, &fakeAuthorizer{})
+	_, err := service.SetPluginConfig(context.Background(), Actor{ID: "system", Channel: ChannelSystem}, "echo", PluginConfigUpdate{ConfigJSON: json.RawMessage(`{"prefix":"new"}`), ExpectedVersion: 1})
+	// [决策理由] 两次应用均失败时必须返回错误并隔离一次。
+	if err == nil || runtime.quarantines != 1 {
+		t.Fatalf("error=%v quarantines=%d", err, runtime.quarantines)
+	}
+
+	// >>> 数据演变示例
+	// 1. 新配置Apply失败 -> DB补偿旧值 -> 旧值Apply失败 -> 隔离。
+	// 2. quarantines初始0 -> QuarantineConfig -> 1。
 }
 
 // TestSetPluginEnabledPersistsAuditedChangeAndRefreshes 验证启停操作参数和热刷新。

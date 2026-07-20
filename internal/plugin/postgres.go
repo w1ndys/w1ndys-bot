@@ -31,7 +31,7 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 // @returns 插件状态列表或查询、扫描错误。
 // ⚠️副作用说明：执行 PostgreSQL 只读查询。
 func (s *PostgresStore) Load(ctx context.Context) ([]State, error) {
-	rows, err := s.pool.Query(ctx, `SELECT plugin_name, enabled, priority FROM plugin_config ORDER BY priority DESC, plugin_name ASC`)
+	rows, err := s.pool.Query(ctx, `SELECT plugin_name, enabled, priority, config_json, config_version FROM plugin_config ORDER BY priority DESC, plugin_name ASC`)
 	// [决策理由] 查询失败时没有完整状态快照，必须返回错误而非部分初始化。
 	if err != nil {
 		return nil, fmt.Errorf("查询 plugin_config: %w", err)
@@ -42,7 +42,7 @@ func (s *PostgresStore) Load(ctx context.Context) ([]State, error) {
 	for rows.Next() {
 		var state State
 		// [决策理由] 任一行无法扫描都说明表结构或数据异常，不能静默遗漏插件状态。
-		if err := rows.Scan(&state.Name, &state.Enabled, &state.Priority); err != nil {
+		if err := rows.Scan(&state.Name, &state.Enabled, &state.Priority, &state.ConfigJSON, &state.ConfigVersion); err != nil {
 			return nil, fmt.Errorf("扫描 plugin_config: %w", err)
 		}
 		states = append(states, state)

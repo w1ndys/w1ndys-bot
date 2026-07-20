@@ -191,16 +191,6 @@ onMounted(loadPluginOverview)
           </div>
         </section>
 
-        <section class="overview-section">
-          <div class="section-heading">
-            <div>
-              <h2>当前配置快照</h2>
-              <p>配置由后端管理，此处只读展示，不代表可以直接编辑 Manifest。</p>
-            </div>
-            <NTag type="info">只读</NTag>
-          </div>
-          <pre class="config-preview">{{ JSON.stringify(plugin.config, null, 2) }}</pre>
-        </section>
       </template>
 
       <NEmpty v-else-if="!errorMessage" description="没有可展示的插件概览" />
@@ -216,7 +206,7 @@ onMounted(loadPluginOverview)
 .section-heading h2, .setting-copy h3 { margin: 0; color: var(--color-text-primary); }
 .section-heading h2 { font-size: var(--font-size-h3); line-height: var(--line-height-h3); }
 .section-heading p, .setting-copy p { margin: var(--space-1) 0 0; color: var(--color-text-muted); font-size: var(--font-size-body-sm); line-height: var(--line-height-body-sm); }
-.status-descriptions code, .config-preview { font-family: var(--font-mono); }
+.status-descriptions code { font-family: var(--font-mono); }
 .setting-list { border-top: 0.0625rem solid var(--color-border); }
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-6); padding: var(--space-4) 0; border-bottom: 0.0625rem solid var(--color-border); }
 .setting-copy { max-width: 35rem; }
@@ -224,7 +214,6 @@ onMounted(loadPluginOverview)
 .setting-control { display: flex; align-items: center; flex: 0 0 auto; gap: var(--space-3); }
 .priority-control { width: 18rem; }
 .priority-control :deep(.n-input-number) { flex: 1; }
-.config-preview { max-height: 24rem; margin: 0; padding: var(--space-4); overflow: auto; border: 0.0625rem solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-canvas); color: var(--color-text-secondary); font-size: var(--font-size-body-sm); line-height: var(--line-height-body-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
 .alert-content { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
 @media (max-width: 39.9375rem) {
   .overview-loading, .overview-section { padding: var(--space-4); }

@@ -3,6 +3,7 @@ package echo
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -15,6 +16,61 @@ type fakeMessenger struct {
 	messageID int64
 	reply     string
 	err       error
+}
+
+// TestConfigHotApply 验证 Echo 配置 Schema、领域校验和原子热应用。
+// @param t：Go测试上下文。
+// @returns 无。
+// ⚠️副作用说明：替换内存 Echo 配置并记录 fake Messenger 回复。
+func TestConfigHotApply(t *testing.T) {
+	messenger := &fakeMessenger{}
+	instance, err := newPlugin(plugin.Runtime{Messenger: messenger})
+	// [决策理由] 只有完整运行实例才能验证配置对 Handle 的实际影响。
+	if err != nil {
+		t.Fatal(err)
+	}
+	configurable, ok := instance.(plugin.Configurable)
+	// [决策理由] Echo 是首个配置示例，必须持续实现平台可选契约。
+	if !ok {
+		t.Fatal("echo does not implement Configurable")
+	}
+	schema := configurable.ConfigSchema()
+	// [决策理由] Schema 必须稳定声明唯一的 response_prefix 字段。
+	if err := schema.Validate(); err != nil || len(schema.Fields) != 1 || schema.Fields[0].Key != "response_prefix" {
+		t.Fatalf("ConfigSchema() = %+v,error=%v", schema, err)
+	}
+	raw := json.RawMessage(`{"response_prefix":"[bot] "}`)
+	// [决策理由] 合法前缀应同时通过领域校验与应用。
+	if err := configurable.ValidateConfig(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	// [决策理由] ApplyConfig 成功后新快照必须立即可读。
+	if err := configurable.ApplyConfig(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	ctx := plugin.WithInvocation(context.Background(), plugin.Invocation{FeatureKey: featureEcho, Command: "echo", Arguments: "Hello"})
+	err = instance.Handle(ctx, &ws.MessageEvent{MessageID: 20})
+	// [决策理由] 热应用不能改变正常停止传播语义。
+	if !errors.Is(err, plugin.ErrStopPropagation) {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	// [决策理由] Handle 必须从原子快照读取并拼接配置前缀。
+	if messenger.reply != "[bot] Hello" {
+		t.Fatalf("reply = %q", messenger.reply)
+	}
+	tooLong, err := json.Marshal(map[string]string{"response_prefix": strings.Repeat("前", 101)})
+	// [决策理由] 测试输入编码失败会让边界断言失去意义。
+	if err != nil {
+		t.Fatal(err)
+	}
+	// [决策理由] 领域长度限制必须拒绝无界回复放大。
+	if err := configurable.ValidateConfig(context.Background(), tooLong); err == nil {
+		t.Fatal("ValidateConfig() expected length error")
+	}
+
+	// >>> 数据演变示例
+	// 1. prefix=[bot]+Hello -> 原子发布 -> 回复[bot] Hello。
+	// 2. prefix为101字符 -> ValidateConfig拒绝 -> 旧快照保持不变。
 }
 
 // Reply 实现测试未使用的普通回复能力。
