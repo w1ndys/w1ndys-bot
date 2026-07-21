@@ -15,12 +15,15 @@ import (
 type FieldType string
 
 const (
-	FieldString    FieldType = "string"
-	FieldMultiline FieldType = "multiline"
-	FieldInteger   FieldType = "integer"
-	FieldBoolean   FieldType = "boolean"
-	FieldEnum      FieldType = "enum"
-	FieldSecret    FieldType = "secret"
+	FieldString               FieldType = "string"
+	FieldMultiline            FieldType = "multiline"
+	FieldInteger              FieldType = "integer"
+	FieldBoolean              FieldType = "boolean"
+	FieldEnum                 FieldType = "enum"
+	FieldSecret               FieldType = "secret"
+	FieldStringListJSON       FieldType = "string_list_json"
+	FieldWeightedTermsJSON    FieldType = "weighted_terms_json"
+	FieldCombinationRulesJSON FieldType = "combination_rules_json"
 )
 
 // ConfigField 描述一个稳定、扁平的插件配置字段。
@@ -229,7 +232,7 @@ func RedactConfig(schema ConfigSchema, raw json.RawMessage) (json.RawMessage, er
 // @returns 是否受支持。
 // ⚠️副作用说明：无。
 func validFieldType(fieldType FieldType) bool {
-	valid := fieldType == FieldString || fieldType == FieldMultiline || fieldType == FieldInteger || fieldType == FieldBoolean || fieldType == FieldEnum || fieldType == FieldSecret
+	valid := fieldType == FieldString || fieldType == FieldMultiline || fieldType == FieldInteger || fieldType == FieldBoolean || fieldType == FieldEnum || fieldType == FieldSecret || fieldType == FieldStringListJSON || fieldType == FieldWeightedTermsJSON || fieldType == FieldCombinationRulesJSON
 
 	// >>> 数据演变示例
 	// 1. boolean -> true。
@@ -295,6 +298,16 @@ func validateFieldValue(field ConfigField, raw json.RawMessage) error {
 		if _, ok := value.(string); !ok {
 			return errors.New("必须是字符串")
 		}
+	case FieldStringListJSON, FieldWeightedTermsJSON, FieldCombinationRulesJSON:
+		text, ok := value.(string)
+		// [决策理由] 结构化编辑器仍以JSON字符串兼容既有config_json，禁止客户端改写存储形态。
+		if !ok {
+			return errors.New("必须是结构化JSON字符串")
+		}
+		// [决策理由] 服务端必须独立校验编辑器输出，不能信任前端生成的内部JSON。
+		if err := validateStructuredJSONText(field.Type, text); err != nil {
+			return err
+		}
 	case FieldInteger:
 		number, ok := value.(json.Number)
 		// [决策理由] integer 不接受字符串、浮点数或指数产生的非整数。
@@ -335,6 +348,59 @@ func validateFieldValue(field ConfigField, raw json.RawMessage) error {
 	// >>> 数据演变示例
 	// 1. integer+42 -> json.Number.Int64成功 -> nil。
 	// 2. enum[fast]+"slow" -> 未匹配 -> 返回错误。
+	return nil
+}
+
+type weightedTermValue struct {
+	Text   string  `json:"text"`
+	Weight float64 `json:"weight"`
+}
+
+type combinationRuleValue struct {
+	Terms []string `json:"terms"`
+	Bonus float64  `json:"bonus"`
+}
+
+// validateStructuredJSONText 严格校验三种结构化编辑器的内部JSON形状。
+// @param fieldType：结构化字段类型；text：外层配置字符串中的JSON文本。
+// @returns 结构、未知字段或尾随值错误。
+// ⚠️副作用说明：无。
+func validateStructuredJSONText(fieldType FieldType, text string) error {
+	trimmed := strings.TrimSpace(text)
+	// [决策理由] 结构化配置必须是有界数组，拒绝null、对象和过大文本占用解析资源。
+	if len(trimmed) > 65536 {
+		return errors.New("结构化JSON不能超过65536字节")
+	}
+	// [决策理由] 三种编辑器根节点都固定为数组，先验检查防止null被类型化解码为nil切片。
+	if trimmed == "" || trimmed[0] != '[' {
+		return errors.New("结构化JSON根节点必须是数组")
+	}
+	var target any
+	switch fieldType {
+	case FieldStringListJSON:
+		target = &[]string{}
+	case FieldWeightedTermsJSON:
+		target = &[]weightedTermValue{}
+	case FieldCombinationRulesJSON:
+		target = &[]combinationRuleValue{}
+	default:
+		return fmt.Errorf("类型 %q 不是结构化JSON字段", fieldType)
+	}
+	decoder := json.NewDecoder(strings.NewReader(trimmed))
+	decoder.DisallowUnknownFields()
+	// [决策理由] 内部JSON必须严格匹配声明结构，避免拼写错误被静默忽略。
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("结构化JSON无效: %w", err)
+	}
+	var trailing any
+	// [决策理由] 单个数组后不允许尾随第二个JSON值。
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("结构化JSON包含多余内容")
+	}
+
+	// >>> 数据演变示例
+	// 1. weighted_terms_json+[{"text":"免费","weight":10}] -> nil。
+	// 2. combination_rules_json含unknown或尾随对象 -> error。
 	return nil
 }
 

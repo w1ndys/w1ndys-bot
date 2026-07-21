@@ -28,6 +28,10 @@ func TestDefaultRuntimeConfigBuildsWithoutLLM(t *testing.T) {
 	if err != nil || snapshot.engine == nil || snapshot.evaluator != nil {
 		t.Fatalf("buildRuntimeSnapshot() snapshot=%+v error=%v", snapshot, err)
 	}
+	// [决策理由] 新安装和历史配置都必须得到默认30字符的模型调用门槛。
+	if snapshot.minLLMMessageLength != 30 {
+		t.Fatalf("minLLMMessageLength=%d", snapshot.minLLMMessageLength)
+	}
 
 	// >>> 数据演变示例
 	// 1. {} -> Schema默认值 -> engine+nil evaluator。

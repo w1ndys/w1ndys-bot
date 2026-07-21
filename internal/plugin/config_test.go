@@ -85,6 +85,40 @@ func TestConfigSchemaValidate(t *testing.T) {
 	// 2. secret默认明文 -> Validate -> 返回敏感默认值错误。
 }
 
+// TestStructuredJSONConfigFields 验证结构化编辑器字段保持字符串存储并严格校验内部数组。
+// @param t：测试上下文。
+// @returns 无。
+// ⚠️副作用说明：无。
+func TestStructuredJSONConfigFields(t *testing.T) {
+	tests := []struct {
+		name      string
+		fieldType FieldType
+		value     string
+		valid     bool
+	}{
+		{name: "字符串列表", fieldType: FieldStringListJSON, value: `["广告","引流"]`, valid: true},
+		{name: "权重词条", fieldType: FieldWeightedTermsJSON, value: `[{"text":"免费","weight":25}]`, valid: true},
+		{name: "组合规则", fieldType: FieldCombinationRulesJSON, value: `[{"terms":["免费","加群"],"bonus":20}]`, valid: true},
+		{name: "未知字段", fieldType: FieldWeightedTermsJSON, value: `[{"text":"免费","weight":25,"extra":1}]`},
+		{name: "错误根类型", fieldType: FieldStringListJSON, value: `{"text":"广告"}`},
+		{name: "空根节点", fieldType: FieldStringListJSON, value: `null`},
+		{name: "尾随值", fieldType: FieldCombinationRulesJSON, value: `[] {}`},
+	}
+	for _, test := range tests {
+		field := ConfigField{Key: "rules", DisplayName: "规则", Type: test.fieldType}
+		raw, _ := json.Marshal(test.value)
+		err := validateFieldValue(field, raw)
+		// [决策理由] 内部JSON形状必须与字段类型的稳定契约一致。
+		if (err == nil) != test.valid {
+			t.Errorf("%s: error=%v valid=%v", test.name, err, test.valid)
+		}
+	}
+
+	// >>> 数据演变示例
+	// 1. 外层字符串+合法规则数组 -> nil并保持字符串存储。
+	// 2. 未知字段/错误根/尾随值 -> error。
+}
+
 // TestNormalizeConfig 验证严格字段、默认值、required 和类型校验。
 // @param t：测试上下文。
 // @returns 无。

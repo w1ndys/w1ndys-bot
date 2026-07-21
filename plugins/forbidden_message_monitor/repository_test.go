@@ -12,16 +12,36 @@ import (
 )
 
 type fakeMonitorRepository struct {
-	reviewCalls   int
-	lastStatus    string
-	record        management.ResourceRecord
-	err           error
-	whitelisted   bool
-	created       []violationCreate
-	stored        storedViolation
-	reserveCalls  int
-	completeCalls int
-	reserveErr    error
+	reviewCalls      int
+	lastStatus       string
+	record           management.ResourceRecord
+	err              error
+	whitelisted      bool
+	created          []violationCreate
+	stored           storedViolation
+	reserveCalls     int
+	completeCalls    int
+	reserveErr       error
+	reserveDenied    bool
+	trainingMessage  string
+	trainingFeatures []string
+	trainingExists   bool
+}
+
+// TrainingSampleExists 返回测试预置的重复样本状态。
+// @param ctx/message：查询上下文与样本原文。
+// @returns 预置存在标记或错误。
+// ⚠️副作用说明：无。
+func (f *fakeMonitorRepository) TrainingSampleExists(context.Context, string) (bool, error) {
+	// [决策理由] 仓储错误优先于存在标记，模拟数据库检查失败。
+	if f.err != nil {
+		return false, f.err
+	}
+
+	// >>> 数据演变示例
+	// 1. trainingExists=true -> true,nil。
+	// 2. 默认fake -> false,nil。
+	return f.trainingExists, nil
 }
 
 // IncrementValidSpeech 实现测试仓储契约。
@@ -214,6 +234,72 @@ func (f *fakeMonitorRepository) ActiveWeightOffsets(context.Context, time.Time) 
 	return map[string]float64{}, nil
 }
 
+// LearnedKeywordWeights 实现测试仓储契约。
+// @param ctx：查询上下文。
+// @returns 空学习权重。
+// ⚠️副作用说明：无。
+func (f *fakeMonitorRepository) LearnedKeywordWeights(context.Context) (map[string]float64, error) {
+	// >>> 数据演变示例
+	// 1. 空fake -> {}。
+	// 2. 重复调用 -> 仍为空。
+	return map[string]float64{}, nil
+}
+
+// TryReserveLLMRequest 实现测试仓储契约。
+// @param ctx/at/limit：额度参数。
+// @returns 始终预占成功。
+// ⚠️副作用说明：无。
+func (f *fakeMonitorRepository) TryReserveLLMRequest(context.Context, time.Time, int) (bool, error) {
+	// [决策理由] 显式配置错误优先返回，用于验证外部调用前的失败边界。
+	if f.reserveErr != nil {
+		return false, f.reserveErr
+	}
+	// [决策理由] 测试设置过额度调用时返回拒绝，默认fake仍保持成功。
+	if f.reserveDenied {
+		return false, nil
+	}
+	// >>> 数据演变示例
+	// 1. limit500 -> true。
+	// 2. 次日调用 -> true。
+	return true, nil
+}
+
+// CreateTrainingSample 实现测试仓储契约。
+// @param ctx/actor/message/features：训练样本参数。
+// @returns fake记录或预设错误。
+// ⚠️副作用说明：复用record保存返回值。
+func (f *fakeMonitorRepository) CreateTrainingSample(_ context.Context, _ management.Actor, message string, features []string) (management.ResourceRecord, error) {
+	f.trainingMessage = message
+	f.trainingFeatures = append([]string(nil), features...)
+	// >>> 数据演变示例
+	// 1. 合法样本 -> 返回fake record。
+	// 2. 预设错误 -> record,error。
+	return f.record, f.err
+}
+
+// ListTrainingSamples 实现测试仓储契约。
+// @param ctx/query：分页参数。
+// @returns 含fake记录的分页。
+// ⚠️副作用说明：无。
+func (f *fakeMonitorRepository) ListTrainingSamples(_ context.Context, query management.ResourceQuery) (management.ResourcePage, error) {
+	result := management.ResourcePage{Items: []management.ResourceRecord{f.record}, Page: query.Page, PageSize: query.PageSize, Total: 1}
+	// >>> 数据演变示例
+	// 1. page1 -> fake记录页。
+	// 2. 预设错误 -> 页+error。
+	return result, f.err
+}
+
+// DeleteTrainingSample 实现测试仓储契约。
+// @param ctx/actor/id/version：删除参数。
+// @returns 预设错误。
+// ⚠️副作用说明：无。
+func (f *fakeMonitorRepository) DeleteTrainingSample(context.Context, management.Actor, int64, int64) error {
+	// >>> 数据演变示例
+	// 1. id1/v1 -> nil。
+	// 2. 预设错误 -> error。
+	return f.err
+}
+
 // ListPending 返回fake分页。
 // @param ctx/query：查询参数。
 // @returns 包含fake记录的页或预置错误。
@@ -322,8 +408,8 @@ func TestDecodeReviewStatus(t *testing.T) {
 // @returns 无。
 // ⚠️副作用说明：无。
 func TestTransitionRules(t *testing.T) {
-	// [决策理由] 普通复核事务只处理确认；误报必须走解禁预占状态机。
-	if !reviewAllowedTransition(statusPendingReview, statusConfirmedPendingKick) || reviewAllowedTransition(statusPendingReview, statusFalsePositive) {
+	// [决策理由] 普通复核事务处理确认，也允许从未禁言的Medium记录直接沉淀误报。
+	if !reviewAllowedTransition(statusPendingReview, statusConfirmedPendingKick) || !reviewAllowedTransition(statusPendingReview, statusFalsePositive) {
 		t.Fatal("reviewAllowedTransition() rejected supported review")
 	}
 	// [决策理由] 已终结记录不能通过WebUI被改写。
@@ -370,7 +456,7 @@ func TestViolationResourceHandlerUpdate(t *testing.T) {
 // @returns 无。
 // ⚠️副作用说明：修改fake Action与仓储调用记录。
 func TestViolationResourceHandlerUnbansBeforeFalsePositive(t *testing.T) {
-	fake := &fakeMonitorRepository{record: management.ResourceRecord{ID: 7, Version: 2}, stored: storedViolation{ID: 7, Version: 1, Data: violationData{GroupID: 100, UserID: 200, Status: statusPendingReview}}}
+	fake := &fakeMonitorRepository{record: management.ResourceRecord{ID: 7, Version: 2}, stored: storedViolation{ID: 7, Version: 1, Data: violationData{GroupID: 100, UserID: 200, Status: statusPendingReview, ActionResult: json.RawMessage(`{"ban_succeeded":true}`)}}}
 	actions := &fakeActions{}
 	handler := &violationResourceHandler{repository: fake, actions: actions}
 	_, err := handler.Update(context.Background(), management.Actor{}, 7, 1, json.RawMessage(`{"status":"误报"}`))
@@ -389,4 +475,39 @@ func TestViolationResourceHandlerUnbansBeforeFalsePositive(t *testing.T) {
 	// >>> 数据演变示例
 	// 1. set_group_ban duration0成功 -> Review(false_positive)。
 	// 2. 解禁失败 -> Review不调用 -> 保留pending。
+}
+
+// TestViolationResourceHandlerDoesNotUnbanManualReview 验证未自动禁言记录的误报不发送解禁Action。
+// @param t：测试上下文。
+// @returns 无。
+// ⚠️副作用说明：仅修改fake仓储调用记录。
+func TestViolationResourceHandlerDoesNotUnbanManualReview(t *testing.T) {
+	fake := &fakeMonitorRepository{record: management.ResourceRecord{ID: 7, Version: 2}, stored: storedViolation{ID: 7, Version: 1, Data: violationData{GroupID: 100, UserID: 200, Status: statusPendingReview, ActionResult: json.RawMessage(`{"ban_succeeded":false}`)}}}
+	actions := &fakeActions{}
+	handler := &violationResourceHandler{repository: fake, actions: actions}
+	_, err := handler.Update(context.Background(), management.Actor{}, 7, 1, json.RawMessage(`{"status":"误报"}`))
+	// [决策理由] Medium人工复核未执行过禁言，误报应直接写反馈而不调用OneBot解禁。
+	if err != nil || len(actions.banParams) != 0 || fake.lastStatus != statusFalsePositive {
+		t.Fatalf("Update() error=%v bans=%+v status=%q", err, actions.banParams, fake.lastStatus)
+	}
+
+	// >>> 数据演变示例
+	// 1. ban_succeeded=false+误报 -> Review(false_positive)且0次Action。
+	// 2. ban_succeeded=true+误报 -> 由另一测试验证先解禁后终态。
+}
+
+// TestBaseLearningFeaturesFiltersModelLabels 验证正向学习只接受原文中的具体有界词。
+// @param t：测试上下文。
+// @returns 无。
+// ⚠️副作用说明：无。
+func TestBaseLearningFeaturesFiltersModelLabels(t *testing.T) {
+	features, err := baseLearningFeatures("免费资料，扫码领取", json.RawMessage(`["免费资料","身份伪装","扫码领取","免费资料"]`))
+	// [决策理由] 重复词应去重，不在原文的模型维度标签必须过滤。
+	if err != nil || len(features) != 2 || features[0] != "免费资料" || features[1] != "扫码领取" {
+		t.Fatalf("baseLearningFeatures() = %+v, %v", features, err)
+	}
+
+	// >>> 数据演变示例
+	// 1. 原文词+重复+模型标签 -> 两个具体去重词。
+	// 2. 非数组JSON -> 返回解析错误。
 }

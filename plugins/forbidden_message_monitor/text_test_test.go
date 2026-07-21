@@ -65,3 +65,28 @@ func TestTextTestResourceRejectsInvalidPayload(t *testing.T) {
 	// 1. {text:""} -> 空文本 -> ErrInvalidResourceData。
 	// 2. {text:"x",extra:true} -> 未知字段 -> ErrInvalidResourceData。
 }
+
+// TestTextTestResourceShowsLLMLengthFilter 验证试判准确展示仅模型阶段的长度放行。
+// @param t：Go测试上下文。
+// @returns 无。
+// ⚠️副作用说明：仅调用内存fake。
+func TestTextTestResourceShowsLLMLengthFilter(t *testing.T) {
+	instance := testImplementation()
+	evaluator := &fakeLLMEvaluator{result: LLMEvaluationResult{SuggestedAction: "pass"}}
+	current := instance.snapshot.Load()
+	instance.snapshot.Store(&runtimeSnapshot{engine: current.engine, engineConfig: current.engineConfig, evaluator: evaluator, llmTimeout: time.Second, detectionMode: detectionModeColdStart, llmMaxConcurrency: 2, llmDailyRequestLimit: 500, minLLMMessageLength: 30})
+	record, err := (&textTestResourceHandler{owner: instance}).Create(context.Background(), management.Actor{}, json.RawMessage(`{"text":"普通短消息"}`))
+	// [决策理由] 短消息试判应成功返回而不调用模型。
+	if err != nil || evaluator.calls != 0 {
+		t.Fatalf("Create() error=%v calls=%d", err, evaluator.calls)
+	}
+	var result textTestResult
+	// [决策理由] 前端需要稳定阶段名解释为何未调用模型。
+	if err := json.Unmarshal(record.Data, &result); err != nil || result.Stage != "llm_length_filter" || result.LLMUsed {
+		t.Fatalf("result=%+v error=%v", result, err)
+	}
+
+	// >>> 数据演变示例
+	// 1. cold_start+5字符+minimum30 -> llm_length_filter/pass。
+	// 2. evaluator存在 -> calls仍为0。
+}

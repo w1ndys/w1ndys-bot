@@ -18,6 +18,11 @@ import (
 
 const maxLLMResponseBytes = 1 << 20
 
+const (
+	detectionModeStandard  = "standard"
+	detectionModeColdStart = "cold_start"
+)
+
 type pluginConfig struct {
 	HardKeywordsJSON     string `json:"hard_keywords_json"`
 	WeightedKeywordsJSON string `json:"weighted_keywords_json"`
@@ -25,18 +30,26 @@ type pluginConfig struct {
 	CombinationsJSON     string `json:"combinations_json"`
 	LowThreshold         int    `json:"low_threshold"`
 	HighThreshold        int    `json:"high_threshold"`
+	DetectionMode        string `json:"detection_mode"`
 	LLMEnabled           bool   `json:"llm_enabled"`
 	LLMEndpoint          string `json:"llm_endpoint"`
 	LLMModel             string `json:"llm_model"`
 	LLMAPIKey            string `json:"llm_api_key"`
 	LLMTimeoutSeconds    int    `json:"llm_timeout_seconds"`
+	LLMMaxConcurrency    int    `json:"llm_max_concurrency"`
+	LLMDailyRequestLimit int    `json:"llm_daily_request_limit"`
+	MinLLMMessageLength  int    `json:"min_llm_message_length"`
 }
 
 type runtimeSnapshot struct {
-	engine       *Engine
-	engineConfig EngineConfig
-	evaluator    LLMEvaluator
-	llmTimeout   time.Duration
+	engine               *Engine
+	engineConfig         EngineConfig
+	evaluator            LLMEvaluator
+	llmTimeout           time.Duration
+	detectionMode        string
+	llmMaxConcurrency    int
+	llmDailyRequestLimit int
+	minLLMMessageLength  int
 }
 
 type openAICompatibleEvaluator struct {
@@ -52,17 +65,21 @@ type openAICompatibleEvaluator struct {
 // ⚠️副作用说明：无。
 func (p *implementation) ConfigSchema() plugin.ConfigSchema {
 	result := plugin.ConfigSchema{Fields: []plugin.ConfigField{
-		{Key: "hard_keywords_json", DisplayName: "硬性关键词 JSON", Description: "确定性零误报词数组，例如 [\"固定广告词\"]", Type: plugin.FieldMultiline, Default: json.RawMessage(`"[]"`)},
-		{Key: "weighted_keywords_json", DisplayName: "风险词权重 JSON", Description: "对象数组，例如 [{\"text\":\"免费\",\"weight\":25}]", Type: plugin.FieldMultiline, Default: json.RawMessage(`"[]"`)},
-		{Key: "safe_keywords_json", DisplayName: "安全词抵扣 JSON", Description: "对象数组，weight 表示扣减分值", Type: plugin.FieldMultiline, Default: json.RawMessage(`"[]"`)},
-		{Key: "combinations_json", DisplayName: "组合加成 JSON", Description: "例如 [{\"terms\":[\"免费\",\"加群\"],\"bonus\":20}]", Type: plugin.FieldMultiline, Default: json.RawMessage(`"[]"`)},
+		{Key: "hard_keywords_json", DisplayName: "硬性关键词", Description: "确定性零误报词；逐条添加，无需手写JSON", Type: plugin.FieldStringListJSON, Default: json.RawMessage(`"[]"`)},
+		{Key: "weighted_keywords_json", DisplayName: "风险词权重", Description: "逐条设置风险词及其加分", Type: plugin.FieldWeightedTermsJSON, Default: json.RawMessage(`"[]"`)},
+		{Key: "safe_keywords_json", DisplayName: "安全词抵扣", Description: "逐条设置安全词及其抵扣分值", Type: plugin.FieldWeightedTermsJSON, Default: json.RawMessage(`"[]"`)},
+		{Key: "combinations_json", DisplayName: "组合加成", Description: "设置需同时出现的关键词（逗号分隔）及组合加分", Type: plugin.FieldCombinationRulesJSON, Default: json.RawMessage(`"[]"`)},
 		{Key: "low_threshold", DisplayName: "低风险阈值", Description: "低于此分值直接放行", Type: plugin.FieldInteger, Default: json.RawMessage(`20`)},
 		{Key: "high_threshold", DisplayName: "高风险阈值", Description: "达到此分值直接处置", Type: plugin.FieldInteger, Default: json.RawMessage(`60`)},
+		{Key: "min_llm_message_length", DisplayName: "大模型最短消息长度", Description: "仅在消息即将进入大模型时生效；短于该Unicode字符数则直接放行，不影响硬关键词和本地高风险处置", Type: plugin.FieldInteger, Default: json.RawMessage(`30`)},
+		{Key: "detection_mode", DisplayName: "检测模式", Description: "常规模式仅中风险调用模型；冷启动模式将所有未被白名单或本地高风险规则处理的消息提交模型", Type: plugin.FieldEnum, Default: json.RawMessage(`"standard"`), Options: []string{detectionModeStandard, detectionModeColdStart}},
 		{Key: "llm_enabled", DisplayName: "启用大模型研判", Description: "启用后会将群消息原文、近期行为摘要及近期人工正反案例发送到所配置的外部服务", Type: plugin.FieldBoolean, Default: json.RawMessage(`false`)},
 		{Key: "llm_endpoint", DisplayName: "大模型接口地址", Description: "OpenAI-compatible chat/completions 完整 URL；远程服务必须使用 HTTPS，HTTP 仅允许本机回环地址", Type: plugin.FieldString, Default: json.RawMessage(`""`)},
 		{Key: "llm_model", DisplayName: "大模型名称", Type: plugin.FieldString, Default: json.RawMessage(`""`)},
 		{Key: "llm_api_key", DisplayName: "大模型 API Key", Description: "只写字段，留空保留原值", Type: plugin.FieldSecret},
 		{Key: "llm_timeout_seconds", DisplayName: "大模型超时秒数", Type: plugin.FieldInteger, Default: json.RawMessage(`20`)},
+		{Key: "llm_max_concurrency", DisplayName: "大模型最大并发", Description: "达到并发上限时新消息安全放行", Type: plugin.FieldInteger, Default: json.RawMessage(`2`)},
+		{Key: "llm_daily_request_limit", DisplayName: "大模型每日请求上限", Description: "按UTC自然日跨重启累计，达到上限后消息安全放行", Type: plugin.FieldInteger, Default: json.RawMessage(`500`)},
 	}}
 
 	// >>> 数据演变示例
@@ -106,7 +123,12 @@ func (p *implementation) ApplyConfig(ctx context.Context, raw json.RawMessage) e
 	currentOffsets := p.offsets.Load()
 	// [决策理由] 配置热更新后必须重新叠加当日反馈补丁，避免偏移提前失效。
 	if currentOffsets != nil {
-		return p.publishWeightOffsets(*currentOffsets)
+		negativeFeatures := map[string]struct{}{}
+		// [决策理由] 热更新必须保留哪些词已有误报证据，不能仅凭正负净权重恢复硬拦截。
+		if currentNegative := p.negative.Load(); currentNegative != nil {
+			negativeFeatures = *currentNegative
+		}
+		return p.publishWeightOffsets(*currentOffsets, negativeFeatures)
 	}
 
 	// >>> 数据演变示例
@@ -126,6 +148,22 @@ func buildRuntimeSnapshot(raw json.RawMessage, client *http.Client) (*runtimeSna
 	// [决策理由] 插件自身必须防御绕过平台直接调用时的未知字段。
 	if err := decoder.Decode(&config); err != nil {
 		return nil, fmt.Errorf("解析违禁监控配置: %w", err)
+	}
+	// [决策理由] 兼容引入检测模式前保存的配置和包内构造调用，缺失值按常规模式解释。
+	if config.DetectionMode == "" {
+		config.DetectionMode = detectionModeStandard
+	}
+	// [决策理由] 兼容新增限额字段前的包内配置和历史快照，缺失值采用保守默认值。
+	if config.LLMMaxConcurrency == 0 {
+		config.LLMMaxConcurrency = 2
+	}
+	// [决策理由] 历史配置没有每日额度字段时使用明确有限的默认请求数。
+	if config.LLMDailyRequestLimit == 0 {
+		config.LLMDailyRequestLimit = 500
+	}
+	// [决策理由] 历史配置缺少最短模型消息长度时采用新功能默认值30。
+	if config.MinLLMMessageLength == 0 {
+		config.MinLLMMessageLength = 30
 	}
 	engineConfig := DefaultEngineConfig()
 	engineConfig.LowThreshold = float64(config.LowThreshold)
@@ -155,7 +193,27 @@ func buildRuntimeSnapshot(raw json.RawMessage, client *http.Client) (*runtimeSna
 	if config.LLMTimeoutSeconds < 1 || config.LLMTimeoutSeconds > 120 {
 		return nil, fmt.Errorf("llm_timeout_seconds 必须在1到120之间")
 	}
-	result := &runtimeSnapshot{engine: engine, engineConfig: engineConfig, llmTimeout: time.Duration(config.LLMTimeoutSeconds) * time.Second}
+	// [决策理由] 并发必须为小型正整数，避免外部模型迟滞耗尽事件处理资源。
+	if config.LLMMaxConcurrency < 1 || config.LLMMaxConcurrency > 32 {
+		return nil, fmt.Errorf("llm_max_concurrency 必须在1到32之间")
+	}
+	// [决策理由] 每日额度必须为正且有合理上界，防止误配置导致无界费用。
+	if config.LLMDailyRequestLimit < 1 || config.LLMDailyRequestLimit > 1000000 {
+		return nil, fmt.Errorf("llm_daily_request_limit 必须在1到1000000之间")
+	}
+	// [决策理由] 模型长度门槛必须有界，避免误配置让全部合法消息永久绕过研判。
+	if config.MinLLMMessageLength < 1 || config.MinLLMMessageLength > maxTextTestRunes {
+		return nil, fmt.Errorf("min_llm_message_length 必须在1到%d之间", maxTextTestRunes)
+	}
+	// [决策理由] 检测模式决定低风险消息是否会携带群消息原文发往外部模型，必须显式限制为已声明值。
+	if config.DetectionMode != detectionModeStandard && config.DetectionMode != detectionModeColdStart {
+		return nil, fmt.Errorf("detection_mode 必须为 standard 或 cold_start")
+	}
+	// [决策理由] 冷启动模式承诺所有非白名单消息接受模型研判，关闭模型会造成静默全量放行。
+	if config.DetectionMode == detectionModeColdStart && !config.LLMEnabled {
+		return nil, fmt.Errorf("冷启动模式必须启用大模型")
+	}
+	result := &runtimeSnapshot{engine: engine, engineConfig: engineConfig, llmTimeout: time.Duration(config.LLMTimeoutSeconds) * time.Second, detectionMode: config.DetectionMode, llmMaxConcurrency: config.LLMMaxConcurrency, llmDailyRequestLimit: config.LLMDailyRequestLimit, minLLMMessageLength: config.MinLLMMessageLength}
 	// [决策理由] LLM关闭时不得要求凭据或创建外部调用器。
 	if !config.LLMEnabled {
 		return result, nil
@@ -299,7 +357,7 @@ func (e *openAICompatibleEvaluator) Evaluate(ctx context.Context, request LLMEva
 		httpRequest.Header.Set("Authorization", "Bearer "+e.apiKey)
 	}
 	response, err := e.client.Do(httpRequest)
-	// [决策理由] 网络错误必须由检测管线转人工，不能视为安全或违规。
+	// [决策理由] 网络错误必须返回检测管线，由其按失败开放策略记录并放行。
 	if err != nil {
 		return LLMEvaluationResult{}, fmt.Errorf("调用大模型: %w", err)
 	}
@@ -337,4 +395,4 @@ func (e *openAICompatibleEvaluator) Evaluate(ctx context.Context, request LLMEva
 	return result, err
 }
 
-const llmSystemPrompt = `你是QQ群广告与引流审核器。仅输出JSON对象，字段必须为risk_level、total_score、reason、violations、suggested_action。检查硬广告引流、紧迫性施压、利益诱导、身份伪装和内容真伪。risk_level只能是High/Medium/Low/Safe，suggested_action只能是block/manual_review/pass。不要输出Markdown。`
+const llmSystemPrompt = `你是QQ群广告与引流审核器。仅输出JSON对象，字段必须为risk_level、total_score、reason、violations、suggested_action。检查硬广告引流、紧迫性施压、利益诱导、身份伪装和内容真伪。risk_level只能是High/Medium/Low/Safe；High必须对应block，Medium必须对应manual_review，Low或Safe必须对应pass。violations只输出消息原文中实际出现、可用于风险学习的具体短词，不要输出抽象分类标签。不要输出Markdown。`

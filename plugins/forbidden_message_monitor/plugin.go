@@ -37,18 +37,24 @@ var manifest = plugin.Manifest{
 }
 
 type implementation struct {
-	actions      plugin.ActionAPI
-	repository   monitorRepository
-	httpClient   *http.Client
-	snapshot     atomic.Pointer[runtimeSnapshot]
-	offsets      atomic.Pointer[map[string]float64]
-	resources    []plugin.AdminResourceRegistration
-	transitionMu sync.Mutex
-	lifecycleMu  sync.Mutex
-	cancel       context.CancelFunc
-	done         chan struct{}
-	desiredOn    bool
-	now          func() time.Time
+	actions       plugin.ActionAPI
+	repository    monitorRepository
+	httpClient    *http.Client
+	snapshot      atomic.Pointer[runtimeSnapshot]
+	offsets       atomic.Pointer[map[string]float64]
+	negative      atomic.Pointer[map[string]struct{}]
+	resources     []plugin.AdminResourceRegistration
+	transitionMu  sync.Mutex
+	lifecycleMu   sync.Mutex
+	llmMu         sync.Mutex
+	llmActive     int
+	trialMu       sync.Mutex
+	trials        map[int64]trustedTextTrial
+	trialSequence int64
+	cancel        context.CancelFunc
+	done          chan struct{}
+	desiredOn     bool
+	now           func() time.Time
 }
 
 type moderationOutcome struct {
@@ -125,56 +131,98 @@ func (p *implementation) handleMessage(ctx context.Context, message *ws.MessageE
 		return fmt.Errorf("违禁消息检测配置尚未初始化")
 	}
 	exact := snapshot.engine.CheckExactText(message.RawMessage)
+	score := snapshot.engine.Score(message.RawMessage)
 	// [决策理由] 管理员明确配置的硬词属于确定性证据，可直接处置。
 	if exact.Blocked {
 		return p.moderateAndRecord(ctx, message, now, "precise_rule", nil, strings.Join(exact.Reasons, ","), learnableExactFeatures(exact.Reasons))
 	}
-	score := snapshot.engine.Score(message.RawMessage)
 	// [决策理由] 高分消息无需承担大模型成本，直接按加权证据处置。
 	if score.Band == RiskBandHigh {
 		riskScore := boundedScore(score.Score)
 		return p.moderateAndRecord(ctx, message, now, "weighted_score", &riskScore, "加权关键词评分达到高风险阈值", score.MatchedRisk)
 	}
-	// [决策理由] 低分消息直接放行，保持成本优先原则。
+	// [决策理由] 长度门槛只控制外部模型调用，必须位于硬词和本地高风险判断之后。
+	if messageBelowLLMMinimum(message.RawMessage, snapshot.minLLMMessageLength) {
+		return nil
+	}
+	// [决策理由] 冷启动模式将所有未被本地高风险规则处理且达到长度门槛的消息送入模型。
+	if snapshot.detectionMode == detectionModeColdStart {
+		return p.handleLLMRisk(ctx, message, now, snapshot, score)
+	}
+	// [决策理由] 常规模式低分消息直接放行，保持稳定运行成本。
 	if score.Band == RiskBandLow {
 		return nil
 	}
-	return p.handleMediumRisk(ctx, message, now, snapshot, score)
+	return p.handleLLMRisk(ctx, message, now, snapshot, score)
 
 	// >>> 数据演变示例
 	// 1. 白名单命中 -> 计数后直接nil，不运行规则。
 	// 2. 中分 -> 行为摘要+Few-shot+LLM；未配置或失败则仅登记人工复核。
 }
 
-// handleMediumRisk 对边界消息执行大模型研判或安全降级人工复核。
+// messageBelowLLMMinimum 判断消息是否短于外部模型调用门槛。
+// @param message：消息原文；minimum：最少Unicode字符数。
+// @returns 去首尾空白后的字符数小于门槛时为true。
+// ⚠️副作用说明：无。
+func messageBelowLLMMinimum(message string, minimum int) bool {
+	result := len([]rune(strings.TrimSpace(message))) < minimum
+
+	// >>> 数据演变示例
+	// 1. minimum30+29个汉字 -> true，跳过LLM。
+	// 2. minimum30+30个汉字 -> false，可进入LLM。
+	return result
+}
+
+// handleLLMRisk 对冷启动或边界消息执行大模型研判。
 // @param ctx：事件上下文；message/now：消息与时间；snapshot：运行快照；score：本地评分证据。
 // @returns 模型、记录或自动处置错误。
 // ⚠️副作用说明：可能向外部模型发送消息内容，也可能写人工复核记录或执行处罚。
-func (p *implementation) handleMediumRisk(ctx context.Context, message *ws.MessageEvent, now time.Time, snapshot *runtimeSnapshot, score ScoreResult) error {
-	// [决策理由] 未配置模型时不能把不确定消息误当安全或违规，应仅进入人工复核。
+func (p *implementation) handleLLMRisk(ctx context.Context, message *ws.MessageEvent, now time.Time, snapshot *runtimeSnapshot, score ScoreResult) error {
+	// [决策理由] 模型未启用时安全放行，避免技术配置故障被写成用户违规或触发处罚。
 	if snapshot.evaluator == nil {
-		return p.recordManualReview(ctx, message, now, score, "大模型未启用")
+		projectlogger.Error("消息跳过大模型研判", "reason", "大模型未启用")
+		return nil
 	}
 	behavior, err := p.repository.BehaviorSummary(ctx, message.GroupID, message.UserID, speechWindowStart(now))
 	// [决策理由] 行为摘要不完整时不应提交缺失上下文的模型判断。
 	if err != nil {
-		return p.recordManualReview(ctx, message, now, score, "读取近期行为失败")
+		projectlogger.Error("消息读取近期行为失败，已放行", "error", err)
+		return nil
 	}
 	examples, err := p.repository.RecentExamples(ctx, message.GroupID, message.RawMessage, maxLLMExamples)
 	// [决策理由] Few-shot读取失败时降级人工，避免模型在缺少动态反馈时过度处罚。
 	if err != nil {
-		return p.recordManualReview(ctx, message, now, score, "读取人工案例失败")
+		projectlogger.Error("消息读取人工案例失败，已放行", "error", err)
+		return nil
 	}
 	request := LLMEvaluationRequest{Message: message.RawMessage, BehaviorSummary: formatBehaviorSummary(behavior), Examples: make([]LLMExample, 0, len(examples))}
 	for _, example := range examples {
 		request.Examples = append(request.Examples, LLMExample{Message: example.MessageContent, Violated: example.IsViolation})
+	}
+	// [决策理由] 并发饱和时安全放行，避免模型迟滞占满事件worker并扩大群消息积压。
+	if !p.tryAcquireLLM(snapshot.llmMaxConcurrency) {
+		projectlogger.Error("大模型并发已满，消息已放行")
+		return nil
+	}
+	defer p.releaseLLM()
+	reserved, err := p.repository.TryReserveLLMRequest(ctx, now, snapshot.llmDailyRequestLimit)
+	// [决策理由] 预算状态不可确认时禁止外部调用并安全放行。
+	if err != nil {
+		projectlogger.Error("大模型每日额度预占失败，消息已放行", "error", err)
+		return nil
+	}
+	// [决策理由] 当日额度耗尽时不发送消息原文到外部服务。
+	if !reserved {
+		projectlogger.Error("大模型每日额度已用尽，消息已放行")
+		return nil
 	}
 	llmContext, cancel := context.WithTimeout(ctx, snapshot.llmTimeout)
 	defer cancel()
 	result, err := snapshot.evaluator.Evaluate(llmContext, request)
 	// [决策理由] 模型不可用或协议漂移时只能转人工，绝不能默认处罚。
 	if err != nil {
-		return p.recordManualReview(ctx, message, now, score, "大模型研判失败")
+		projectlogger.Error("消息大模型研判失败，已放行", "error", err)
+		return nil
 	}
 	// [决策理由] pass是模型明确安全结论，直接放行。
 	if result.SuggestedAction == "pass" {
@@ -187,8 +235,44 @@ func (p *implementation) handleMediumRisk(ctx context.Context, message *ws.Messa
 	return p.moderateAndRecord(ctx, message, now, "llm", &result.TotalScore, result.Reason, result.Violations)
 
 	// >>> 数据演变示例
-	// 1. 模型Safe/pass -> nil放行。
-	// 2. 模型High/block -> 禁言+撤回+pending_review审计。
+	// 1. 冷启动低分+模型Safe/pass -> nil放行。
+	// 2. 任意本地分数+模型High/block -> 禁言+撤回+pending_review审计。
+}
+
+// tryAcquireLLM 非阻塞获取一个模型调用并发名额。
+// @param limit：当前配置允许的最大并发数。
+// @returns 获取成功为true，饱和为false。
+// ⚠️副作用说明：成功时递增进程内在途调用数，调用方必须release。
+func (p *implementation) tryAcquireLLM(limit int) bool {
+	p.llmMu.Lock()
+	defer p.llmMu.Unlock()
+	// [决策理由] 热更新降低并发上限后，现有在途请求允许完成，新请求必须立即遵守新上限。
+	if p.llmActive >= limit {
+		return false
+	}
+	p.llmActive++
+
+	// >>> 数据演变示例
+	// 1. active1/limit2 -> active2 -> true。
+	// 2. active2/limit2 -> 保持2 -> false。
+	return true
+}
+
+// releaseLLM 释放一个模型调用并发名额。
+// @param 无。
+// @returns 无。
+// ⚠️副作用说明：递减进程内在途调用数。
+func (p *implementation) releaseLLM() {
+	p.llmMu.Lock()
+	// [决策理由] 防御性下界保证异常调用不会把计数降为负数。
+	if p.llmActive > 0 {
+		p.llmActive--
+	}
+	p.llmMu.Unlock()
+
+	// >>> 数据演变示例
+	// 1. active2 -> release -> active1。
+	// 2. active0 -> release -> 保持0。
 }
 
 // recordManualReview 为模型不可用的中风险消息创建无自动处罚记录。
@@ -548,7 +632,29 @@ func (p *implementation) runMaintenance(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("读取有效权重偏移: %w", err)
 	}
-	return p.publishWeightOffsets(activeOffsets)
+	negativeFeatures := make(map[string]struct{}, len(activeOffsets))
+	for keyword := range activeOffsets {
+		negativeFeatures[strings.ToLower(strings.TrimSpace(keyword))] = struct{}{}
+	}
+	learnedWeights, err := p.repository.LearnedKeywordWeights(ctx)
+	// [决策理由] 正向学习读取失败时不能发布仅含负向反馈的部分规则快照。
+	if err != nil {
+		return fmt.Errorf("读取候选词学习权重: %w", err)
+	}
+	baseWeights := make(map[string]float64)
+	current := p.snapshot.Load()
+	// [决策理由] 只有基础配置可用时才能计算候选晋级相对已有权重的增量，避免重复累加。
+	if current == nil {
+		return fmt.Errorf("检测配置尚未初始化")
+	}
+	for _, rule := range current.engineConfig.WeightedKeywords {
+		baseWeights[strings.ToLower(strings.TrimSpace(rule.Text))] = rule.Weight
+	}
+	for keyword, weight := range learnedWeights {
+		key := strings.ToLower(strings.TrimSpace(keyword))
+		activeOffsets[key] += math.Max(0, weight-baseWeights[key])
+	}
+	return p.publishWeightOffsets(activeOffsets, negativeFeatures)
 
 	// >>> 数据演变示例
 	// 1. 活跃成员满足7天+2次 -> 新白名单；误判词2次 -> 当日delta=-4。
@@ -596,7 +702,7 @@ func (p *implementation) refreshGroupWhitelist(ctx context.Context, groupID int6
 // @param offsets：关键词到负向偏移。
 // @returns 引擎配置错误。
 // ⚠️副作用说明：成功时替换运行快照中的检测引擎，保留LLM客户端与超时。
-func (p *implementation) publishWeightOffsets(offsets map[string]float64) error {
+func (p *implementation) publishWeightOffsets(offsets map[string]float64, negativeFeatures map[string]struct{}) error {
 	current := p.snapshot.Load()
 	// [决策理由] 配置尚未发布时无法确定基础词库。
 	if current == nil {
@@ -614,14 +720,14 @@ func (p *implementation) publishWeightOffsets(offsets map[string]float64) error 
 	filteredHard := config.HardKeywords[:0]
 	for _, keyword := range config.HardKeywords {
 		// [决策理由] 被人工确认误报的硬词不再执行零容错拦截，转由后续负向评分处理。
-		if _, exists := storedOffsets[strings.ToLower(keyword)]; !exists {
+		if _, exists := negativeFeatures[strings.ToLower(strings.TrimSpace(keyword))]; !exists {
 			filteredHard = append(filteredHard, keyword)
 		}
 	}
 	config.HardKeywords = filteredHard
 	used := make(map[string]struct{})
 	for index := range config.WeightedKeywords {
-		key := strings.ToLower(config.WeightedKeywords[index].Text)
+		key := strings.ToLower(strings.TrimSpace(config.WeightedKeywords[index].Text))
 		// [决策理由] 仅命中已有风险词时降低其权重且不允许变为负数。
 		if delta, exists := storedOffsets[key]; exists {
 			config.WeightedKeywords[index].Weight = math.Max(0, config.WeightedKeywords[index].Weight+delta)
@@ -640,6 +746,13 @@ func (p *implementation) publishWeightOffsets(offsets map[string]float64) error 
 		// [决策理由] 未命中风险词的误判特征作为安全抵扣词叠加，负偏移转换为正抵扣权重。
 		if _, exists := used[keyword]; !exists && delta < 0 {
 			config.SafeKeywords = append(config.SafeKeywords, WeightedKeyword{Text: keyword, Weight: -delta})
+			used[keyword] = struct{}{}
+		}
+	}
+	for keyword, delta := range storedOffsets {
+		// [决策理由] 晋级候选若不在基础词库中，应作为新风险词加入且只计算一次。
+		if _, exists := used[keyword]; !exists && delta > 0 {
+			config.WeightedKeywords = append(config.WeightedKeywords, WeightedKeyword{Text: keyword, Weight: delta})
 		}
 	}
 	engine, err := NewEngine(config)
@@ -647,8 +760,13 @@ func (p *implementation) publishWeightOffsets(offsets map[string]float64) error 
 	if err != nil {
 		return fmt.Errorf("应用反馈权重: %w", err)
 	}
-	next := &runtimeSnapshot{engine: engine, engineConfig: current.engineConfig, evaluator: current.evaluator, llmTimeout: current.llmTimeout}
+	next := &runtimeSnapshot{engine: engine, engineConfig: current.engineConfig, evaluator: current.evaluator, llmTimeout: current.llmTimeout, detectionMode: current.detectionMode, llmMaxConcurrency: current.llmMaxConcurrency, llmDailyRequestLimit: current.llmDailyRequestLimit, minLLMMessageLength: current.minLLMMessageLength}
 	p.offsets.Store(&storedOffsets)
+	storedNegative := make(map[string]struct{}, len(negativeFeatures))
+	for keyword := range negativeFeatures {
+		storedNegative[strings.ToLower(strings.TrimSpace(keyword))] = struct{}{}
+	}
+	p.negative.Store(&storedNegative)
 	p.snapshot.Store(next)
 
 	// >>> 数据演变示例
@@ -683,20 +801,30 @@ func newPlugin(runtime plugin.Runtime) (plugin.Plugin, error) {
 	}
 	resource := plugin.AdminResource{
 		Key: "violations", DisplayName: "违规消息复核", Description: "查看自动检测证据并选择确认或误报",
-		Fields: []plugin.ConfigField{
-			{Key: "msg_content", DisplayName: "消息内容", Type: plugin.FieldMultiline},
-			{Key: "group_id", DisplayName: "群号", Type: plugin.FieldString},
-			{Key: "user_id", DisplayName: "用户QQ", Type: plugin.FieldString},
-			{Key: "reason", DisplayName: "判定理由", Type: plugin.FieldMultiline},
-			{Key: "status", DisplayName: "审核操作", Description: "确认后等待群内踢出；误报会解除禁言并沉淀反馈", Type: plugin.FieldEnum, Options: []string{"确认", "误报"}},
+		Fields: []plugin.ResourceField{
+			{Key: "msg_content", DisplayName: "消息内容", Type: plugin.ResourceFieldMultiline},
+			{Key: "group_id", DisplayName: "群号", Type: plugin.ResourceFieldString},
+			{Key: "user_id", DisplayName: "用户QQ", Type: plugin.ResourceFieldString},
+			{Key: "reason", DisplayName: "判定理由", Type: plugin.ResourceFieldMultiline},
+			{Key: "status", DisplayName: "审核操作", Description: "确认后等待群内踢出；误报会解除禁言并沉淀反馈", Type: plugin.ResourceFieldEnum, Options: []string{"确认", "误报"}},
 		},
 		ReadOnlyFields: []string{"msg_content", "group_id", "user_id", "reason"}, CanUpdate: true, MaxPageSize: 50,
 	}
-	testResource := plugin.AdminResource{Key: "text_tests", DisplayName: "文本试判", Description: "使用当前规则测试文本，不会禁言、撤回或写入违规审计", Fields: []plugin.ConfigField{{Key: "text", DisplayName: "测试文本", Type: plugin.FieldMultiline, Required: true}}, CanCreate: true, MaxPageSize: 50}
-	result.resources = []plugin.AdminResourceRegistration{{Descriptor: resource, Handler: &violationResourceHandler{repository: repository, actions: runtime.Actions}}, {Descriptor: testResource, Handler: &textTestResourceHandler{owner: result}}}
+	testResource := plugin.AdminResource{Key: "text_tests", DisplayName: "文本试判", Description: "使用当前规则测试文本，不会禁言、撤回或写入违规审计", Fields: []plugin.ResourceField{{Key: "text", DisplayName: "测试文本", Type: plugin.ResourceFieldMultiline, Required: true}}, CanCreate: true, Hidden: true, MaxPageSize: 50}
+	trainingResource := plugin.AdminResource{
+		Key: "training_samples", DisplayName: "违规训练样本", Description: "管理员主动确认的违规正例，会进入Few-shot并推动候选词晋级",
+		Fields: []plugin.ResourceField{
+			{Key: "msg_content", DisplayName: "样本原文", Type: plugin.ResourceFieldMultiline, Required: true},
+			{Key: "trial_id", DisplayName: "试判凭证", Description: "由文本试判页面自动传入，十分钟内有效", Type: plugin.ResourceFieldString, Required: true},
+			{Key: "keywords", DisplayName: "提取风险词", Type: plugin.ResourceFieldMultiline},
+			{Key: "created_at", DisplayName: "投喂时间", Type: plugin.ResourceFieldDateTime},
+		},
+		ReadOnlyFields: []string{"keywords", "created_at"}, CanCreate: true, CanDelete: true, MaxPageSize: 50,
+	}
+	result.resources = []plugin.AdminResourceRegistration{{Descriptor: resource, Handler: &violationResourceHandler{repository: repository, actions: runtime.Actions}}, {Descriptor: testResource, Handler: &textTestResourceHandler{owner: result}}, {Descriptor: trainingResource, Handler: &trainingSampleResourceHandler{owner: result}}}
 
 	// >>> 数据演变示例
-	// 1. Runtime{Actions,Database} -> 默认引擎+审核/文本试判资源 -> implementation。
+	// 1. Runtime{Actions,Database} -> 默认引擎+审核/文本试判/训练样本资源 -> implementation。
 	// 2. 缺Actions或Database -> Factory错误 -> 不注册运行实例。
 	return result, nil
 }

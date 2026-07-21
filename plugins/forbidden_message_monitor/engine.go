@@ -233,6 +233,10 @@ func DecodeLLMEvaluationResult(payload []byte) (LLMEvaluationResult, error) {
 	if !oneOf(result.SuggestedAction, "block", "manual_review", "pass") {
 		return LLMEvaluationResult{}, errors.New("invalid suggested_action")
 	}
+	// [决策理由] 风险等级与动作矛盾时不能选择性信任字段，必须视为模型协议失败并安全降级。
+	if (result.RiskLevel == "High" && result.SuggestedAction != "block") || (result.RiskLevel == "Medium" && result.SuggestedAction != "manual_review") || ((result.RiskLevel == "Low" || result.RiskLevel == "Safe") && result.SuggestedAction != "pass") {
+		return LLMEvaluationResult{}, errors.New("risk_level and suggested_action are inconsistent")
+	}
 	// [决策理由] 可审计研判必须提供理由且敏感词数组不能为null。
 	if strings.TrimSpace(result.Reason) == "" || result.Violations == nil {
 		return LLMEvaluationResult{}, errors.New("reason and violations are required")

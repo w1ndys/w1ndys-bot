@@ -159,6 +159,7 @@ func TestDecodeLLMEvaluationResult(t *testing.T) {
 		[]byte(`{"risk_level":"Safe","total_score":101,"reason":"x","violations":[],"suggested_action":"pass"}`),
 		[]byte(`{"risk_level":"Safe","total_score":1,"reason":"x","violations":[],"suggested_action":"pass","unknown":true}`),
 		[]byte(`{"risk_level":"Safe","total_score":1,"reason":"x","violations":[],"suggested_action":"pass"} {}`),
+		[]byte(`{"risk_level":"High","total_score":90,"reason":"x","violations":["x"],"suggested_action":"pass"}`),
 	}
 	for _, payload := range invalidPayloads {
 		_, decodeErr := DecodeLLMEvaluationResult(payload)

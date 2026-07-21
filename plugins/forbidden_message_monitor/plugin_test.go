@@ -29,6 +29,25 @@ type blockingMaintenanceRepository struct {
 	release chan struct{}
 }
 
+type fakeLLMEvaluator struct {
+	calls  int
+	result LLMEvaluationResult
+	err    error
+}
+
+// Evaluate 返回预设模型结论并记录调用次数。
+// @param ctx/request：模型调用参数。
+// @returns 预设结果与错误。
+// ⚠️副作用说明：递增calls。
+func (f *fakeLLMEvaluator) Evaluate(context.Context, LLMEvaluationRequest) (LLMEvaluationResult, error) {
+	f.calls++
+
+	// >>> 数据演变示例
+	// 1. Low/pass -> calls1 -> 返回安全结论。
+	// 2. 预设error -> calls+1 -> 返回error。
+	return f.result, f.err
+}
+
 // ListObservedGroups 模拟不及时响应取消的外部维护调用。
 // @param ctx：维护上下文。
 // @returns release关闭后返回空群集合。
@@ -291,6 +310,101 @@ func TestHandleIgnoresUnsupportedEvents(t *testing.T) {
 	// >>> 数据演变示例
 	// 1. private/message_sent -> nil且不访问仓储。
 	// 2. heartbeat -> nil且不访问Action。
+}
+
+// TestColdStartSendsLowRiskMessageToLLM 验证冷启动模式不会因空词库零分绕过模型。
+// @param t：Go测试上下文。
+// @returns 无。
+// ⚠️副作用说明：调用内存fake模型一次。
+func TestColdStartSendsLowRiskMessageToLLM(t *testing.T) {
+	instance := testImplementation()
+	evaluator := &fakeLLMEvaluator{result: LLMEvaluationResult{RiskLevel: "Low", TotalScore: 5, Reason: "普通交流", Violations: []string{}, SuggestedAction: "pass"}}
+	current := instance.snapshot.Load()
+	instance.snapshot.Store(&runtimeSnapshot{engine: current.engine, engineConfig: current.engineConfig, evaluator: evaluator, llmTimeout: time.Second, detectionMode: detectionModeColdStart, llmMaxConcurrency: 2, llmDailyRequestLimit: 500})
+	event := &ws.MessageEvent{BaseEvent: ws.BaseEvent{PostType: "message", Time: time.Now().Unix()}, MessageType: "group", GroupID: 100, UserID: 200, MessageID: 9, RawMessage: "普通聊天内容"}
+	err := instance.Handle(context.Background(), event)
+	// [决策理由] 冷启动低分消息必须调用模型，Safe/Low结论直接放行且不生成违规记录。
+	if err != nil || evaluator.calls != 1 {
+		t.Fatalf("Handle() error=%v calls=%d", err, evaluator.calls)
+	}
+	repository := instance.repository.(*fakeMonitorRepository)
+	// [决策理由] 模型明确pass时不得污染人工复核队列。
+	if len(repository.created) != 0 {
+		t.Fatalf("created violations = %+v", repository.created)
+	}
+
+	// >>> 数据演变示例
+	// 1. 空词库score0+cold_start -> LLM Low/pass -> 放行。
+	// 2. 同消息standard -> 本地low直接放行且不调用LLM。
+}
+
+// TestLLMMinimumLengthOnlySkipsModel 验证长度门槛不影响本地硬词且会跳过短消息模型调用。
+// @param t：Go测试上下文。
+// @returns 无。
+// ⚠️副作用说明：使用内存fake执行一次本地处置并检查模型调用次数。
+func TestLLMMinimumLengthOnlySkipsModel(t *testing.T) {
+	instance := testImplementation()
+	evaluator := &fakeLLMEvaluator{result: LLMEvaluationResult{RiskLevel: "Low", TotalScore: 5, SuggestedAction: "pass"}}
+	config := DefaultEngineConfig()
+	config.HardKeywords = []string{"短广告"}
+	engine, err := NewEngine(config)
+	// [决策理由] 测试规则必须成功构造才能验证检测顺序。
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance.snapshot.Store(&runtimeSnapshot{engine: engine, engineConfig: config, evaluator: evaluator, llmTimeout: time.Second, detectionMode: detectionModeColdStart, llmMaxConcurrency: 2, llmDailyRequestLimit: 500, minLLMMessageLength: 30})
+	shortSafe := &ws.MessageEvent{BaseEvent: ws.BaseEvent{PostType: "message", Time: time.Now().Unix()}, MessageType: "group", GroupID: 100, UserID: 200, MessageID: 10, RawMessage: "普通短消息"}
+	// [决策理由] 未命中本地高风险且不足30字符时必须在外部调用前放行。
+	if err := instance.Handle(context.Background(), shortSafe); err != nil || evaluator.calls != 0 {
+		t.Fatalf("short Handle() error=%v calls=%d", err, evaluator.calls)
+	}
+	shortBlocked := &ws.MessageEvent{BaseEvent: ws.BaseEvent{PostType: "message", Time: time.Now().Unix()}, MessageType: "group", GroupID: 100, UserID: 201, MessageID: 11, RawMessage: "短广告"}
+	// [决策理由] 长度门槛不能绕过位于前面的硬关键词处置。
+	if err := instance.Handle(context.Background(), shortBlocked); err != nil {
+		t.Fatalf("blocked Handle() error=%v", err)
+	}
+	actions := instance.actions.(*fakeActions)
+	// [决策理由] 短硬词应执行本地禁言且仍不调用模型。
+	if len(actions.banParams) != 1 || evaluator.calls != 0 {
+		t.Fatalf("bans=%d calls=%d", len(actions.banParams), evaluator.calls)
+	}
+
+	// >>> 数据演变示例
+	// 1. 5字符普通消息+minimum30 -> 跳过LLM放行。
+	// 2. 3字符硬词消息+minimum30 -> 本地block，LLM仍为0次。
+}
+
+// TestPublishWeightOffsetsKeepsHardKeywordWithoutNegativeEvidence 验证正向晋级不会被误认为硬词误报。
+// @param t：Go测试上下文。
+// @returns 无。
+// ⚠️副作用说明：替换测试实例的内存检测快照。
+func TestPublishWeightOffsetsKeepsHardKeywordWithoutNegativeEvidence(t *testing.T) {
+	instance := testImplementation()
+	config := DefaultEngineConfig()
+	config.HardKeywords = []string{"内部渠道"}
+	engine, err := NewEngine(config)
+	// [决策理由] 测试基础硬词引擎必须成功构造。
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance.snapshot.Store(&runtimeSnapshot{engine: engine, engineConfig: config, minLLMMessageLength: 30})
+	// [决策理由] 仅有正向学习权重时不得移除管理员设置的零容错硬词。
+	if err := instance.publishWeightOffsets(map[string]float64{"内部渠道": 10}, map[string]struct{}{}); err != nil {
+		t.Fatalf("publishWeightOffsets() error = %v", err)
+	}
+	result := instance.snapshot.Load().engine.CheckExactText("内部渠道")
+	// [决策理由] 发布后硬词仍应在精准层直接命中。
+	if !result.Blocked {
+		t.Fatalf("CheckExactText() = %+v", result)
+	}
+	// [决策理由] 每日学习发布只替换检测引擎，不得清空已热应用的模型调用长度门槛。
+	if got := instance.snapshot.Load().minLLMMessageLength; got != 30 {
+		t.Fatalf("minLLMMessageLength=%d", got)
+	}
+
+	// >>> 数据演变示例
+	// 1. hard词+learned10+无误报 -> 保留hard拦截。
+	// 2. minimum30+发布学习权重 -> 新快照仍保持minimum30。
 }
 
 // TestHandleExactViolationModeratesAndRecords 验证精准规则执行禁言、筛选撤回和审计。
