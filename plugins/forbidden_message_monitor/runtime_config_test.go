@@ -4,6 +4,7 @@ package forbiddenmessagemonitor
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,6 +12,42 @@ import (
 
 	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 )
+
+// TestApplyConfigKeepsSnapshotWhenOffsetBuildFails 验证反馈补丁失败不会部分发布新配置。
+// @param t：测试上下文。
+// @returns 无。
+// ⚠️副作用说明：仅修改测试实例的内存原子指针。
+func TestApplyConfigKeepsSnapshotWhenOffsetBuildFails(t *testing.T) {
+	instance := &implementation{httpClient: &http.Client{}}
+	oldConfig := DefaultEngineConfig()
+	oldEngine, err := NewEngine(oldConfig)
+	// [决策理由] 必须先建立可比较的旧运行快照。
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSnapshot := &runtimeSnapshot{engine: oldEngine, engineConfig: oldConfig, minLLMMessageLength: 30}
+	instance.snapshot.Store(oldSnapshot)
+	offsets := map[string]float64{"异常偏移": math.Inf(1)}
+	instance.offsets.Store(&offsets)
+	raw, err := plugin.NormalizeConfig(instance.ConfigSchema(), json.RawMessage(`{"min_llm_message_length":40}`))
+	// [决策理由] 测试必须让基础配置合法，只由反馈偏移触发失败。
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = instance.ApplyConfig(context.Background(), raw)
+	// [决策理由] 非有限偏移必须使最终引擎构造失败。
+	if err == nil {
+		t.Fatal("ApplyConfig() accepted infinite offset")
+	}
+	// [决策理由] 热应用返回失败后消息处理必须继续读取完全相同的旧快照。
+	if got := instance.snapshot.Load(); got != oldSnapshot || got.minLLMMessageLength != 30 {
+		t.Fatalf("snapshot=%p old=%p minimum=%d", got, oldSnapshot, got.minLLMMessageLength)
+	}
+
+	// >>> 数据演变示例
+	// 1. old minimum30+new minimum40+Inf补丁 -> error -> 保持old minimum30。
+	// 2. 合法补丁+new minimum40 -> 其他测试覆盖一次发布最终快照。
+}
 
 // TestDefaultRuntimeConfigBuildsWithoutLLM 验证默认配置可运行且不创建外部调用器。
 // @param t：测试上下文。

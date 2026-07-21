@@ -708,6 +708,26 @@ func (p *implementation) publishWeightOffsets(offsets map[string]float64, negati
 	if current == nil {
 		return fmt.Errorf("检测配置尚未初始化")
 	}
+	next, storedOffsets, storedNegative, err := buildSnapshotWithWeightOffsets(current, offsets, negativeFeatures)
+	// [决策理由] 所有规则构造完成前不得改变任何运行时指针。
+	if err != nil {
+		return err
+	}
+	p.offsets.Store(&storedOffsets)
+	p.negative.Store(&storedNegative)
+	p.snapshot.Store(next)
+
+	// >>> 数据演变示例
+	// 1. 风险词免费25+delta-4 -> 新引擎weight21并原子发布。
+	// 2. 非法delta -> 构造失败 -> 三个旧指针保持不变。
+	return nil
+}
+
+// buildSnapshotWithWeightOffsets 基于指定基础快照离线构造反馈权重快照。
+// @param current：尚未发布的基础快照；offsets：词语权重偏移；negativeFeatures：已有误报证据的特征。
+// @returns 完整运行快照、规范化偏移、规范化误报特征或构造错误。
+// ⚠️副作用说明：仅分配内存和构造引擎，不修改插件的原子运行状态。
+func buildSnapshotWithWeightOffsets(current *runtimeSnapshot, offsets map[string]float64, negativeFeatures map[string]struct{}) (*runtimeSnapshot, map[string]float64, map[string]struct{}, error) {
 	storedOffsets := make(map[string]float64, len(offsets))
 	for keyword, delta := range offsets {
 		storedOffsets[strings.ToLower(strings.TrimSpace(keyword))] = delta
@@ -758,21 +778,18 @@ func (p *implementation) publishWeightOffsets(offsets map[string]float64, negati
 	engine, err := NewEngine(config)
 	// [决策理由] 新引擎完整构造成功前必须保留旧快照。
 	if err != nil {
-		return fmt.Errorf("应用反馈权重: %w", err)
+		return nil, nil, nil, fmt.Errorf("应用反馈权重: %w", err)
 	}
 	next := &runtimeSnapshot{engine: engine, engineConfig: current.engineConfig, evaluator: current.evaluator, llmTimeout: current.llmTimeout, detectionMode: current.detectionMode, llmMaxConcurrency: current.llmMaxConcurrency, llmDailyRequestLimit: current.llmDailyRequestLimit, minLLMMessageLength: current.minLLMMessageLength}
-	p.offsets.Store(&storedOffsets)
 	storedNegative := make(map[string]struct{}, len(negativeFeatures))
 	for keyword := range negativeFeatures {
 		storedNegative[strings.ToLower(strings.TrimSpace(keyword))] = struct{}{}
 	}
-	p.negative.Store(&storedNegative)
-	p.snapshot.Store(next)
 
 	// >>> 数据演变示例
-	// 1. 风险词免费25+delta-4 -> 新引擎weight21。
-	// 2. 新特征校内群+delta-2 -> 安全抵扣词2分。
-	return nil
+	// 1. 风险词免费25+delta-4 -> 返回weight21的新快照。
+	// 2. 新特征校内群+delta-2 -> 返回含安全抵扣词2分的新快照。
+	return next, storedOffsets, storedNegative, nil
 }
 
 // newPlugin 使用运行时依赖创建监控实例和默认配置快照。

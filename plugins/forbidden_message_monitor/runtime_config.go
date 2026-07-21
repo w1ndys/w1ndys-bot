@@ -119,7 +119,6 @@ func (p *implementation) ApplyConfig(ctx context.Context, raw json.RawMessage) e
 	if err != nil {
 		return err
 	}
-	p.snapshot.Store(next)
 	currentOffsets := p.offsets.Load()
 	// [决策理由] 配置热更新后必须重新叠加当日反馈补丁，避免偏移提前失效。
 	if currentOffsets != nil {
@@ -128,12 +127,18 @@ func (p *implementation) ApplyConfig(ctx context.Context, raw json.RawMessage) e
 		if currentNegative := p.negative.Load(); currentNegative != nil {
 			negativeFeatures = *currentNegative
 		}
-		return p.publishWeightOffsets(*currentOffsets, negativeFeatures)
+		adjusted, _, _, buildErr := buildSnapshotWithWeightOffsets(next, *currentOffsets, negativeFeatures)
+		// [决策理由] 反馈补丁构造失败时必须保持旧运行快照，避免配置持久化补偿期间出现部分热应用。
+		if buildErr != nil {
+			return buildErr
+		}
+		next = adjusted
 	}
+	p.snapshot.Store(next)
 
 	// >>> 数据演变示例
-	// 1. 旧阈值20/60+新阈值30/70 -> Store新快照 -> 后续消息使用30/70。
-	// 2. 新词库JSON损坏 -> 不Store -> 旧引擎继续服务。
+	// 1. 旧阈值20/60+新阈值30/70+反馈补丁成功 -> 一次Store最终快照。
+	// 2. 新词库或反馈补丁构造失败 -> 不Store -> 旧引擎继续服务。
 	return nil
 }
 
