@@ -74,7 +74,7 @@ func TestServerDispatchesMessage(t *testing.T) {
 		t.Fatalf("连接失败: %v", err)
 	}
 	defer connection.Close()
-	message := []byte(`{"post_type":"message","message_type":"group","group_id":100,"user_id":200,"raw_message":"ping"}`)
+	message := []byte(`{"post_type":"message","message_type":"group","message_id":300,"message_seq":400,"group_id":100,"user_id":200,"raw_message":"ping"}`)
 	// [决策理由] 写入失败表示测试链路不完整，等待通道只会造成无意义超时。
 	if err := connection.WriteMessage(websocket.TextMessage, message); err != nil {
 		t.Fatalf("写入消息失败: %v", err)
@@ -88,7 +88,7 @@ func TestServerDispatchesMessage(t *testing.T) {
 			t.Fatalf("事件类型 = %T，期望 *MessageEvent", receivedEvent)
 		}
 		// [决策理由] 同时验证关键标识与原始文本，防止 JSON tag 配置错误。
-		if event.GroupID != 100 || event.UserID != 200 || event.RawMessage != "ping" {
+		if event.GroupID != 100 || event.UserID != 200 || event.MessageID != 300 || event.MessageSeq != 400 || event.RawMessage != "ping" {
 			t.Fatalf("解析结果错误: %+v", event)
 		}
 	case <-time.After(time.Second):

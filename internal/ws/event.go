@@ -35,6 +35,7 @@ type MessageEvent struct {
 	MessageType string        `json:"message_type"`
 	SubType     string        `json:"sub_type"`
 	MessageID   int64         `json:"message_id"`
+	MessageSeq  int64         `json:"message_seq"`
 	UserID      int64         `json:"user_id"`
 	GroupID     int64         `json:"group_id"`
 	RawMessage  string        `json:"raw_message"`

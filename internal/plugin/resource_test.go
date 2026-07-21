@@ -121,14 +121,14 @@ func (resourceTestHandler) Delete(context.Context, management.Actor, int64, int6
 // ⚠️副作用说明：注册内存插件。
 func TestManagerAdminResources(t *testing.T) {
 	manager := NewManager(nil)
-	candidate := &resourceTestPlugin{registrations: []AdminResourceRegistration{{Descriptor: AdminResource{Key: "rules", DisplayName: "规则", Fields: []ConfigField{{Key: "keyword", DisplayName: "关键词", Type: FieldString}}, CanCreate: true, MaxPageSize: 50}, Handler: resourceTestHandler{}}}}
+	candidate := &resourceTestPlugin{registrations: []AdminResourceRegistration{{Descriptor: AdminResource{Key: "rules", DisplayName: "规则", Fields: []ConfigField{{Key: "keyword", DisplayName: "关键词", Type: FieldString}, {Key: "status", DisplayName: "状态", Type: FieldEnum, Options: []string{"pending", "confirmed"}}}, CanCreate: true, MaxPageSize: 50}, Handler: resourceTestHandler{}}}}
 	// [决策理由] 测试前必须成功注册 Provider。
 	if err := manager.Register(candidate); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	resources, err := manager.AdminResources("resource_test")
 	// [决策理由] 合法声明应被完整返回。
-	if err != nil || len(resources) != 1 || resources[0].Key != "rules" {
+	if err != nil || len(resources) != 1 || resources[0].Key != "rules" || resources[0].Fields[1].Type != FieldEnum {
 		t.Fatalf("AdminResources() = %+v, %v", resources, err)
 	}
 	_, _, err = manager.AdminResourceHandler("resource_test", "unknown")

@@ -21,14 +21,15 @@ var ErrResourceConflict = management.ErrResourceConflict
 
 // AdminResource 描述通用 WebUI 可渲染的插件业务资源。
 type AdminResource struct {
-	Key         string        `json:"key"`
-	DisplayName string        `json:"display_name"`
-	Description string        `json:"description,omitempty"`
-	Fields      []ConfigField `json:"fields"`
-	CanCreate   bool          `json:"can_create"`
-	CanUpdate   bool          `json:"can_update"`
-	CanDelete   bool          `json:"can_delete"`
-	MaxPageSize int           `json:"max_page_size"`
+	Key            string        `json:"key"`
+	DisplayName    string        `json:"display_name"`
+	Description    string        `json:"description,omitempty"`
+	Fields         []ConfigField `json:"fields"`
+	ReadOnlyFields []string      `json:"read_only_fields,omitempty"`
+	CanCreate      bool          `json:"can_create"`
+	CanUpdate      bool          `json:"can_update"`
+	CanDelete      bool          `json:"can_delete"`
+	MaxPageSize    int           `json:"max_page_size"`
 }
 
 // AdminResourceRegistration 将安全的声明与插件自有处理器绑定。
@@ -72,10 +73,26 @@ func (r AdminResource) Validate() error {
 		return fmt.Errorf("资源 %s 字段无效: %w", r.Key, err)
 	}
 	for _, field := range r.Fields {
-		// [决策理由] MVP 通用资源表格只实现文本、多行文本和布尔控件，必须拒绝未安全渲染的类型及secret列表泄露。
-		if field.Type != FieldString && field.Type != FieldMultiline && field.Type != FieldBoolean {
+		// [决策理由] 资源表格只允许已安全渲染的文本、布尔和固定枚举，必须拒绝secret及任意组件类型。
+		if field.Type != FieldString && field.Type != FieldMultiline && field.Type != FieldBoolean && field.Type != FieldEnum {
 			return fmt.Errorf("资源 %s 字段 %s 类型 %s 不受支持", r.Key, field.Key, field.Type)
 		}
+	}
+	fieldKeys := make(map[string]struct{}, len(r.Fields))
+	for _, field := range r.Fields {
+		fieldKeys[field.Key] = struct{}{}
+	}
+	seenReadOnly := make(map[string]struct{}, len(r.ReadOnlyFields))
+	for _, key := range r.ReadOnlyFields {
+		// [决策理由] 只读声明必须引用资源已有字段，避免前后端对可编辑集合产生不同理解。
+		if _, exists := fieldKeys[key]; !exists {
+			return fmt.Errorf("资源 %s 只读字段 %s 不存在", r.Key, key)
+		}
+		// [决策理由] 重复只读键没有额外语义，通常表示插件描述拼写错误。
+		if _, exists := seenReadOnly[key]; exists {
+			return fmt.Errorf("资源 %s 只读字段 %s 重复", r.Key, key)
+		}
+		seenReadOnly[key] = struct{}{}
 	}
 
 	// >>> 数据演变示例

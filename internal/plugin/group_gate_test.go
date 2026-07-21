@@ -59,6 +59,8 @@ func TestPostgresGroupGateAllowed(t *testing.T) {
 		{name: "默认开启", pluginName: "default_on", event: &ws.MessageEvent{MessageType: "group", GroupID: 200}, want: true},
 		{name: "开启插件群覆盖关闭", pluginName: "default_on", event: &ws.MessageEvent{MessageType: "group", GroupID: 100}, want: false},
 		{name: "私聊不受影响", pluginName: "default_off", event: &ws.MessageEvent{MessageType: "private", GroupID: 0}, want: true},
+		{name: "群通知受默认关闭约束", pluginName: "default_off", event: &ws.NoticeEvent{GroupID: 200}, want: false},
+		{name: "禁言通知命中开启覆盖", pluginName: "default_off", event: &ws.GroupBanNotice{NoticeEvent: ws.NoticeEvent{GroupID: 100}}, want: true},
 		{name: "未声明插件放行", pluginName: "global", event: &ws.MessageEvent{MessageType: "group", GroupID: 100}, want: true},
 	}
 	for _, test := range tests {

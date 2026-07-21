@@ -93,9 +93,9 @@ func (g *PostgresGroupGate) Load(ctx context.Context) error {
 // @returns 私聊、无有效群号或非可控插件返回true；群策略按覆盖优先于默认值返回。
 // ⚠️副作用说明：无；仅原子读取不可变快照。
 func (g *PostgresGroupGate) Allowed(pluginName string, event ws.Event) bool {
-	message, ok := event.(*ws.MessageEvent)
-	// [决策理由] 群门禁只约束具备正GroupID的消息，私聊和非消息事件保持原行为。
-	if !ok || message.MessageType != "group" || message.GroupID <= 0 {
+	groupID := eventGroupID(event)
+	// [决策理由] 私聊和无群号事件不属于任何群策略，保持原行为。
+	if groupID <= 0 {
 		return true
 	}
 	current := g.snapshot.Load()
@@ -108,7 +108,7 @@ func (g *PostgresGroupGate) Allowed(pluginName string, event ws.Event) bool {
 	if !controlled {
 		return true
 	}
-	enabled, overridden := policy.Overrides[message.GroupID]
+	enabled, overridden := policy.Overrides[groupID]
 	// [决策理由] 明确的逐群覆盖优先于插件默认值。
 	if overridden {
 		return enabled
@@ -118,6 +118,33 @@ func (g *PostgresGroupGate) Allowed(pluginName string, event ws.Event) bool {
 	// 1. keyword默认true+群100覆盖false -> false。
 	// 2. echo不在快照或私聊GroupID=0 -> true。
 	return policy.DefaultEnabled
+}
+
+// eventGroupID 提取群消息和监控插件会消费的群通知所属群号。
+// @param event：待路由OneBot事件。
+// @returns 有效群号；私聊、无群通知或未知事件返回0。
+// ⚠️副作用说明：无。
+func eventGroupID(event ws.Event) int64 {
+	var groupID int64
+	switch typed := event.(type) {
+	case *ws.MessageEvent:
+		// [决策理由] MessageEvent只有group类型的GroupID才代表群作用域。
+		if typed.MessageType == "group" {
+			groupID = typed.GroupID
+		}
+	case *ws.GroupBanNotice:
+		groupID = typed.GroupID
+	case *ws.NoticeEvent:
+		groupID = typed.GroupID
+	}
+	// [决策理由] 非法负值不应成为覆盖键。
+	if groupID < 0 {
+		return 0
+	}
+	// >>> 数据演变示例
+	// 1. group message/group_ban且GroupID=100 -> 100。
+	// 2. private message或heartbeat -> 0。
+	return groupID
 }
 
 // publishForTest 发布测试构造的不可变策略副本。

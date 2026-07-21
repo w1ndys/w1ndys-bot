@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/w1ndys/w1ndys-bot/internal/management"
+	"github.com/w1ndys/w1ndys-bot/internal/onebot"
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 )
 
@@ -19,9 +20,19 @@ type Messenger interface {
 	ReplyToMessage(context.Context, *ws.MessageEvent, int64, string) (int64, error)
 }
 
+// ActionAPI 是插件调用非消息类 OneBot Action 所需的最小能力。
+type ActionAPI interface {
+	SetGroupBan(context.Context, onebot.SetGroupBanParams) error
+	GetGroupMemberList(context.Context, onebot.GetGroupMemberListParams) ([]onebot.GroupMemberInfo, error)
+	GetGroupMessageHistory(context.Context, onebot.GetGroupMessageHistoryParams) (onebot.GetGroupMessageHistoryResult, error)
+	GetMessage(context.Context, any) (onebot.MessageInfo, error)
+	DeleteMessage(context.Context, any) error
+}
+
 // Runtime 提供插件实例化所需的运行时依赖。
 type Runtime struct {
 	Messenger  Messenger
+	Actions    ActionAPI
 	Management management.Controller
 	Database   *pgxpool.Pool
 }
