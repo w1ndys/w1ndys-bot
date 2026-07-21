@@ -4,6 +4,9 @@ import { NAlert, NButton, NEmpty, NForm, NFormItem, NInput, NInputNumber, NSelec
 import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError, getPluginConfig, getPluginConfigSchema, putPluginConfig, type PluginConfigField, type PluginConfigSchema } from '../api'
 import { useAppFeedback } from '../feedback'
+import StructuredConfigEditor from './StructuredConfigEditor.vue'
+
+type StructuredKind = 'string_list_json' | 'weighted_terms_json' | 'combination_rules_json'
 
 const props = defineProps<{ pluginName: string }>()
 const schema = ref<PluginConfigSchema | null>(null)
@@ -18,6 +21,19 @@ const errorMessage = ref('')
 const feedback = useAppFeedback()
 const loadSequence = ref(0)
 const dirty = computed(() => JSON.stringify(draft.value) !== JSON.stringify(baseline.value))
+
+// isStructuredKind 判断字段是否使用行式结构编辑器。
+// @param type：配置字段类型。
+// @returns 三种结构化JSON字符串类型返回true。
+// ⚠️副作用说明：无。
+function isStructuredKind(type: string): type is StructuredKind {
+  const result = type === 'string_list_json' || type === 'weighted_terms_json' || type === 'combination_rules_json'
+
+  // >>> 数据演变示例
+  // 1. weighted_terms_json -> true。
+  // 2. multiline -> false。
+  return result
+}
 
 // applySnapshot 将后端脱敏快照转换为表单草稿，secret 始终初始化为空。
 // @param fields：Schema 字段；config：后端已应用默认值的脱敏配置。
@@ -85,6 +101,7 @@ async function loadConfig(): Promise<void> {
       schema.value = null
     } else {
       errorMessage.value = error instanceof Error ? error.message : '加载插件配置失败'
+      feedback.error(error, '加载插件配置失败')
     }
   } finally {
     // [决策理由] 只有最新请求可以结束当前插件的加载状态。
@@ -157,6 +174,7 @@ async function saveConfig(): Promise<void> {
     if (error instanceof ApiError && error.code === 'plugin_config_conflict') {
       conflict.value = true
       errorMessage.value = '配置已被其他操作更新，请重新加载后再修改。'
+      feedback.warning(errorMessage.value)
     } else {
       feedback.error(error, '保存插件配置失败')
     }
@@ -211,6 +229,7 @@ onMounted(loadConfig)
           <NSwitch v-if="field.type === 'boolean'" v-model:value="draft[field.key] as boolean" />
           <NInputNumber v-else-if="field.type === 'integer'" v-model:value="draft[field.key] as number | null" :precision="0" />
           <NSelect v-else-if="field.type === 'enum'" v-model:value="draft[field.key] as string" :options="(field.options ?? []).map(value => ({ label: value, value }))" />
+          <StructuredConfigEditor v-else-if="isStructuredKind(field.type)" v-model="draft[field.key] as string" :kind="field.type" />
           <NInput v-else v-model:value="draft[field.key] as string" :type="field.type === 'multiline' ? 'textarea' : field.type === 'secret' ? 'password' : 'text'" :show-password-on="field.type === 'secret' ? 'click' : undefined" :placeholder="field.type === 'secret' ? '留空以保留当前值' : undefined" />
         </NFormItem>
         <div class="config-actions">
@@ -233,6 +252,7 @@ onMounted(loadConfig)
 .alert-content, .config-actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .config-actions { justify-content: flex-end; padding-top: var(--space-2); }
 .dirty-hint { margin-right: auto; color: var(--color-text-muted); font-size: var(--font-size-body-sm); }
+.config-panel :deep(.n-form-item-blank) { width: 100%; }
 @media (max-width: 39.9375rem) {
   .config-panel { padding: var(--space-4); }
   .alert-content { align-items: flex-start; flex-direction: column; }

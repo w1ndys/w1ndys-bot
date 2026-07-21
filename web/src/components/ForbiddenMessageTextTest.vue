@@ -1,6 +1,6 @@
-<!-- 📌 影响范围：调用违禁消息监控文本试判 API；可能按插件配置向外部 LLM 发送输入文本，不触发 QQ 处置或持久化。 -->
+<!-- 📌 影响范围：调用违禁消息监控文本试判与训练样本 API；试判不持久化，管理员确认投喂会写训练样本并影响后续学习。 -->
 <script setup lang="ts">
-import { NButton, NCard, NDescriptions, NDescriptionsItem, NInput, NTag } from 'naive-ui'
+import { NButton, NCard, NDescriptions, NDescriptionsItem, NInput, NPopconfirm, NTag } from 'naive-ui'
 import { computed, ref } from 'vue'
 import { createPluginResourceRecord } from '../api'
 import { useAppFeedback } from '../feedback'
@@ -20,8 +20,13 @@ interface TextTestResult {
 
 const text = ref('')
 const loading = ref(false)
+const savingSample = ref(false)
 const result = ref<TextTestResult | null>(null)
+const testedText = ref('')
+const savedSampleText = ref('')
+const testedTrialId = ref(0)
 const decisionType = computed(resolveDecisionType)
+const canSaveSample = computed(() => result.value !== null && testedText.value !== '' && text.value.trim() === testedText.value && savedSampleText.value !== testedText.value)
 const feedback = useAppFeedback()
 
 // resolveDecisionType 根据中文结论选择视觉状态。
@@ -63,6 +68,8 @@ async function runTextTest(): Promise<void> {
 	try {
 		const record = await createPluginResourceRecord('forbidden_message_monitor', 'text_tests', { text: candidate })
 		result.value = record.data as unknown as TextTestResult
+		testedText.value = candidate
+		testedTrialId.value = record.id
 		feedback.success('文本试判完成')
 	} catch (error) {
 		feedback.error(error, '文本试判失败')
@@ -74,14 +81,44 @@ async function runTextTest(): Promise<void> {
   // 1. "普通聊天" -> POST -> 展示放行与本地分数。
   // 2. 空文本 -> 不请求 -> 展示输入提示。
 }
+
+// saveViolationSample 将本次已试判文本明确标记为违规训练正例。
+// @param 无；读取testedText与当前试判结果。
+// @returns Promise，在样本保存或错误反馈后结束。
+// ⚠️副作用说明：复用本次服务端试判的可信风险词并持久化训练样本和候选证据，不再次调用LLM。
+async function saveViolationSample(): Promise<void> {
+  // [决策理由] 文本变化后旧试判结论失效，必须重新试判才能主动投喂。
+  if (!canSaveSample.value) {
+    feedback.warning('文本已变化，请重新试判后再保存样本。')
+    return
+  }
+  savingSample.value = true
+	try {
+		await createPluginResourceRecord('forbidden_message_monitor', 'training_samples', { msg_content: testedText.value, trial_id: String(testedTrialId.value) })
+		savedSampleText.value = testedText.value
+		feedback.success('违规训练样本已保存并进入学习流程')
+  } catch (error) {
+    feedback.error(error, '保存违规训练样本失败')
+  } finally {
+    savingSample.value = false
+  }
+
+  // >>> 数据演变示例
+  // 1. 已试判广告文本+确认 -> 服务端重新提取特征 -> 保存正例。
+  // 2. 文本修改或重复样本 -> 前端拒绝或后端冲突Toast。
+}
 </script>
 
 <template>
   <NCard class="text-test-card" title="文本试判" size="small">
-    <p class="text-test-description">使用当前已保存规则测试消息。不会计入发言、写入审核记录、禁言或撤回；中风险且启用大模型时，输入会发送到已配置的模型端点。</p>
+    <p class="text-test-description">试判不会自动学习、计入发言、写入审核记录、禁言或撤回。只有主动点击“保存为违规样本”并确认后，文本才会进入Few-shot正例和候选词学习。</p>
     <NInput v-model:value="text" type="textarea" :autosize="{ minRows: 4, maxRows: 10 }" maxlength="4000" show-count placeholder="输入一条待检测的群消息" />
     <div class="text-test-actions">
       <NButton type="primary" :loading="loading" @click="runTextTest">开始测试</NButton>
+      <NPopconfirm v-if="result" positive-text="确认投喂" negative-text="取消" @positive-click="saveViolationSample">
+        <template #trigger><NButton type="warning" :disabled="!canSaveSample" :loading="savingSample">保存为违规样本</NButton></template>
+        该操作会复用本次试判返回的风险词，并影响后续Few-shot与候选词权重；不会再次调用大模型或触发QQ处罚。确定继续吗？
+      </NPopconfirm>
     </div>
     <NDescriptions v-if="result" class="text-test-result" bordered label-placement="left" :column="1">
       <NDescriptionsItem label="判定"><NTag :type="decisionType">{{ result.decision }}</NTag></NDescriptionsItem>
@@ -99,6 +136,6 @@ async function runTextTest(): Promise<void> {
 <style scoped>
 .text-test-card { margin-bottom: var(--space-6); }
 .text-test-description { margin: 0 0 var(--space-4); color: var(--color-text-secondary); line-height: var(--line-height-body); }
-.text-test-actions { display: flex; justify-content: flex-end; margin: var(--space-3) 0; }
+.text-test-actions { display: flex; justify-content: flex-end; gap: var(--space-3); margin: var(--space-3) 0; }
 .text-test-result { margin-top: var(--space-4); }
 </style>
