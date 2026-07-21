@@ -54,6 +54,7 @@ export interface PluginResourceDescriptor {
   display_name: string
   description?: string
   fields: PluginConfigField[]
+  read_only_fields?: string[]
   can_create: boolean
   can_update: boolean
   can_delete: boolean

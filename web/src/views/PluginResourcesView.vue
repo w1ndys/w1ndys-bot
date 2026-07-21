@@ -3,6 +3,7 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import PluginResourceTable from '../components/PluginResourceTable.vue'
+import ForbiddenMessageTextTest from '../components/ForbiddenMessageTextTest.vue'
 
 const route = useRoute()
 const pluginName = computed(readPluginName)
@@ -23,5 +24,8 @@ function readPluginName(): string {
 </script>
 
 <template>
-  <PluginResourceTable :plugin-name="pluginName" />
+  <div>
+    <ForbiddenMessageTextTest v-if="pluginName === 'forbidden_message_monitor'" />
+    <PluginResourceTable :plugin-name="pluginName" />
+  </div>
 </template>

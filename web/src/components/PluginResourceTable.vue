@@ -1,6 +1,6 @@
 <!-- 📌 影响范围：读取插件资源描述和分页记录；新增、编辑、删除会修改插件业务数据并产生审计。 -->
 <script setup lang="ts">
-import { NAlert, NButton, NCard, NEmpty, NForm, NFormItem, NInput, NModal, NPagination, NPopconfirm, NSelect, NSkeleton, NSwitch, NTable, NTag } from 'naive-ui'
+import { NButton, NCard, NEmpty, NForm, NFormItem, NInput, NModal, NPagination, NPopconfirm, NSelect, NSkeleton, NSwitch, NTable, NTag } from 'naive-ui'
 import { computed, onMounted, ref, watch } from 'vue'
 import {
   ApiError,
@@ -24,7 +24,6 @@ const pageSize = ref(20)
 const total = ref(0)
 const loading = ref(true)
 const saving = ref(false)
-const errorMessage = ref('')
 const feedback = useAppFeedback()
 const modalVisible = ref(false)
 const editingRecord = ref<PluginResourceRecord | null>(null)
@@ -33,7 +32,20 @@ const loadSequence = ref(0)
 const recordsLoadSequence = ref(0)
 const activeDescriptor = computed(() => descriptors.value.find(item => item.key === resourceKey.value) ?? null)
 const listedFields = computed(() => activeDescriptor.value?.fields ?? [])
-const editableFields = computed(() => activeDescriptor.value?.fields ?? [])
+const editableFields = computed(() => {
+  const descriptor = activeDescriptor.value
+  // [决策理由] 插件证据字段必须展示但不能回传修改，只有未声明只读的字段进入表单载荷。
+  if (descriptor === null) {
+    return []
+  }
+  const readOnly = new Set(descriptor.read_only_fields ?? [])
+  const result = descriptor.fields.filter(field => !readOnly.has(field.key))
+
+  // >>> 数据演变示例
+  // 1. fields=[content,status],readonly=[content] -> 编辑表单仅status。
+  // 2. readonly缺失 -> 所有字段保持现有可编辑行为。
+  return result
+})
 const resourceOptions = computed(() => descriptors.value.map(item => ({ label: item.display_name, value: item.key })))
 
 // emptyValue 为字段类型创建安全的空表单值。
@@ -75,7 +87,6 @@ async function loadDescriptors(): Promise<void> {
   const sequence = ++loadSequence.value
   recordsLoadSequence.value += 1
   loading.value = true
-  errorMessage.value = ''
   descriptors.value = []
   records.value = []
   resourceKey.value = ''
@@ -100,7 +111,7 @@ async function loadDescriptors(): Promise<void> {
       if (error instanceof ApiError && error.code === 'plugin_resource_not_supported') {
         descriptors.value = []
       } else {
-        errorMessage.value = error instanceof Error ? error.message : '加载插件业务资源失败'
+        feedback.error(error, '加载插件业务资源失败')
       }
     }
   } finally {
@@ -116,10 +127,10 @@ async function loadDescriptors(): Promise<void> {
 }
 
 // loadRecords 读取当前资源分页记录。
-// @param expectedSequence：可选的所属描述加载序号；preserveMessage：刷新时是否保留当前错误提示。
+// @param expectedSequence：可选的所属描述加载序号。
 // @returns Promise，当前请求成功应用到页面时为 true，过期或失败时为 false。
 // ⚠️副作用说明：发起鉴权网络请求并覆盖记录列表。
-async function loadRecords(expectedSequence = loadSequence.value, preserveMessage = false): Promise<boolean> {
+async function loadRecords(expectedSequence = loadSequence.value): Promise<boolean> {
   const requestedPlugin = props.pluginName
   const requestedResource = resourceKey.value
   const requestedPage = page.value
@@ -129,10 +140,6 @@ async function loadRecords(expectedSequence = loadSequence.value, preserveMessag
     return false
   }
   loading.value = true
-  // [决策理由] 冲突后的权威刷新需要保留解释提示，普通刷新则清理历史错误。
-  if (!preserveMessage) {
-    errorMessage.value = ''
-  }
   try {
     const result = await listPluginResourceRecords(requestedPlugin, requestedResource, page.value, pageSize.value)
     // [决策理由] 插件、资源或请求序号变化后旧分页结果已经失效。
@@ -146,7 +153,7 @@ async function loadRecords(expectedSequence = loadSequence.value, preserveMessag
   } catch (error) {
     // [决策理由] 当前资源的失败才应覆盖页面提示。
     if (requestSequence === recordsLoadSequence.value && expectedSequence === loadSequence.value && requestedPlugin === props.pluginName && requestedResource === resourceKey.value && requestedPage === page.value) {
-      errorMessage.value = error instanceof Error ? error.message : '加载资源记录失败'
+      feedback.error(error, '加载资源记录失败')
     }
     return false
   } finally {
@@ -245,7 +252,6 @@ async function saveRecord(): Promise<void> {
   const requestSequence = loadSequence.value
   const creating = editingRecord.value === null
   saving.value = true
-  errorMessage.value = ''
   try {
     const payload = buildDraftPayload(editableFields.value)
     // [决策理由] 是否存在编辑快照决定调用新增或版本化更新端点。
@@ -272,8 +278,8 @@ async function saveRecord(): Promise<void> {
     // [决策理由] 版本冲突必须放弃陈旧编辑上下文并刷新服务端权威列表。
     if (error instanceof ApiError && error.status === 409) {
       modalVisible.value = false
-      errorMessage.value = '记录已被其他操作更新，列表已刷新，请重新编辑。'
-      await loadRecords(loadSequence.value, true)
+      feedback.warning('记录已被其他操作更新，列表已刷新，请重新编辑。')
+      await loadRecords(loadSequence.value)
     } else {
       feedback.error(error, '保存记录失败')
     }
@@ -299,7 +305,6 @@ async function removeRecord(record: PluginResourceRecord): Promise<void> {
   const requestedPlugin = props.pluginName
   const requestedResource = descriptor.key
   const requestSequence = loadSequence.value
-  errorMessage.value = ''
   try {
     await deletePluginResourceRecord(requestedPlugin, requestedResource, record.id, record.version)
     // [决策理由] 插件或资源切换后不得使用旧列表长度调整当前分页。
@@ -322,8 +327,8 @@ async function removeRecord(record: PluginResourceRecord): Promise<void> {
     }
     // [决策理由] 删除冲突需要刷新权威列表，避免继续操作陈旧版本。
     if (error instanceof ApiError && error.status === 409) {
-      errorMessage.value = '记录已被其他操作更新，列表已刷新。'
-      await loadRecords(loadSequence.value, true)
+      feedback.warning('记录已被其他操作更新，列表已刷新。')
+      await loadRecords(loadSequence.value)
     } else {
       feedback.error(error, '删除记录失败')
     }
@@ -364,9 +369,6 @@ onMounted(loadDescriptors)
       </div>
     </div>
 
-    <NAlert v-if="errorMessage" class="resource-alert" type="error" title="操作未完成">
-      <div class="alert-content"><span>{{ errorMessage }}</span><NButton size="small" secondary @click="loadRecords()">刷新列表</NButton></div>
-    </NAlert>
     <NSkeleton v-if="loading" text :repeat="4" />
     <NEmpty v-else-if="descriptors.length === 0" description="该插件未声明可管理的业务资源" />
     <template v-else-if="activeDescriptor">
@@ -399,6 +401,7 @@ onMounted(loadDescriptors)
         <NForm label-placement="top" @submit.prevent="saveRecord">
           <NFormItem v-for="field in editableFields" :key="field.key" :label="field.display_name" :required="field.required" :feedback="field.description">
             <NSwitch v-if="field.type === 'boolean'" v-model:value="draft[field.key] as boolean" />
+            <NSelect v-else-if="field.type === 'enum'" v-model:value="draft[field.key] as string" :options="(field.options ?? []).map(value => ({ label: value, value }))" />
             <NInput v-else v-model:value="draft[field.key] as string" :type="field.type === 'multiline' ? 'textarea' : 'text'" />
           </NFormItem>
           <div class="modal-actions"><NButton :disabled="saving" @click="modalVisible = false">取消</NButton><NButton attr-type="submit" type="primary" :loading="saving">保存</NButton></div>
@@ -413,10 +416,8 @@ onMounted(loadDescriptors)
 .resource-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-4); }
 .resource-heading h2 { margin: 0; color: var(--color-text-primary); font-size: var(--font-size-h3); line-height: var(--line-height-h3); }
 .resource-heading p { margin: var(--space-1) 0 0; color: var(--color-text-muted); font-size: var(--font-size-body-sm); line-height: var(--line-height-body-sm); }
-.resource-actions, .operation-cell, .modal-actions, .alert-content { display: flex; align-items: center; gap: var(--space-3); }
+.resource-actions, .operation-cell, .modal-actions { display: flex; align-items: center; gap: var(--space-3); }
 .resource-actions :deep(.n-select) { min-width: 12rem; }
-.resource-alert { margin-bottom: var(--space-4); }
-.alert-content { justify-content: space-between; }
 .resource-table-scroll { overflow-x: auto; }
 .operation-column { width: 10rem; }
 .operation-cell { white-space: nowrap; }
@@ -430,6 +431,5 @@ onMounted(loadDescriptors)
   .resource-heading { flex-direction: column; }
   .resource-actions { width: 100%; }
   .resource-actions :deep(.n-select) { min-width: 0; flex: 1; }
-  .alert-content { align-items: flex-start; flex-direction: column; }
 }
 </style>
