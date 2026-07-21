@@ -258,7 +258,7 @@ func (m *Manager) adminResourceRegistrations(name string) ([]AdminResourceRegist
 	}
 	result := make([]AdminResourceRegistration, len(registrations))
 	for index, registration := range registrations {
-		registration.Descriptor.Fields = cloneConfigFields(registration.Descriptor.Fields)
+		registration.Descriptor.Fields = cloneResourceFields(registration.Descriptor.Fields)
 		result[index] = registration
 	}
 
@@ -291,12 +291,12 @@ func callAdminResources(provider AdminResourceProvider) (registrations []AdminRe
 	return registrations, nil
 }
 
-// cloneConfigFields 深拷贝资源字段及嵌套可变切片。
+// cloneResourceFields 深拷贝资源字段及嵌套可变切片。
 // @param fields：插件持有的字段声明。
 // @returns 与插件后续修改隔离的字段副本。
 // ⚠️副作用说明：分配新切片并复制 RawMessage 与 Options。
-func cloneConfigFields(fields []ConfigField) []ConfigField {
-	result := make([]ConfigField, len(fields))
+func cloneResourceFields(fields []ResourceField) []ResourceField {
+	result := make([]ResourceField, len(fields))
 	for index, field := range fields {
 		field.Default = append([]byte(nil), field.Default...)
 		field.Options = append([]string(nil), field.Options...)

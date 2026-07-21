@@ -93,7 +93,7 @@ func (s *Service) CreatePluginResourceRecord(ctx context.Context, actor Actor, p
 	if !descriptor.CanCreate {
 		return ResourceRecord{}, ErrInvalidResourceData
 	}
-	normalized, err := plugin.NormalizeConfig(plugin.ConfigSchema{Fields: descriptor.Fields}, data)
+	normalized, err := plugin.NormalizeResourceData(descriptor, data)
 	// [决策理由] 平台必须在进入插件前拒绝 null、数组、未知字段和类型错误。
 	if err != nil {
 		return ResourceRecord{}, fmt.Errorf("%w: %v", ErrInvalidResourceData, err)
@@ -124,7 +124,7 @@ func (s *Service) UpdatePluginResourceRecord(ctx context.Context, actor Actor, p
 	if !descriptor.CanUpdate || id <= 0 || expectedVersion <= 0 {
 		return ResourceRecord{}, ErrInvalidResourceData
 	}
-	normalized, err := plugin.NormalizeConfig(plugin.ConfigSchema{Fields: descriptor.Fields}, data)
+	normalized, err := plugin.NormalizeResourceData(descriptor, data)
 	// [决策理由] 更新与新增必须共享相同的严格字段契约。
 	if err != nil {
 		return ResourceRecord{}, fmt.Errorf("%w: %v", ErrInvalidResourceData, err)

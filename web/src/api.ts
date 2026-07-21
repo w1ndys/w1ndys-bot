@@ -27,7 +27,7 @@ export class ApiError extends Error {
   }
 }
 
-export type PluginConfigFieldType = 'string' | 'multiline' | 'integer' | 'boolean' | 'enum' | 'secret'
+export type PluginConfigFieldType = 'string' | 'multiline' | 'integer' | 'boolean' | 'enum' | 'secret' | 'string_list_json' | 'weighted_terms_json' | 'combination_rules_json'
 
 export interface PluginConfigField {
   key: string
@@ -43,6 +43,18 @@ export interface PluginConfigSchema {
   fields: PluginConfigField[]
 }
 
+export type PluginResourceFieldType = 'string' | 'multiline' | 'boolean' | 'enum' | 'datetime'
+
+export interface PluginResourceField {
+  key: string
+  display_name: string
+  description?: string
+  type: PluginResourceFieldType
+  required: boolean
+  default?: unknown
+  options?: string[]
+}
+
 export interface PluginConfigState {
   plugin_name: string
   config: Record<string, unknown>
@@ -53,11 +65,12 @@ export interface PluginResourceDescriptor {
   key: string
   display_name: string
   description?: string
-  fields: PluginConfigField[]
+  fields: PluginResourceField[]
   read_only_fields?: string[]
   can_create: boolean
   can_update: boolean
   can_delete: boolean
+  hidden?: boolean
   max_page_size: number
 }
 

@@ -10,7 +10,7 @@ import {
   listPluginResources,
   updatePluginResourceRecord,
   type PluginResourceDescriptor,
-  type PluginConfigField,
+  type PluginResourceField,
   type PluginResourceRecord,
 } from '../api'
 import { useAppFeedback } from '../feedback'
@@ -39,7 +39,7 @@ const editableFields = computed(() => {
     return []
   }
   const readOnly = new Set(descriptor.read_only_fields ?? [])
-  const result = descriptor.fields.filter(field => !readOnly.has(field.key))
+  const result = descriptor.fields.filter(field => !readOnly.has(field.key) && field.type !== 'datetime')
 
   // >>> 数据演变示例
   // 1. fields=[content,status],readonly=[content] -> 编辑表单仅status。
@@ -52,7 +52,7 @@ const resourceOptions = computed(() => descriptors.value.map(item => ({ label: i
 // @param field：资源字段描述。
 // @returns boolean 字段返回 false，其余字段返回空字符串。
 // ⚠️副作用说明：无。
-function emptyValue(field: PluginConfigField): unknown {
+function emptyValue(field: PluginResourceField): unknown {
   const result = field.type === 'boolean' ? false : ''
 
   // >>> 数据演变示例
@@ -65,11 +65,20 @@ function emptyValue(field: PluginConfigField): unknown {
 // @param field：字段描述；value：记录中的未知值。
 // @returns 适合表格展示的字符串。
 // ⚠️副作用说明：无。
-function displayValue(field: PluginConfigField, value: unknown): string {
+function displayValue(field: PluginResourceField, value: unknown): string {
   // [决策理由] boolean 由专用状态标签呈现，此返回值仅作为可访问文本和异常回退。
   if (field.type === 'boolean') {
     return value === true ? '启用' : '停用'
   }
+	// [决策理由] datetime 由后端提供带时区值，展示时统一转换为浏览器用户时区。
+	if (field.type === 'datetime' && typeof value === 'string') {
+		const date = new Date(value)
+		// [决策理由] 异常存量值原样展示便于排查，不能伪造成有效本地时间。
+		if (Number.isNaN(date.getTime())) {
+			return value
+		}
+		return date.toLocaleString(undefined, { hour12: false })
+	}
   const result = typeof value === 'string' ? value : value === null || value === undefined ? '—' : String(value)
 
   // >>> 数据演变示例
@@ -96,12 +105,13 @@ async function loadDescriptors(): Promise<void> {
     if (sequence !== loadSequence.value || requestedPlugin !== props.pluginName) {
       return
     }
-    descriptors.value = result
-    // [决策理由] 有资源时默认选择首项，确保页面无需插件专属路由即可使用。
-    if (result.length > 0) {
-      resourceKey.value = result[0].key
+    const visible = result.filter(descriptor => descriptor.hidden !== true)
+    descriptors.value = visible
+    // [决策理由] 隐藏资源只作为专用操作端点，不应出现在通用列表或被默认选中。
+    if (visible.length > 0) {
+      resourceKey.value = visible[0].key
       page.value = 1
-      pageSize.value = Math.min(20, result[0].max_page_size)
+      pageSize.value = Math.min(20, visible[0].max_page_size)
       await loadRecords(sequence)
     }
   } catch (error) {
@@ -225,7 +235,7 @@ function openEdit(record: PluginResourceRecord): void {
 // @param fields：当前新增或编辑字段描述。
 // @returns 待提交的字段对象。
 // ⚠️副作用说明：无。
-function buildDraftPayload(fields: PluginConfigField[]): Record<string, unknown> {
+function buildDraftPayload(fields: PluginResourceField[]): Record<string, unknown> {
   const result: Record<string, unknown> = {}
   for (const field of fields) {
     result[field.key] = draft.value[field.key]

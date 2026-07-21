@@ -217,10 +217,10 @@ func newImplementation(messenger plugin.Messenger, repository repository) *imple
 // @returns rules资源描述符。
 // ⚠️副作用说明：分配字段切片。
 func rulesDescriptor() plugin.AdminResource {
-	descriptor := plugin.AdminResource{Key: resourceKey, DisplayName: "关键词规则", Description: "群消息完全等于关键词时引用回复指定内容", CanCreate: true, CanUpdate: true, CanDelete: true, MaxPageSize: 100, Fields: []plugin.ConfigField{
-		{Key: "keyword", DisplayName: "关键词", Description: "完全匹配原始群消息，最多200字符", Type: plugin.FieldString, Required: true},
-		{Key: "reply_content", DisplayName: "回复内容", Description: "命中后引用回复的文本，最多2000字符", Type: plugin.FieldMultiline, Required: true},
-		{Key: "enabled", DisplayName: "启用", Type: plugin.FieldBoolean, Default: json.RawMessage(`true`)},
+	descriptor := plugin.AdminResource{Key: resourceKey, DisplayName: "关键词规则", Description: "群消息完全等于关键词时引用回复指定内容", CanCreate: true, CanUpdate: true, CanDelete: true, MaxPageSize: 100, Fields: []plugin.ResourceField{
+		{Key: "keyword", DisplayName: "关键词", Description: "完全匹配原始群消息，最多200字符", Type: plugin.ResourceFieldString, Required: true},
+		{Key: "reply_content", DisplayName: "回复内容", Description: "命中后引用回复的文本，最多2000字符", Type: plugin.ResourceFieldMultiline, Required: true},
+		{Key: "enabled", DisplayName: "启用", Type: plugin.ResourceFieldBoolean, Default: json.RawMessage(`true`)},
 	}}
 
 	// >>> 数据演变示例
