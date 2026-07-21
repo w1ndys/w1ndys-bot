@@ -24,6 +24,10 @@
 
 Go 代码必须通过 `gofmt`；包名小写，导出类型使用 `PascalCase`，函数和变量遵循 Go 惯例。Vue/TypeScript 使用 2 空格缩进，组件名使用 `PascalCase`，变量和函数使用 `camelCase`。环境变量使用 `UPPER_SNAKE_CASE`。避免无关格式化，公共接口注释说明设计原因。不得修改已部署的迁移；数据库变化应新增配对的 `NNNNNN_description.up.sql` 与 `.down.sql`。
 
+所有持久化时间统一以 UTC 写入和读取，数据库字段优先使用带时区的时间类型；后端 API 返回明确包含时区信息的时间值，不在服务端按部署机器或用户本地时区格式化。WebUI 在展示层统一根据当前用户时区转换时间，提交时间条件时必须携带明确时区并由后端规范化为 UTC，禁止在业务表中混存本地时间。
+
+WebUI 的成功、失败、警告和操作结果反馈必须统一使用应用级全局 Toast；组件不得自行创建局部 Toast、重复挂载消息 Provider，或使用页面内临时提示替代全局操作反馈。字段校验等与具体输入位置强关联的信息可保留在表单项内，但不得重复弹出同义 Toast。
+
 ## AI 辅助编程规范
 
 开发或评审插件、插件配置、插件业务数据 CRUD、通用管理 API 或 WebUI 时，必须先使用项目 Skill：`.agents/skills/plugin-development/SKILL.md`。详细的声明式配置与通用资源架构位于该 Skill 的 `references/architecture.md`。
