@@ -9,6 +9,7 @@ RUN npm run build
 
 FROM golang:1.26-alpine AS builder
 
+ARG GOPROXY=https://proxy.golang.org,direct
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
