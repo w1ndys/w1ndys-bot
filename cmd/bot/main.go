@@ -25,6 +25,7 @@ import (
 	projectlogger "github.com/w1ndys/w1ndys-bot/pkg/logger"
 	_ "github.com/w1ndys/w1ndys-bot/plugins/admin"
 	_ "github.com/w1ndys/w1ndys-bot/plugins/echo"
+	_ "github.com/w1ndys/w1ndys-bot/plugins/forbidden_message_monitor"
 	_ "github.com/w1ndys/w1ndys-bot/plugins/keyword_reply"
 )
 
@@ -157,7 +158,7 @@ func main() {
 	})
 	botAPI := onebot.New(wsServer.Actions())
 	for _, registration := range registrations {
-		implementation, err := registration.New(plugin.Runtime{Messenger: botAPI, Management: adminService, Database: pool})
+		implementation, err := registration.New(plugin.Runtime{Messenger: botAPI, Actions: botAPI, Management: adminService, Database: pool})
 		// [决策理由] 工厂失败或返回错误实现时该插件不能进入运行路由。
 		if err != nil {
 			projectlogger.Error("创建插件运行实例失败", "plugin", registration.Manifest.Name, "error", err)
