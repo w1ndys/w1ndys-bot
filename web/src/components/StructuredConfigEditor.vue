@@ -46,18 +46,47 @@ function loadValue(value: string): void {
     }
     // [决策理由] 字符串列表只需要单列文本行。
     if (props.kind === 'string_list_json') {
-      rows.value = parsed.map(item => ({ ...emptyRow(), text: String(item) }))
+      rows.value = parsed.map(item => {
+        // [决策理由] 非字符串旧值无法无损编辑，必须阻止静默强制转换。
+        if (typeof item !== 'string') {
+          throw new Error('字符串列表包含非文本项')
+        }
+        return { ...emptyRow(), text: item }
+      })
     } else if (props.kind === 'weighted_terms_json') {
       // [决策理由] 权重词条使用文本与数值双列，保持后端既有字段名。
       rows.value = parsed.map(item => {
-        const record = item as { text?: unknown; weight?: unknown }
-        return { ...emptyRow(), text: String(record.text ?? ''), weight: typeof record.weight === 'number' ? record.weight : 0 }
+        // [决策理由] 数组和null不具备词条对象语义，不能按普通对象读取。
+        if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+          throw new Error('权重词条包含非对象项')
+        }
+        const record = item as Record<string, unknown>
+        // [决策理由] 未知字段无法由结构化表单表达，允许编辑会在保存时静默丢失数据。
+        if (Object.keys(record).some(key => key !== 'text' && key !== 'weight')) {
+          throw new Error('权重词条包含未知字段')
+        }
+        // [决策理由] 文本和权重类型异常时继续编辑会覆盖原始数据。
+        if (typeof record.text !== 'string' || typeof record.weight !== 'number' || !Number.isFinite(record.weight)) {
+          throw new Error('权重词条必须包含文本text和有限数值weight')
+        }
+        return { ...emptyRow(), text: record.text, weight: record.weight }
       })
     } else {
       rows.value = parsed.map(item => {
-        const record = item as { terms?: unknown; bonus?: unknown }
-        const terms = Array.isArray(record.terms) ? record.terms.map(String).join('，') : ''
-        return { ...emptyRow(), terms, bonus: typeof record.bonus === 'number' ? record.bonus : 0 }
+        // [决策理由] 组合规则只能从普通对象安全恢复。
+        if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+          throw new Error('组合规则包含非对象项')
+        }
+        const record = item as Record<string, unknown>
+        // [决策理由] 组合规则只允许terms和bonus，保证前后端严格校验一致。
+        if (Object.keys(record).some(key => key !== 'terms' && key !== 'bonus')) {
+          throw new Error('组合规则包含未知字段')
+        }
+        // [决策理由] 组合词必须全部为文本且加分必须为有限数值，防止异常旧值被规范化覆盖。
+        if (!Array.isArray(record.terms) || !record.terms.every(term => typeof term === 'string') || typeof record.bonus !== 'number' || !Number.isFinite(record.bonus)) {
+          throw new Error('组合规则必须包含文本数组terms和有限数值bonus')
+        }
+        return { ...emptyRow(), terms: record.terms.join('，'), bonus: record.bonus }
       })
     }
   } catch (error) {
@@ -167,7 +196,7 @@ watch(() => props.kind, () => loadValue(props.modelValue))
       <NButton type="error" tertiary @click="removeRow(index)">删除</NButton>
     </div>
     <p v-if="parseError" class="structured-error">{{ parseError }}</p>
-    <NButton secondary type="primary" @click="addRow">添加一项</NButton>
+    <NButton secondary type="primary" :disabled="parseError !== ''" @click="addRow">添加一项</NButton>
   </div>
 </template>
 
