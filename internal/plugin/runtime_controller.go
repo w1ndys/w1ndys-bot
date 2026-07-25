@@ -90,6 +90,24 @@ func (c *RuntimeController) SetGroupEnabled(pluginKey string, groupID int64, ena
 	return nil
 }
 
+func (c *RuntimeController) replaceGroupStates(pluginKey string, groups map[int64]bool) error {
+	entry, found := c.entry(pluginKey)
+	if !found {
+		return ErrRuntimePluginNotFound
+	}
+	next := make(map[int64]bool, len(groups))
+	for groupID, enabled := range groups {
+		if groupID <= 0 {
+			return ErrInvalidRuntimeGroupID
+		}
+		next[groupID] = enabled
+	}
+	entry.mu.Lock()
+	entry.groups = next
+	entry.mu.Unlock()
+	return nil
+}
+
 // Enable 完成生命周期准备后才把插件发布为 Ready。
 func (c *RuntimeController) Enable(ctx context.Context, pluginKey string) error {
 	entry, found := c.entry(pluginKey)
