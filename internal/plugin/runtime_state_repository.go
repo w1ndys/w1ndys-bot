@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,7 +14,13 @@ import (
 type runtimeStateDatabase interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
 }
+
+var (
+	ErrRuntimeStateConflict       = errors.New("插件状态版本冲突")
+	ErrRuntimeStateInvalidVersion = errors.New("插件状态版本无效")
+)
 
 // PersistedGroupState 是一个插件的显式逐群开关快照。
 type PersistedGroupState struct {
@@ -115,4 +122,74 @@ ORDER BY s.plugin_key,g.group_id`)
 		return nil, fmt.Errorf("遍历插件状态快照: %w", err)
 	}
 	return states, nil
+}
+
+// UpdateDesiredEnabled 使用乐观锁更新插件全局启用意图。
+func (r *PostgresRuntimeStateRepository) UpdateDesiredEnabled(ctx context.Context, pluginKey string, enabled bool, expectedVersion int64) (PersistedPluginState, error) {
+	if r == nil || r.database == nil {
+		return PersistedPluginState{}, fmt.Errorf("插件状态仓库未初始化")
+	}
+	if !identifierPattern.MatchString(pluginKey) {
+		return PersistedPluginState{}, fmt.Errorf("无效插件 Key %q", pluginKey)
+	}
+	if expectedVersion <= 0 {
+		return PersistedPluginState{}, ErrRuntimeStateInvalidVersion
+	}
+	var state PersistedPluginState
+	err := r.database.QueryRow(ctx, `UPDATE plugin_states
+SET desired_enabled=$2,version=version+1,updated_at=NOW()
+WHERE plugin_key=$1 AND version=$3
+RETURNING plugin_key,desired_enabled,version,updated_at`, pluginKey, enabled, expectedVersion).
+		Scan(&state.PluginKey, &state.DesiredEnabled, &state.Version, &state.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PersistedPluginState{}, ErrRuntimeStateConflict
+	}
+	if err != nil {
+		return PersistedPluginState{}, fmt.Errorf("更新插件全局状态: %w", err)
+	}
+	state.UpdatedAt = state.UpdatedAt.UTC()
+	state.Groups = make([]PersistedGroupState, 0)
+	return state, nil
+}
+
+// SetGroupEnabled 新增或使用乐观锁更新插件逐群开关。
+func (r *PostgresRuntimeStateRepository) SetGroupEnabled(ctx context.Context, pluginKey string, groupID int64, enabled bool, expectedVersion int64) (PersistedGroupState, error) {
+	if r == nil || r.database == nil {
+		return PersistedGroupState{}, fmt.Errorf("插件状态仓库未初始化")
+	}
+	if !identifierPattern.MatchString(pluginKey) {
+		return PersistedGroupState{}, fmt.Errorf("无效插件 Key %q", pluginKey)
+	}
+	if groupID <= 0 {
+		return PersistedGroupState{}, ErrInvalidRuntimeGroupID
+	}
+	if expectedVersion < 0 {
+		return PersistedGroupState{}, ErrRuntimeStateInvalidVersion
+	}
+	var state PersistedGroupState
+	var row pgx.Row
+	if expectedVersion == 0 {
+		row = r.database.QueryRow(ctx, `INSERT INTO plugin_group_states(plugin_key,group_id,enabled)
+VALUES($1,$2,$3)
+ON CONFLICT (plugin_key,group_id) DO NOTHING
+RETURNING group_id,enabled,version,updated_at`, pluginKey, groupID, enabled)
+	} else {
+		row = r.database.QueryRow(ctx, `UPDATE plugin_group_states
+SET enabled=$3,version=version+1,updated_at=NOW()
+WHERE plugin_key=$1 AND group_id=$2 AND version=$4
+RETURNING group_id,enabled,version,updated_at`, pluginKey, groupID, enabled, expectedVersion)
+	}
+	err := row.Scan(&state.GroupID, &state.Enabled, &state.Version, &state.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PersistedGroupState{}, ErrRuntimeStateConflict
+	}
+	if err != nil {
+		var postgresError *pgconn.PgError
+		if errors.As(err, &postgresError) && postgresError.Code == "23503" {
+			return PersistedGroupState{}, ErrRuntimeStateConflict
+		}
+		return PersistedGroupState{}, fmt.Errorf("保存插件群状态: %w", err)
+	}
+	state.UpdatedAt = state.UpdatedAt.UTC()
+	return state, nil
 }
