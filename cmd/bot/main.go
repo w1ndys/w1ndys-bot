@@ -106,12 +106,6 @@ func main() {
 	}
 	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool), plugin.NewPostgresGroupGate(pool))
 	adminService := admin.NewService(adminRepository, pluginManager, commands, permissions, settingsResolver, adminResolver)
-	webServer, err := webapi.New(cfg.WebUIPassword, cfg.JWTSecret, adminResolver, adminService)
-	// [决策理由] WebUI 认证配置不安全时不得开放包含管理能力的 HTTP 服务。
-	if err != nil {
-		projectlogger.Error("初始化WebAPI失败", "error", err)
-		return
-	}
 	// [决策理由] 目标架构入口依赖只能在 botAPI 就绪后构建，但 WS 回调必须更早注册；监听开始前完成赋值，回调不会读到 nil。
 	var targetDispatcher *plugin.EventDispatcher
 	wsServer := ws.NewServer(cfg.NapCatToken, func(_ context.Context, event ws.Event) error {
@@ -231,6 +225,18 @@ func main() {
 	targetDispatcher, err = plugin.NewEventDispatcher(commandDispatcher, observerDispatcher)
 	if err != nil {
 		projectlogger.Error("构建目标插件事件入口失败", "error", err)
+		return
+	}
+	runtimeService, err := plugin.NewRuntimeService(specCatalog, runtimeController, runtimeStateRepository, adminService)
+	// [决策理由] 开关服务是 WebUI 与 QQ 应急入口的唯一写路径，缺失时目标插件将无法管理。
+	if err != nil {
+		projectlogger.Error("构建插件开关服务失败", "error", err)
+		return
+	}
+	webServer, err := webapi.New(cfg.WebUIPassword, cfg.JWTSecret, adminResolver, adminService, runtimeService)
+	// [决策理由] WebUI 认证配置不安全时不得开放包含管理能力的 HTTP 服务。
+	if err != nil {
+		projectlogger.Error("初始化WebAPI失败", "error", err)
 		return
 	}
 	for _, registration := range registrations {
