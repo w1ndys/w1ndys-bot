@@ -161,26 +161,26 @@ WebUI 产品名称固定为 `w1ndys-bot-webui`，不作为系统设置开放修�
 - [x] 全局与群开关状态表、乐观锁写入及与状态同事务的审计
 - [x] `RuntimeService` 开关应用服务与 `/api/plugin-runtimes` 管理 API
 - [x] Echo 迁移至目标架构并完成唯一执行链接线
+- [x] WebUI 目标插件开关页面、意图与实际状态对照及只读命令声明
 
 ## 7. 后续开发计划
 
 按以下顺序推进，每一步完成测试并独立提交。插件架构迁移的完整阶段表见 `docs/plugin-architecture-v2.md` 第 12 节，剩余阶段为：
 
-1. WebUI 目标插件开关页面，消费 `/api/plugin-runtimes`。
-2. 小型 ConfigSchema 接入 `PluginSpec` 与通用配置页，并补回 Echo 的 `response_prefix`。
-3. 迁移 Keyword Reply，验证插件自有业务表、专属 API 与页面。
-4. 迁移 Forbidden Monitor，验证复杂工作流与外部副作用。
-5. QQ 应急入口改为复用 `RuntimeService`，不维护第二套开关逻辑。
-6. 删除旧权限矩阵、Feature/命令同步与通用 AdminResource，并重建数据库基线。
+1. 小型 ConfigSchema 接入 `PluginSpec` 与通用配置页，并补回 Echo 的 `response_prefix`。
+2. 迁移 Keyword Reply，验证插件自有业务表、专属 API 与页面。
+3. 迁移 Forbidden Monitor，验证复杂工作流与外部副作用。
+4. QQ 应急入口改为复用 `RuntimeService`，不维护第二套开关逻辑。
+5. 删除旧权限矩阵、Feature/命令同步与通用 AdminResource，并重建数据库基线。
 
 迁移完成后：
 
-7. 建立 Git Tag 与多架构容器镜像发布流程。
-8. 首次发布前按部署手册执行全量备份、升级与回滚演练。
+6. 建立 Git Tag 与多架构容器镜像发布流程。
+7. 首次发布前按部署手册执行全量备份、升级与回滚演练。
 
 WebUI Admin Console 已实现插件、功能触发词、权限策略、系统设置和只读审计日志页面。QQ 通道仅作为轻量应急入口，最高管理员可使用 `/插件列表`、`/启用插件 <名称>` 和 `/禁用插件 <名称>`；功能触发词、权限策略和优先级统一由 WebUI 管理。声明式插件配置已提供 Schema 驱动通用表单、secret 写入保留、脱敏读取、版本冲突检测、审计和热应用；普通插件无需单独编写配置页面。系统 `admin` 插件不可通过管理服务禁用。所有管理变更必须同时经过授权校验、重复检测、热更新和审计记录。
 
-已迁移到目标架构的插件不出现在上述旧页面中，其状态与全局、逐群开关目前只能通过 `/api/plugin-runtimes` 管理，WebUI 页面尚未提供。这些插件的触发词与允许身份由代码持有，WebUI 只读展示，不接受修改。
+已迁移到目标架构的插件不出现在上述旧页面中，其状态、全局与逐群开关由侧栏「插件运行」页（`/plugin-runtimes`）管理，该页同时展示管理员意图、进程内实际状态和最近一次运行错误。这些插件的触发词与允许身份由代码持有，WebUI 只读展示，不接受修改。
 
 ## 8. 阶段验收
 
