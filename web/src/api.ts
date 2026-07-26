@@ -625,3 +625,79 @@ export function getAuditLog(id: number): Promise<AuditState> {
   // 2. id=404 -> 后端404 -> 抛出“审计日志不存在”。
   return result
 }
+
+export interface PluginRuntimeCommand {
+  key: string
+  display_name: string
+  description: string
+  triggers: string[]
+  scope: string
+  allowed_roles: string[]
+}
+
+export interface PluginRuntimeGroup {
+  group_id: number
+  enabled: boolean
+  version: number
+  updated_at: string
+}
+
+export interface PluginRuntimeState {
+  plugin_key: string
+  display_name: string
+  description: string
+  admin_page_key: string
+  desired_enabled: boolean
+  version: number
+  updated_at: string
+  status: string
+  in_flight: number
+  last_error: string
+  commands: PluginRuntimeCommand[]
+  groups: PluginRuntimeGroup[]
+}
+
+// listPluginRuntimes 读取目标架构插件的意图、实际运行状态与群开关。
+// @param 无。
+// @returns 按编译期目录顺序排列的插件运行状态。
+// ⚠️副作用说明：发起鉴权网络请求。
+export function listPluginRuntimes(): Promise<PluginRuntimeState[]> {
+  const result = apiRequest<PluginRuntimeState[]>('/api/plugin-runtimes')
+
+  // >>> 数据演变示例
+  // 1. 有效Token -> GET -> [echo{status:ready}]。
+  // 2. 过期Token -> 清理会话并抛错。
+  return result
+}
+
+// setPluginRuntimeEnabled 按乐观锁修改插件全局启用意图。
+// @param pluginKey：稳定插件 Key；enabled：目标意图；expectedVersion：当前版本。
+// @returns 写入并驱动生命周期后的权威状态。
+// ⚠️副作用说明：修改后端状态、审计记录并触发插件启停。
+export function setPluginRuntimeEnabled(pluginKey: string, enabled: boolean, expectedVersion: number): Promise<PluginRuntimeState> {
+  const result = apiRequest<PluginRuntimeState>(`/api/plugin-runtimes/${encodeURIComponent(pluginKey)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ enabled, expected_version: expectedVersion }),
+  })
+
+  // >>> 数据演变示例
+  // 1. echo+true+v1 -> PATCH -> v2且status=ready。
+  // 2. 陈旧版本 -> 409 -> 抛出冲突错误。
+  return result
+}
+
+// setPluginRuntimeGroupEnabled 按乐观锁修改插件在单个群的开关。
+// @param pluginKey：稳定插件 Key；groupID：群号；enabled：目标值；expectedVersion：0 表示尚无记录。
+// @returns 写入后的插件权威状态。
+// ⚠️副作用说明：修改后端群状态、审计记录并刷新运行门禁。
+export function setPluginRuntimeGroupEnabled(pluginKey: string, groupID: number, enabled: boolean, expectedVersion: number): Promise<PluginRuntimeState> {
+  const result = apiRequest<PluginRuntimeState>(`/api/plugin-runtimes/${encodeURIComponent(pluginKey)}/groups/${groupID}`, {
+    method: 'PUT',
+    body: JSON.stringify({ enabled, expected_version: expectedVersion }),
+  })
+
+  // >>> 数据演变示例
+  // 1. echo+100+true+v0 -> PUT -> 新增群记录v1。
+  // 2. 全局关闭时写入 -> 200，但命令仍被全局门禁拒绝。
+  return result
+}

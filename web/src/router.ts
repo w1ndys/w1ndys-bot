@@ -145,6 +145,19 @@ function loadPluginGroupsView() {
   return result
 }
 
+// loadPluginRuntimesView 懒加载目标架构插件运行状态页。
+// @param 无。
+// @returns 插件运行状态组件模块 Promise。
+// ⚠️副作用说明：首次访问时发起前端代码块请求。
+function loadPluginRuntimesView() {
+  const result = import('./views/PluginRuntimesView.vue')
+
+  // >>> 数据演变示例
+  // 1. /plugin-runtimes -> 请求运行状态代码块 -> 渲染开关卡片。
+  // 2. 已缓存 -> 直接复用模块。
+  return result
+}
+
 const router = createRouter({
   history: createWebHistory(),
   routes: [
@@ -165,6 +178,7 @@ const router = createRouter({
         { path: 'groups', name: 'plugin-groups', component: loadPluginGroupsView },
       ],
     },
+    { path: '/plugin-runtimes', name: 'plugin-runtimes', component: loadPluginRuntimesView, meta: { requiresAuth: true } },
     { path: '/settings', name: 'settings', component: loadSettingsView, meta: { requiresAuth: true } },
     { path: '/audit-logs', name: 'audit-logs', component: loadAuditLogsView, meta: { requiresAuth: true } },
   ],
