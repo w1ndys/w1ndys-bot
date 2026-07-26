@@ -14,4 +14,7 @@ const (
 	triggerEchoCN      = "回声"       // 中文触发词，由代码持有，数据库不可覆盖
 
 	usageTemplate = "用法：%s <要重复的内容>" // 空参数时的引导回复
+
+	configKeyResponsePrefix = "response_prefix" // 小型配置字段键，WebUI 通用配置表单据此渲染
+	maxResponsePrefixRunes  = 100               // 回复前缀长度上限，避免单条命令无界放大回复负载
 )

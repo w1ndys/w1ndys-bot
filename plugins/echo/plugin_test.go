@@ -3,7 +3,9 @@ package echo
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/w1ndys/w1ndys-bot/internal/plugin"
@@ -123,5 +125,68 @@ func TestHandlerPropagatesMessengerFailure(t *testing.T) {
 	})
 	if !errors.Is(err, sendFailure) {
 		t.Fatalf("Handler() error = %v", err)
+	}
+}
+
+func TestSpecDeclaresSmallConfig(t *testing.T) {
+	spec, err := Spec(&fakeMessenger{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Config == nil || len(spec.Config.Schema.Fields) != 1 {
+		t.Fatalf("config = %+v", spec.Config)
+	}
+	field := spec.Config.Schema.Fields[0]
+	if field.Key != "response_prefix" || field.Type != plugin.FieldString {
+		t.Fatalf("field = %+v", field)
+	}
+	// 平台会在启用前调用 Apply，缺少钩子会让配置只写库不生效。
+	if spec.Config.Apply == nil || spec.Config.Validate == nil {
+		t.Fatal("config hooks missing")
+	}
+}
+
+func TestConfigHotApplyAffectsReply(t *testing.T) {
+	messenger := &fakeMessenger{}
+	spec, err := Spec(messenger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := json.RawMessage(`{"response_prefix":"[bot] "}`)
+	if err := spec.Config.Validate(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := spec.Config.Apply(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	message := &ws.MessageEvent{MessageType: "group", GroupID: 100, UserID: 200, MessageID: 20}
+	err = spec.Commands[0].Handler(plugin.CommandContext{
+		Context: context.Background(), Message: message,
+		Trigger: "echo", Arguments: "Hello", Role: plugin.RoleGroupMember,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 热应用后的快照必须立即影响回复内容。
+	if messenger.reply != "[bot] Hello" {
+		t.Fatalf("reply = %q", messenger.reply)
+	}
+}
+
+func TestValidateConfigRejectsOverlongPrefix(t *testing.T) {
+	spec, err := Spec(&fakeMessenger{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tooLong, err := json.Marshal(map[string]string{"response_prefix": strings.Repeat("前", 101)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := spec.Config.Validate(context.Background(), tooLong); err == nil {
+		t.Fatal("Validate() expected length error")
+	}
+	// 校验失败不得改变已发布的快照。
+	if err := spec.Config.Apply(context.Background(), json.RawMessage(`{"response_prefix":""}`)); err != nil {
+		t.Fatal(err)
 	}
 }
