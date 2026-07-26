@@ -5,81 +5,71 @@ import (
 	"errors"
 	"sync"
 	"testing"
+
+	"github.com/w1ndys/w1ndys-bot/internal/ws"
 )
 
-type identityTestRoleSource struct {
-	role    Role
-	err     error
-	calls   int
-	groupID int64
-	userID  int64
-}
-
-func (s *identityTestRoleSource) ResolveGroupRole(_ context.Context, groupID int64, userID int64) (Role, error) {
-	s.calls++
-	s.groupID = groupID
-	s.userID = userID
-	return s.role, s.err
+func identityTestMessage(groupID, userID int64, role string) *ws.MessageEvent {
+	return &ws.MessageEvent{
+		MessageType: "group", GroupID: groupID, UserID: userID,
+		Sender: ws.MessageSender{UserID: userID, Role: role},
+	}
 }
 
 func TestCodeIdentityResolverPrioritizesConfiguredSuperAdmin(t *testing.T) {
-	source := &identityTestRoleSource{role: RoleGroupMember}
-	resolver, err := NewCodeIdentityResolver(100, source)
+	resolver, err := NewCodeIdentityResolver(100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	role, err := resolver.Resolve(context.Background(), 200, 100)
+	// 最高管理员即使在群里只是普通成员也必须解析为 super_admin。
+	role, err := resolver.Resolve(context.Background(), identityTestMessage(200, 100, "member"))
 	if err != nil || role != RoleSuperAdmin {
 		t.Fatalf("Resolve() = %q,%v", role, err)
-	}
-	if source.calls != 0 {
-		t.Fatalf("group source calls = %d", source.calls)
 	}
 }
 
 func TestCodeIdentityResolverMapsClosedGroupRoles(t *testing.T) {
-	for _, want := range []Role{RoleGroupOwner, RoleGroupAdmin, RoleGroupMember} {
-		t.Run(string(want), func(t *testing.T) {
-			source := &identityTestRoleSource{role: want}
-			resolver, err := NewCodeIdentityResolver(0, source)
+	tests := map[string]Role{"owner": RoleGroupOwner, "admin": RoleGroupAdmin, "member": RoleGroupMember}
+	for sender, want := range tests {
+		t.Run(sender, func(t *testing.T) {
+			resolver, err := NewCodeIdentityResolver(0)
 			if err != nil {
 				t.Fatal(err)
 			}
-			role, err := resolver.Resolve(context.Background(), 200, 300)
+			role, err := resolver.Resolve(context.Background(), identityTestMessage(200, 300, sender))
 			if err != nil || role != want {
 				t.Fatalf("Resolve() = %q,%v", role, err)
-			}
-			if source.calls != 1 || source.groupID != 200 || source.userID != 300 {
-				t.Fatalf("source = %+v", source)
 			}
 		})
 	}
 }
 
 func TestCodeIdentityResolverFailsClosed(t *testing.T) {
-	sourceFailure := errors.New("source unavailable")
+	private := identityTestMessage(0, 300, "member")
+	private.MessageType = "private"
+	mismatched := identityTestMessage(200, 300, "member")
+	mismatched.Sender.UserID = 400
 	tests := []struct {
 		name    string
-		groupID int64
-		userID  int64
-		role    Role
-		source  error
+		message *ws.MessageEvent
 		want    error
 	}{
-		{name: "invalid group", groupID: 0, userID: 300, role: RoleGroupMember, want: ErrIdentityInvalidSubject},
-		{name: "invalid user", groupID: 200, userID: 0, role: RoleGroupMember, want: ErrIdentityInvalidSubject},
-		{name: "unknown role", groupID: 200, userID: 300, role: "owner_typo", want: ErrIdentityUnknownRole},
-		{name: "source error", groupID: 200, userID: 300, source: sourceFailure, want: sourceFailure},
-		{name: "source super admin", groupID: 200, userID: 300, role: RoleSuperAdmin, want: ErrIdentityUnknownRole},
+		{name: "nil message", want: ErrIdentityInvalidSubject},
+		{name: "private message", message: private, want: ErrIdentityInvalidSubject},
+		{name: "invalid group", message: identityTestMessage(0, 300, "member"), want: ErrIdentityInvalidSubject},
+		{name: "invalid user", message: identityTestMessage(200, 0, "member"), want: ErrIdentityInvalidSubject},
+		{name: "sender mismatch", message: mismatched, want: ErrIdentityInvalidSubject},
+		{name: "empty role", message: identityTestMessage(200, 300, ""), want: ErrIdentityUnknownRole},
+		{name: "unknown role", message: identityTestMessage(200, 300, "owner_typo"), want: ErrIdentityUnknownRole},
+		{name: "super admin role", message: identityTestMessage(200, 300, string(RoleSuperAdmin)), want: ErrIdentityUnknownRole},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			source := &identityTestRoleSource{role: test.role, err: test.source}
-			resolver, err := NewCodeIdentityResolver(100, source)
+			resolver, err := NewCodeIdentityResolver(100)
 			if err != nil {
 				t.Fatal(err)
 			}
-			role, err := resolver.Resolve(context.Background(), test.groupID, test.userID)
+			role, err := resolver.Resolve(context.Background(), test.message)
 			if role != "" || !errors.Is(err, test.want) {
 				t.Fatalf("Resolve() = %q,%v", role, err)
 			}
@@ -87,33 +77,24 @@ func TestCodeIdentityResolverFailsClosed(t *testing.T) {
 	}
 }
 
-func TestNewCodeIdentityResolverRejectsInvalidDependencies(t *testing.T) {
-	var typedNil *identityTestRoleSource
-	tests := []struct {
-		superAdminID int64
-		source       GroupRoleSource
-	}{
-		{superAdminID: -1, source: &identityTestRoleSource{}},
-		{superAdminID: 100},
-		{superAdminID: 100, source: typedNil},
+func TestNewCodeIdentityResolverRejectsInvalidSuperAdmin(t *testing.T) {
+	resolver, err := NewCodeIdentityResolver(-1)
+	if resolver != nil || err == nil {
+		t.Fatalf("NewCodeIdentityResolver(-1) = %v,%v", resolver, err)
 	}
-	for _, test := range tests {
-		resolver, err := NewCodeIdentityResolver(test.superAdminID, test.source)
-		if resolver != nil || err == nil {
-			t.Fatalf("NewCodeIdentityResolver() = %v,%v", resolver, err)
-		}
+	// 未配置最高管理员时仍可解析普通群身份。
+	resolver, err = NewCodeIdentityResolver(0)
+	if resolver == nil || err != nil {
+		t.Fatalf("NewCodeIdentityResolver(0) = %v,%v", resolver, err)
 	}
-}
-
-type concurrentIdentityRoleSource struct{}
-
-func (concurrentIdentityRoleSource) ResolveGroupRole(context.Context, int64, int64) (Role, error) {
-	return RoleGroupMember, nil
+	if role, err := resolver.Resolve(context.Background(), identityTestMessage(200, 100, "member")); role != RoleGroupMember || err != nil {
+		t.Fatalf("Resolve() = %q,%v", role, err)
+	}
 }
 
 func TestCodeIdentityResolverSupportsConcurrentResolution(t *testing.T) {
 	const calls = 64
-	resolver, err := NewCodeIdentityResolver(100, concurrentIdentityRoleSource{})
+	resolver, err := NewCodeIdentityResolver(100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +104,7 @@ func TestCodeIdentityResolverSupportsConcurrentResolution(t *testing.T) {
 		waitGroup.Add(1)
 		go func(userID int64) {
 			defer waitGroup.Done()
-			role, resolveErr := resolver.Resolve(context.Background(), 200, userID)
+			role, resolveErr := resolver.Resolve(context.Background(), identityTestMessage(200, userID, "member"))
 			want := RoleGroupMember
 			if userID == 100 {
 				want = RoleSuperAdmin

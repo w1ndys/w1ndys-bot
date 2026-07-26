@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
+
+	"github.com/w1ndys/w1ndys-bot/internal/ws"
 )
 
 var (
@@ -12,57 +13,40 @@ var (
 	ErrIdentityUnknownRole    = errors.New("群成员身份未知")
 )
 
-// GroupRoleSource 根据可信群号与用户号提供当前群身份，实现必须支持并发调用。
-type GroupRoleSource interface {
-	ResolveGroupRole(ctx context.Context, groupID int64, userID int64) (Role, error)
-}
-
-// CodeIdentityResolver 将平台最高管理员和群身份来源映射为代码 Role。
+// CodeIdentityResolver 使用最高管理员快照和 NapCat 上报的群角色解析封闭代码身份。
 type CodeIdentityResolver struct {
 	superAdminID int64
-	groupRoles   GroupRoleSource
 }
 
 // NewCodeIdentityResolver 创建不依赖旧权限矩阵的代码身份解析器。
-func NewCodeIdentityResolver(superAdminID int64, groupRoles GroupRoleSource) (*CodeIdentityResolver, error) {
+func NewCodeIdentityResolver(superAdminID int64) (*CodeIdentityResolver, error) {
 	if superAdminID < 0 {
 		return nil, errors.New("最高管理员 QQ 不能为负数")
 	}
-	if isNilGroupRoleSource(groupRoles) {
-		return nil, errors.New("群身份来源不能为空")
-	}
-	return &CodeIdentityResolver{superAdminID: superAdminID, groupRoles: groupRoles}, nil
+	return &CodeIdentityResolver{superAdminID: superAdminID}, nil
 }
 
-func isNilGroupRoleSource(source GroupRoleSource) bool {
-	if source == nil {
-		return true
-	}
-	value := reflect.ValueOf(source)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return value.IsNil()
-	default:
-		return false
-	}
-}
-
-// Resolve 按最高管理员优先级解析封闭代码身份。
-func (r *CodeIdentityResolver) Resolve(ctx context.Context, groupID int64, userID int64) (Role, error) {
-	if r == nil || r.groupRoles == nil || groupID <= 0 || userID <= 0 {
+// Resolve 按最高管理员优先级解析群消息发送者的封闭代码身份。
+// 群角色取自 NapCat 上报的 sender 字段；未知或缺失角色一律 fail-closed。
+func (r *CodeIdentityResolver) Resolve(_ context.Context, message *ws.MessageEvent) (Role, error) {
+	if r == nil || message == nil || message.MessageType != "group" || message.GroupID <= 0 || message.UserID <= 0 {
 		return "", ErrIdentityInvalidSubject
 	}
-	if r.superAdminID > 0 && userID == r.superAdminID {
+	// 发送者与事件用户不一致时无法确定角色归属，必须拒绝而不是就近取值。
+	if message.Sender.UserID != 0 && message.Sender.UserID != message.UserID {
+		return "", fmt.Errorf("%w: sender %d 与事件用户 %d 不一致", ErrIdentityInvalidSubject, message.Sender.UserID, message.UserID)
+	}
+	if r.superAdminID > 0 && message.UserID == r.superAdminID {
 		return RoleSuperAdmin, nil
 	}
-	role, err := r.groupRoles.ResolveGroupRole(ctx, groupID, userID)
-	if err != nil {
-		return "", fmt.Errorf("查询群身份: %w", err)
-	}
-	switch role {
-	case RoleGroupOwner, RoleGroupAdmin, RoleGroupMember:
-		return role, nil
+	switch message.Sender.Role {
+	case "owner":
+		return RoleGroupOwner, nil
+	case "admin":
+		return RoleGroupAdmin, nil
+	case "member":
+		return RoleGroupMember, nil
 	default:
-		return "", fmt.Errorf("%w: %q", ErrIdentityUnknownRole, role)
+		return "", fmt.Errorf("%w: %q", ErrIdentityUnknownRole, message.Sender.Role)
 	}
 }

@@ -31,7 +31,7 @@ type RuntimeGate interface {
 
 // IdentityResolver 将群消息发送者解析为代码授权使用的封闭身份。
 type IdentityResolver interface {
-	Resolve(ctx context.Context, groupID int64, userID int64) (Role, error)
+	Resolve(ctx context.Context, message *ws.MessageEvent) (Role, error)
 }
 
 type commandRoute struct {
@@ -114,8 +114,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event *ws.MessageEvent) (bool
 	if !admission.GroupEnabled(event.GroupID) {
 		return true, ErrPluginGroupDisabled
 	}
-	role, err := d.identity.Resolve(ctx, event.GroupID, event.UserID)
-	// [决策理由] 身份未知或解析失败必须停止授权，不能从 Sender.Role 或默认身份回退。
+	role, err := d.identity.Resolve(ctx, event)
+	// [决策理由] 身份未知或解析失败必须停止授权，不能回退到默认身份。
 	if err != nil {
 		return true, fmt.Errorf("解析命令 %s.%s 身份失败: %w", route.pluginKey, route.command.Key, err)
 	}

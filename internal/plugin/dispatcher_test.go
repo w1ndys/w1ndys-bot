@@ -128,7 +128,7 @@ type concurrentDispatcherIdentity struct{}
 // @param ctx：调用上下文；groupID：群号；userID：发送者 QQ。
 // @returns 固定群成员身份和 nil。
 // ⚠️副作用说明：无。
-func (concurrentDispatcherIdentity) Resolve(context.Context, int64, int64) (Role, error) {
+func (concurrentDispatcherIdentity) Resolve(context.Context, *ws.MessageEvent) (Role, error) {
 	// >>> 数据演变示例
 	// 1. group=100,user=1 -> group_member,nil。
 	// 2. group=200,user=2 -> group_member,nil。
@@ -136,13 +136,13 @@ func (concurrentDispatcherIdentity) Resolve(context.Context, int64, int64) (Role
 }
 
 // Resolve 模拟群身份解析并记录可信群与发送者标识。
-// @param ctx：Dispatcher 调用上下文；groupID：消息群号；userID：发送者 QQ。
+// @param ctx：Dispatcher 调用上下文；message：已通过群门禁的消息事件。
 // @returns fake 身份或错误。
 // ⚠️副作用说明：记录调用次数及最后的群号、用户号。
-func (r *dispatcherTestIdentity) Resolve(_ context.Context, groupID int64, userID int64) (Role, error) {
+func (r *dispatcherTestIdentity) Resolve(_ context.Context, message *ws.MessageEvent) (Role, error) {
 	r.calls++
-	r.groupID = groupID
-	r.userID = userID
+	r.groupID = message.GroupID
+	r.userID = message.UserID
 
 	// >>> 数据演变示例
 	// 1. member+group=100+user=200 -> 记录标识 -> member,nil。

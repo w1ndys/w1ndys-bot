@@ -12,7 +12,7 @@ type eventDispatcherIdentity struct {
 	role Role
 }
 
-func (r eventDispatcherIdentity) Resolve(context.Context, int64, int64) (Role, error) {
+func (r eventDispatcherIdentity) Resolve(context.Context, *ws.MessageEvent) (Role, error) {
 	return r.role, nil
 }
 
