@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"time"
 )
 
@@ -25,7 +24,7 @@ type RuntimeBootstrap struct {
 
 // NewRuntimeBootstrap 创建启动恢复服务。
 func NewRuntimeBootstrap(catalog *SpecCatalog, controller *RuntimeController, repository RuntimeSnapshotRepository) (*RuntimeBootstrap, error) {
-	if catalog == nil || controller == nil || isNilRuntimeSnapshotRepository(repository) {
+	if catalog == nil || controller == nil || isNilRuntimeDependency(repository) {
 		return nil, errors.New("运行时启动依赖不能为空")
 	}
 	return &RuntimeBootstrap{catalog: catalog, controller: controller, repository: repository}, nil
@@ -33,7 +32,7 @@ func NewRuntimeBootstrap(catalog *SpecCatalog, controller *RuntimeController, re
 
 // Initialize 同步目录并恢复群开关与全局生命周期状态。
 func (b *RuntimeBootstrap) Initialize(ctx context.Context) error {
-	if b == nil || b.catalog == nil || b.controller == nil || isNilRuntimeSnapshotRepository(b.repository) {
+	if b == nil || b.catalog == nil || b.controller == nil || isNilRuntimeDependency(b.repository) {
 		return errors.New("运行时启动服务未初始化")
 	}
 	if err := b.repository.SyncCatalog(ctx, b.catalog); err != nil {
@@ -94,19 +93,6 @@ func (b *RuntimeBootstrap) Initialize(ctx context.Context) error {
 		enabled = append(enabled, state.PluginKey)
 	}
 	return nil
-}
-
-func isNilRuntimeSnapshotRepository(repository RuntimeSnapshotRepository) bool {
-	if repository == nil {
-		return true
-	}
-	value := reflect.ValueOf(repository)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return value.IsNil()
-	default:
-		return false
-	}
 }
 
 func (b *RuntimeBootstrap) cleanup(ctx context.Context, pluginKeys []string) error {
