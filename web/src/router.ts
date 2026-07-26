@@ -158,6 +158,19 @@ function loadPluginRuntimesView() {
   return result
 }
 
+// loadPluginPageView 懒加载插件专属页面外壳。
+// @param 无。
+// @returns 专属页面外壳组件模块 Promise。
+// ⚠️副作用说明：首次访问时发起前端代码块请求。
+function loadPluginPageView() {
+  const result = import('./views/PluginPageView.vue')
+
+  // >>> 数据演变示例
+  // 1. /plugin-pages/keyword_reply -> 请求外壳代码块 -> 解析注册表。
+  // 2. 已缓存 -> 直接复用模块。
+  return result
+}
+
 const router = createRouter({
   history: createWebHistory(),
   routes: [
@@ -179,6 +192,7 @@ const router = createRouter({
       ],
     },
     { path: '/plugin-runtimes', name: 'plugin-runtimes', component: loadPluginRuntimesView, meta: { requiresAuth: true } },
+    { path: '/plugin-pages/:pageKey', name: 'plugin-page', component: loadPluginPageView, meta: { requiresAuth: true } },
     { path: '/settings', name: 'settings', component: loadSettingsView, meta: { requiresAuth: true } },
     { path: '/audit-logs', name: 'audit-logs', component: loadAuditLogsView, meta: { requiresAuth: true } },
   ],

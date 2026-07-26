@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { NAlert, NButton, NCard, NDataTable, NEmpty, NInput, NSpace, NSwitch, NTag, type DataTableColumns } from 'naive-ui'
 import { h, onMounted, reactive, ref } from 'vue'
+import { RouterLink } from 'vue-router'
 import { listPluginRuntimes, setPluginRuntimeEnabled, setPluginRuntimeGroupEnabled, type PluginRuntimeCommand, type PluginRuntimeGroup, type PluginRuntimeState } from '../api'
 import PluginRuntimeConfigForm from '../components/PluginRuntimeConfigForm.vue'
 import { useAppFeedback } from '../feedback'
@@ -293,6 +294,9 @@ onMounted(loadStates)
         </NSpace>
         <NDataTable :columns="commandColumns" :data="state.commands" :bordered="false" size="small" />
         <PluginRuntimeConfigForm v-if="state.has_config" :plugin-key="state.plugin_key" />
+        <RouterLink v-if="state.admin_page_key" :to="{ name: 'plugin-page', params: { pageKey: state.admin_page_key } }">
+          <NButton>打开专属管理页面</NButton>
+        </RouterLink>
         <NSpace>
           <NInput :value="groupInput(state.plugin_key)" :disabled="saving" placeholder="手工输入 QQ 群号" @update:value="(value: string) => updateGroupInput(state.plugin_key, value)" />
           <NButton :disabled="saving" @click="addGroup(state, true)">新增并开启</NButton>

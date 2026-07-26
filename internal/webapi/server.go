@@ -83,6 +83,7 @@ type Server struct {
 	admins        AdminResolver
 	management    ManagementController
 	runtimes      RuntimeStateController
+	keywordReply  KeywordReplyController
 	now           func() time.Time
 	loginMu       sync.Mutex
 	loginAttempts map[string]loginAttempt
@@ -265,7 +266,7 @@ type auditSummaryResponse struct {
 // @param password：环境变量中的共享密码；jwtSecret：JWT 签名密钥；admins：管理员快照解析器；controller：管理业务服务；runtimes：目标插件开关服务。
 // @returns 可注册到 HTTP 路由的 Server，或配置强度错误。
 // ⚠️副作用说明：读取系统加密随机源并执行 Argon2id 哈希。
-func New(password string, jwtSecret string, admins AdminResolver, controller ManagementController, runtimes RuntimeStateController) (*Server, error) {
+func New(password string, jwtSecret string, admins AdminResolver, controller ManagementController, runtimes RuntimeStateController, keywordReply KeywordReplyController) (*Server, error) {
 	// [决策理由] JWT 密钥过短会降低离线伪造成本，必须在监听端口前拒绝启动。
 	if len([]byte(jwtSecret)) < 32 {
 		return nil, errors.New("JWT_SECRET 不能少于32字节")
@@ -282,12 +283,16 @@ func New(password string, jwtSecret string, admins AdminResolver, controller Man
 	if runtimes == nil {
 		return nil, errors.New("插件开关服务不能为空")
 	}
+	// [决策理由] 专属插件服务缺失时对应管理路由会在鉴权后崩溃。
+	if keywordReply == nil {
+		return nil, errors.New("关键词回复服务不能为空")
+	}
 	passwordHash, err := projectauth.HashPassword(password)
 	// [决策理由] 环境密码不符合强度要求或随机源失败时禁止开放登录接口。
 	if err != nil {
 		return nil, fmt.Errorf("准备 WebUI 密码: %w", err)
 	}
-	server := &Server{passwordHash: passwordHash, jwtSecret: []byte(jwtSecret), admins: admins, management: controller, runtimes: runtimes, now: time.Now, loginAttempts: make(map[string]loginAttempt), loginSlots: make(chan struct{}, 2)}
+	server := &Server{passwordHash: passwordHash, jwtSecret: []byte(jwtSecret), admins: admins, management: controller, runtimes: runtimes, keywordReply: keywordReply, now: time.Now, loginAttempts: make(map[string]loginAttempt), loginSlots: make(chan struct{}, 2)}
 
 	// >>> 数据演变示例
 	// 1. 强密码+32字节密钥+Resolver -> Argon2id哈希 -> Server,nil。
@@ -322,6 +327,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/plugin-runtimes/{plugin_key}", s.authenticate(http.HandlerFunc(s.getPluginRuntime)))
 	mux.Handle("PATCH /api/plugin-runtimes/{plugin_key}", s.authenticate(http.HandlerFunc(s.patchPluginRuntime)))
 	mux.Handle("PUT /api/plugin-runtimes/{plugin_key}/groups/{group_id}", s.authenticate(http.HandlerFunc(s.putPluginRuntimeGroup)))
+	mux.Handle("GET /api/plugins/keyword_reply/groups/{group_id}/rules", s.authenticate(http.HandlerFunc(s.listKeywordRules)))
+	mux.Handle("POST /api/plugins/keyword_reply/groups/{group_id}/rules", s.authenticate(http.HandlerFunc(s.createKeywordRule)))
+	mux.Handle("PUT /api/plugins/keyword_reply/groups/{group_id}/rules/{rule_id}", s.authenticate(http.HandlerFunc(s.updateKeywordRule)))
+	mux.Handle("DELETE /api/plugins/keyword_reply/groups/{group_id}/rules/{rule_id}", s.authenticate(http.HandlerFunc(s.deleteKeywordRule)))
 	mux.Handle("GET /api/plugin-runtimes/{plugin_key}/config", s.authenticate(http.HandlerFunc(s.getPluginRuntimeConfig)))
 	mux.Handle("PUT /api/plugin-runtimes/{plugin_key}/config", s.authenticate(http.HandlerFunc(s.putPluginRuntimeConfig)))
 	mux.Handle("GET /api/commands", s.authenticate(http.HandlerFunc(s.listCommands)))

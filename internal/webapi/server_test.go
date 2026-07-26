@@ -437,7 +437,7 @@ func (f *fakeAdmins) Resolve(userID string) (admin.SystemAdmin, bool) {
 // ⚠️副作用说明：执行 Argon2id 哈希并创建内存 HTTP 请求。
 func TestLoginAndMe(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Nickname: "root", Enabled: true}}}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 合法配置必须成功构造服务。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -480,7 +480,7 @@ func TestLoginAndMe(t *testing.T) {
 // ⚠️副作用说明：执行多次 Argon2id 校验并创建内存 HTTP 请求。
 func TestLoginRejectsInvalidCredentials(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 测试前置服务必须构造成功。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -516,7 +516,7 @@ func TestLoginRejectsInvalidCredentials(t *testing.T) {
 // ⚠️副作用说明：执行 Argon2id 哈希并修改测试内存管理员映射。
 func TestMeRejectsExpiredAndRevokedToken(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 测试前置服务必须构造成功。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -573,7 +573,7 @@ func TestPluginRoutesListAndPatch(t *testing.T) {
 		states:  []management.PluginState{{Name: "ping", DisplayName: "Ping", Available: true, ConfigJSON: json.RawMessage(`{}`)}},
 		updated: management.PluginState{Name: "ping", DisplayName: "Ping", Available: true, Enabled: true, ConfigJSON: json.RawMessage(`{}`)},
 	}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, plugins, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, plugins, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 合法依赖必须构造插件 API 服务。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -627,7 +627,7 @@ func TestPluginConfigRoutes(t *testing.T) {
 		configState:   management.PluginConfigState{PluginName: "echo", ConfigJSON: json.RawMessage(`{}`), Version: 2},
 		configUpdated: management.PluginConfigState{PluginName: "echo", ConfigJSON: json.RawMessage(`{"response_prefix":"x"}`), Version: 3},
 	}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 合法依赖必须成功构造配置 API。
 	if err != nil {
 		t.Fatal(err)
@@ -672,7 +672,7 @@ func TestPluginConfigRoutes(t *testing.T) {
 func TestPatchPluginRejectsAmbiguousAndProtectedChanges(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
 	plugins := &fakePlugins{}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, plugins, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, plugins, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 测试服务必须使用完整依赖构造成功。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -724,7 +724,7 @@ func TestCommandRoutesCRUD(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
 	controller := &fakePlugins{command: management.CommandState{ID: 7, ScopeType: "group", ScopeID: "123", PluginName: "ping", FeatureKey: "ping", Command: "测试", NormalizedCommand: "测试", Enabled: true}}
 	controller.commands = []management.CommandState{controller.command}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 完整管理控制器必须成功构造服务。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -768,7 +768,7 @@ func TestCommandRoutesCRUD(t *testing.T) {
 func TestCommandRoutesMapValidationAndConflict(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
 	controller := &fakePlugins{}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 错误路径测试也需要完整服务依赖。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -804,7 +804,7 @@ func TestPermissionRoutesListSetAndDelete(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
 	controller := &fakePlugins{permission: management.PermissionState{ID: 8, ScopeType: "group", ScopeID: "123", PluginName: "ping", SubjectType: "user", SubjectID: "200", Effect: "allow"}}
 	controller.permissions = []management.PermissionState{controller.permission}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 完整管理控制器必须成功构造权限 API 服务。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -843,7 +843,7 @@ func TestPermissionRoutesListSetAndDelete(t *testing.T) {
 func TestPermissionRoutesMapInvalidAndNotFound(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
 	controller := &fakePlugins{err: admin.ErrInvalidPermission}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 错误映射测试需要完整服务依赖。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -879,7 +879,7 @@ func TestSettingRoutesListSetAndDelete(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
 	controller := &fakePlugins{setting: management.SettingState{Key: "command_prefix", Value: json.RawMessage(`"!"`), Description: "机器人命令前缀", Overridden: true}}
 	controller.settings = []management.SettingState{controller.setting, {Key: "default_page_size", Value: json.RawMessage(`20`), Description: "管理列表默认分页大小"}}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 完整控制器必须成功构造设置 API 服务。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -918,7 +918,7 @@ func TestSettingRoutesListSetAndDelete(t *testing.T) {
 func TestSettingRoutesMapInvalidAndUnknown(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
 	controller := &fakePlugins{err: admin.ErrInvalidSetting}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 错误映射测试需要完整服务依赖。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -961,7 +961,7 @@ func TestAuditRoutesListAndDetail(t *testing.T) {
 	createdAt := time.Date(2026, 7, 13, 10, 0, 0, 0, time.FixedZone("CST", 8*60*60))
 	record := management.AuditState{ID: 8, ActorID: "100", ActorRole: "super_admin", Channel: "webui", Action: "setting.set", TargetType: "system_setting", TargetID: "command_prefix", BeforeJSON: json.RawMessage(`{"Value":"/","token":"old-secret"}`), AfterJSON: json.RawMessage(`{"Value":"!","nested":{"password":"new-secret"}}`), Success: true, RequestID: "req-write", CreatedAt: createdAt}
 	controller := &fakePlugins{audit: record, auditPage: management.AuditPage{Items: []management.AuditState{record}, Page: 2, PageSize: 10, Total: 21}}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 完整控制器必须成功构造审计 API 服务。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -1028,7 +1028,7 @@ func TestRedactAuditJSON(t *testing.T) {
 func TestAuditRoutesRejectInvalidQueryAndMapNotFound(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
 	controller := &fakePlugins{}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 错误路径测试需要完整服务依赖。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -1067,7 +1067,7 @@ func TestAuditRoutesRejectInvalidQueryAndMapNotFound(t *testing.T) {
 // ⚠️副作用说明：执行多次 Argon2id 校验并创建内存 HTTP 请求。
 func TestLoginRateLimitRejectsSixthAttempt(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 限流测试需要合法服务实例。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -1097,7 +1097,7 @@ func TestLoginRateLimitRejectsSixthAttempt(t *testing.T) {
 // ⚠️副作用说明：执行多次 Argon2id 校验并创建内存 HTTP 请求。
 func TestLoginRateLimitCannotBypassWithDifferentQQ(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 限流绕过测试需要合法服务实例。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -1147,7 +1147,7 @@ func TestLoginAttemptMapHasBoundedCleanup(t *testing.T) {
 func TestStrictJSONAndRequestIDSanitization(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
 	controller := &fakePlugins{}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 请求安全测试需要完整服务依赖。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -1185,7 +1185,7 @@ func TestStrictJSONAndRequestIDSanitization(t *testing.T) {
 func TestPluginFeatureRouteReturnsMetadata(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
 	controller := &fakePlugins{features: []management.FeatureState{{PluginName: "ping", Key: "ping", DisplayName: "Ping", Available: true, DefaultCommands: []string{"ping"}, DefaultPermissions: json.RawMessage(`{"member":true}`)}}}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 功能路由测试需要完整服务依赖。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -1214,7 +1214,7 @@ func TestPluginFeatureRouteReturnsMetadata(t *testing.T) {
 func TestPluginResourceRoutes(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
 	controller := &fakePlugins{resources: []plugin.AdminResource{{Key: "rules", DisplayName: "规则", MaxPageSize: 50}}, resourcePage: management.ResourcePage{Items: []management.ResourceRecord{{ID: 1, Version: 2, Data: json.RawMessage(`{"keyword":"hi"}`)}}, Page: 2, PageSize: 10, Total: 11}, resourceRecord: management.ResourceRecord{ID: 1, Version: 3, Data: json.RawMessage(`{"keyword":"hello"}`)}}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 资源路由测试需要完整认证和管理依赖。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -1259,7 +1259,7 @@ func TestPluginResourceRoutes(t *testing.T) {
 func TestPluginGroupControlRoutes(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
 	controller := &fakePlugins{groupControl: management.PluginGroupControlState{PluginName: "keyword_reply", PluginEnabled: true, DefaultEnabled: true, DefaultVersion: 2}, groupOverride: management.PluginGroupOverride{GroupID: "100", Enabled: false, Version: 1}}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{})
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, controller, &fakeRuntimeStates{}, &fakeKeywordReply{})
 	// [决策理由] 路由测试需要完整认证依赖。
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

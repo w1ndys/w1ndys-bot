@@ -65,7 +65,7 @@ func (f *fakeRuntimeStates) SetGroupEnabled(_ context.Context, actor management.
 func newRuntimeTestServer(t *testing.T, runtimes *fakeRuntimeStates) (*Server, string) {
 	t.Helper()
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, runtimes)
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, runtimes, &fakeKeywordReply{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestPluginRuntimeRoutesRequireAuthentication(t *testing.T) {
 
 func TestNewRejectsMissingRuntimeController(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{}}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, nil)
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, nil, &fakeKeywordReply{})
 	if server != nil || err == nil {
 		t.Fatalf("New() = %v,%v", server, err)
 	}

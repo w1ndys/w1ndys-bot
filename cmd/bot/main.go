@@ -27,7 +27,7 @@ import (
 	_ "github.com/w1ndys/w1ndys-bot/plugins/admin"
 	"github.com/w1ndys/w1ndys-bot/plugins/echo"
 	_ "github.com/w1ndys/w1ndys-bot/plugins/forbidden_message_monitor"
-	_ "github.com/w1ndys/w1ndys-bot/plugins/keyword_reply"
+	keywordreply "github.com/w1ndys/w1ndys-bot/plugins/keyword_reply"
 )
 
 // main 启动机器人基础设施。
@@ -172,7 +172,13 @@ func main() {
 		projectlogger.Error("构建目标插件规格失败", "error", err)
 		return
 	}
-	specCatalog, err := plugin.NewSpecCatalog([]plugin.PluginSpec{echoSpec})
+	keywordReplyService, err := keywordreply.New(botAPI, pool, adminService)
+	// [决策理由] 专属插件服务缺失依赖时不能带着半装配的管理路由继续启动。
+	if err != nil {
+		projectlogger.Error("构建关键词回复服务失败", "error", err)
+		return
+	}
+	specCatalog, err := plugin.NewSpecCatalog([]plugin.PluginSpec{echoSpec, keywordReplyService.Spec()})
 	// [决策理由] 重复 Key 或触发词冲突必须在启动期暴露，而不是运行期产生不确定路由。
 	if err != nil {
 		projectlogger.Error("构建目标插件目录失败", "error", err)
@@ -233,7 +239,7 @@ func main() {
 		projectlogger.Error("构建插件开关服务失败", "error", err)
 		return
 	}
-	webServer, err := webapi.New(cfg.WebUIPassword, cfg.JWTSecret, adminResolver, adminService, runtimeService)
+	webServer, err := webapi.New(cfg.WebUIPassword, cfg.JWTSecret, adminResolver, adminService, runtimeService, keywordReplyService)
 	// [决策理由] WebUI 认证配置不安全时不得开放包含管理能力的 HTTP 服务。
 	if err != nil {
 		projectlogger.Error("初始化WebAPI失败", "error", err)
