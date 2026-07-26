@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/w1ndys/w1ndys-bot/internal/management"
 	"github.com/w1ndys/w1ndys-bot/internal/onebot"
 	"github.com/w1ndys/w1ndys-bot/internal/plugin"
@@ -31,11 +33,6 @@ const (
 	actionTimeout            = 15 * time.Second
 )
 
-var manifest = plugin.Manifest{
-	Name: pluginName, DisplayName: pluginDisplayName, Description: pluginDescription,
-	Priority: pluginPriority, System: false, GroupControllable: true,
-}
-
 type implementation struct {
 	lexicon       atomic.Pointer[Lexicon]
 	lexiconStore  lexiconLoader
@@ -46,7 +43,6 @@ type implementation struct {
 	snapshot      atomic.Pointer[runtimeSnapshot]
 	offsets       atomic.Pointer[map[string]float64]
 	negative      atomic.Pointer[map[string]struct{}]
-	resources     []plugin.AdminResourceRegistration
 	transitionMu  sync.Mutex
 	lifecycleMu   sync.Mutex
 	llmMu         sync.Mutex
@@ -65,38 +61,6 @@ type moderationOutcome struct {
 	HistoryLoaded     bool `json:"history_loaded"`
 	WithdrawnCount    int  `json:"withdrawn_count"`
 	WithdrawalFailure int  `json:"withdrawal_failure_count"`
-}
-
-// Name 返回插件稳定名称。
-// @param 无。
-// @returns forbidden_message_monitor。
-// ⚠️副作用说明：无。
-func (p *implementation) Name() string {
-	// >>> 数据演变示例
-	// 1. 新建实例 -> Name -> forbidden_message_monitor。
-	// 2. 实例完成启停 -> Name -> forbidden_message_monitor。
-	return pluginName
-}
-
-// Handle 处理群消息检测以及管理员解禁、踢出通知。
-// @param ctx：事件处理上下文；event：OneBot事件。
-// @returns 数据、模型或处置失败错误；安全及无关事件返回nil。
-// ⚠️副作用说明：群消息可写计数/审计、调用大模型并执行禁言撤回；管理通知可更新复核状态。
-func (p *implementation) Handle(ctx context.Context, event ws.Event) error {
-	switch typed := event.(type) {
-	case *ws.MessageEvent:
-		return p.handleMessage(ctx, typed)
-	case *ws.GroupBanNotice:
-		return p.handleGroupBanNotice(ctx, typed)
-	case *ws.NoticeEvent:
-		return p.handleNotice(ctx, typed)
-	default:
-		return nil
-	}
-
-	// >>> 数据演变示例
-	// 1. 入站群消息 -> 白名单/规则/评分/LLM -> 放行、人工复核或自动处置。
-	// 2. group_ban lift_ban -> 时间窗关联 -> 误判终态与反馈样本。
 }
 
 // handleMessage 执行群消息完整分层检测。
@@ -456,19 +420,6 @@ func (p *implementation) handleNotice(ctx context.Context, notice *ws.NoticeEven
 	return nil
 }
 
-// AdminResources 声明只允许修改审核结论的违规记录资源。
-// @param 无。
-// @returns 违规审核资源声明与处理器副本。
-// ⚠️副作用说明：无。
-func (p *implementation) AdminResources() []plugin.AdminResourceRegistration {
-	result := append([]plugin.AdminResourceRegistration(nil), p.resources...)
-
-	// >>> 数据演变示例
-	// 1. 新实例 -> [violations]且仅status可编辑。
-	// 2. 调用方修改返回切片 -> 内部注册保持不变。
-	return result
-}
-
 // OnEnable 启动每日白名单与反馈权重刷新。
 // @param ctx：首次刷新上下文。
 // @returns nil；维护错误由后台记录并在下一周期重试。
@@ -799,62 +750,38 @@ func buildSnapshotWithWeightOffsets(current *runtimeSnapshot, offsets map[string
 	return next, storedOffsets, storedNegative, nil
 }
 
-// newPlugin 使用运行时依赖创建监控实例和默认配置快照。
-// @param runtime：主程序注入的Action API与数据库。
-// @returns 可配置监控插件或依赖、配置错误。
+// newImplementation 使用运行时依赖创建监控实例和默认配置快照。
+// @param actions：受控 OneBot 能力；pool：业务数据与词库连接池。
+// @returns 可配置监控实例或依赖、配置错误。
 // ⚠️副作用说明：分配HTTP客户端和仓储，不连接外部服务。
-func newPlugin(runtime plugin.Runtime) (plugin.Plugin, error) {
+func newImplementation(actions plugin.ActionAPI, pool *pgxpool.Pool) (*implementation, error) {
 	// [决策理由] 自动处置和白名单刷新必须使用受控OneBot能力。
-	if runtime.Actions == nil {
-		return nil, fmt.Errorf("%s 缺少 ActionAPI", pluginName)
+	if actions == nil {
+		return nil, fmt.Errorf("%s 缺少 ActionAPI", pluginKey)
 	}
 	// [决策理由] 发言、白名单、审核和反馈均要求持久化，不能以内存替代。
-	if runtime.Database == nil {
-		return nil, fmt.Errorf("%s 缺少 Database", pluginName)
+	if pool == nil {
+		return nil, fmt.Errorf("%s 缺少 Database", pluginKey)
 	}
-	repository := newPostgresMonitorRepository(runtime.Database)
-	lexiconStore, err := newLexiconRepository(runtime.Database)
+	repository := newPostgresMonitorRepository(pool)
+	lexiconStore, err := newLexiconRepository(pool)
 	// [决策理由] 词库来自插件自有业务表，仓库缺失会让检测引擎长期空载。
 	if err != nil {
-		return nil, fmt.Errorf("初始化%s词库仓库: %w", pluginName, err)
+		return nil, fmt.Errorf("初始化%s词库仓库: %w", pluginKey, err)
 	}
-	result := &implementation{actions: runtime.Actions, repository: repository, lexiconStore: lexiconStore, httpClient: &http.Client{}, now: time.Now}
+	result := &implementation{actions: actions, repository: repository, lexiconStore: lexiconStore, httpClient: &http.Client{}, now: time.Now}
 	normalized, err := plugin.NormalizeConfig(result.ConfigSchema(), json.RawMessage(`{}`))
 	// [决策理由] 默认Schema无法规范化表示代码和平台配置契约已失配。
 	if err != nil {
-		return nil, fmt.Errorf("初始化%s默认配置: %w", pluginName, err)
+		return nil, fmt.Errorf("初始化%s默认配置: %w", pluginKey, err)
 	}
 	// [决策理由] Factory必须发布可立即读取的默认引擎，避免启用前nil快照。
 	if err := result.ApplyConfig(context.Background(), normalized); err != nil {
 		return nil, err
 	}
-	resource := plugin.AdminResource{
-		Key: "violations", DisplayName: "违规消息复核", Description: "查看自动检测证据并选择确认或误报",
-		Fields: []plugin.ResourceField{
-			{Key: "msg_content", DisplayName: "消息内容", Type: plugin.ResourceFieldMultiline},
-			{Key: "group_id", DisplayName: "群号", Type: plugin.ResourceFieldString},
-			{Key: "user_id", DisplayName: "用户QQ", Type: plugin.ResourceFieldString},
-			{Key: "reason", DisplayName: "判定理由", Type: plugin.ResourceFieldMultiline},
-			{Key: "status", DisplayName: "审核操作", Description: "确认后等待群内踢出；误报会解除禁言并沉淀反馈", Type: plugin.ResourceFieldEnum, Options: []string{"确认", "误报"}},
-		},
-		ReadOnlyFields: []string{"msg_content", "group_id", "user_id", "reason"}, CanUpdate: true, MaxPageSize: 50,
-	}
-	testResource := plugin.AdminResource{Key: "text_tests", DisplayName: "文本试判", Description: "使用当前规则测试文本，不会禁言、撤回或写入违规审计", Fields: []plugin.ResourceField{{Key: "text", DisplayName: "测试文本", Type: plugin.ResourceFieldMultiline, Required: true}}, CanCreate: true, Hidden: true, MaxPageSize: 50}
-	trainingResource := plugin.AdminResource{
-		Key: "training_samples", DisplayName: "违规训练样本", Description: "管理员主动确认的违规正例，会进入Few-shot并推动候选词晋级",
-		Fields: []plugin.ResourceField{
-			{Key: "msg_content", DisplayName: "样本原文", Type: plugin.ResourceFieldMultiline, Required: true},
-			{Key: "trial_id", DisplayName: "试判凭证", Description: "由文本试判页面自动传入，十分钟内有效", Type: plugin.ResourceFieldString, Required: true},
-			{Key: "keywords", DisplayName: "提取风险词", Type: plugin.ResourceFieldMultiline},
-			{Key: "created_at", DisplayName: "投喂时间", Type: plugin.ResourceFieldDateTime},
-		},
-		ReadOnlyFields: []string{"keywords", "created_at"}, CanCreate: true, CanDelete: true, MaxPageSize: 50,
-	}
-	result.resources = []plugin.AdminResourceRegistration{{Descriptor: resource, Handler: &violationResourceHandler{repository: repository, actions: runtime.Actions}}, {Descriptor: testResource, Handler: &textTestResourceHandler{owner: result}}, {Descriptor: trainingResource, Handler: &trainingSampleResourceHandler{owner: result}}}
-
 	// >>> 数据演变示例
-	// 1. Runtime{Actions,Database} -> 默认引擎+审核/文本试判/训练样本资源 -> implementation。
-	// 2. 缺Actions或Database -> Factory错误 -> 不注册运行实例。
+	// 1. Actions+Database -> 默认引擎与仓储 -> implementation。
+	// 2. 缺Actions或Database -> 构造错误 -> 不进入目录。
 	return result, nil
 }
 
@@ -938,16 +865,4 @@ func formatBehaviorSummary(summary behaviorSummary) string {
 	// 1. {3,1,time} -> 包含3次、1条与UTC时间。
 	// 2. {0,0,nil} -> 最近违规时间无。
 	return result
-}
-
-// init 注册群内违禁消息监控插件。
-// @param 无。
-// @returns 无。
-// ⚠️副作用说明：向全局Plugin Catalog注册Manifest与Factory；注册冲突时panic。
-func init() {
-	plugin.MustRegister(plugin.Registration{Manifest: manifest, Factory: newPlugin})
-
-	// >>> 数据演变示例
-	// 1. cmd/bot导入插件包 -> Catalog新增forbidden_message_monitor。
-	// 2. 稳定名称重复 -> MustRegister检测冲突 -> panic。
 }

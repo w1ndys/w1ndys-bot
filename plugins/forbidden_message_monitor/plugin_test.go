@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/w1ndys/w1ndys-bot/internal/management"
 	"github.com/w1ndys/w1ndys-bot/internal/onebot"
 	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
@@ -142,31 +144,32 @@ func testImplementation() *implementation {
 	return result
 }
 
-// TestManifest 验证监控插件的稳定身份和群控制属性。
+// TestSpecContract 验证目标架构下的稳定身份、观察器与小型配置边界。
 // @param t：Go测试上下文。
 // @returns 无。
-// ⚠️副作用说明：无。
-func TestManifest(t *testing.T) {
-	// [决策理由] Manifest必须先通过平台校验，才能安全进入启动同步流程。
-	if err := manifest.Validate(); err != nil {
-		t.Fatalf("Manifest.Validate() error = %v", err)
+// ⚠️副作用说明：仅构造内存实例。
+func TestSpecContract(t *testing.T) {
+	service := &Service{implementation: testImplementation(), authorizer: staticAuthorizer{}}
+	spec := service.Spec()
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
 	}
-	// [决策理由] 插件名是数据库、群门禁和审计的永久引用，必须保持约定值。
-	if manifest.Name != pluginName {
-		t.Fatalf("Manifest.Name = %q", manifest.Name)
+	if spec.Key != "forbidden_message_monitor" || spec.AdminPageKey != "forbidden_message_monitor" {
+		t.Fatalf("spec = %+v", spec)
 	}
-	// [决策理由] 群消息监控必须交由平台统一逐群启停。
-	if !manifest.GroupControllable {
-		t.Fatal("Manifest.GroupControllable = false")
+	// 三类事件都由同一个观察器承担，且必须声明群消息与群通知。
+	if len(spec.Commands) != 0 || len(spec.Observers) != 1 || len(spec.Observers[0].EventKinds) != 2 {
+		t.Fatalf("observers = %+v", spec.Observers)
 	}
-	// [决策理由] 当前尚无可定向调用功能，不应暴露占位命令或权限项。
-	if manifest.System || len(manifest.Features) != 0 {
-		t.Fatalf("Manifest.System/Features = %v/%+v", manifest.System, manifest.Features)
+	// 阈值与模型参数属于小型标量配置，词库不再出现在 Schema 中。
+	if spec.Config == nil || spec.Lifecycle == nil {
+		t.Fatalf("config/lifecycle missing: %+v", spec)
 	}
-
-	// >>> 数据演变示例
-	// 1. 普通观察插件+GroupControllable=true -> Validate通过 -> 可逐群控制。
-	// 2. 无业务功能 -> Features为空 -> 不生成占位命令。
+	for _, field := range spec.Config.Schema.Fields {
+		if strings.HasSuffix(field.Key, "_json") {
+			t.Fatalf("结构化字段仍在小型配置中: %s", field.Key)
+		}
+	}
 }
 
 // TestFactoryAndName 验证Factory依赖边界和稳定名称。
@@ -174,20 +177,17 @@ func TestManifest(t *testing.T) {
 // @returns 无。
 // ⚠️副作用说明：仅分配内存实例。
 func TestFactoryAndName(t *testing.T) {
-	_, err := newPlugin(plugin.Runtime{})
+	_, err := newImplementation(nil, nil)
 	// [决策理由] 自动处置插件缺少Action和数据库时必须拒绝启动。
 	if err == nil {
-		t.Fatal("newPlugin() missing dependencies error=nil")
+		t.Fatal("newImplementation() missing dependencies error=nil")
 	}
-	instance, err := newPlugin(plugin.Runtime{Actions: &fakeActions{}, Database: &pgxpool.Pool{}})
+	instance, err := newImplementation(&fakeActions{}, &pgxpool.Pool{})
 	// [决策理由] Factory成功时必须返回可注册的非空实现。
 	if err != nil || instance == nil {
-		t.Fatalf("newPlugin() instance/error = %v/%v", instance, err)
+		t.Fatalf("newImplementation() instance/error = %v/%v", instance, err)
 	}
 	// [决策理由] 运行实例名称必须与Manifest一致，Manager才能注册实例。
-	if instance.Name() != manifest.Name {
-		t.Fatalf("newPlugin() name = %q", instance.Name())
-	}
 
 	// >>> 数据演变示例
 	// 1. Runtime{} -> 缺依赖错误。
@@ -310,7 +310,7 @@ func TestHandleIgnoresUnsupportedEvents(t *testing.T) {
 	}
 	for _, event := range events {
 		// [决策理由] 非入站群消息和无关元事件不得进入计数、检测或处置。
-		if err := instance.Handle(context.Background(), event); err != nil {
+		if err := dispatchEvent(instance, context.Background(), event); err != nil {
 			t.Fatalf("Handle(%T) error = %v", event, err)
 		}
 	}
@@ -330,7 +330,7 @@ func TestColdStartSendsLowRiskMessageToLLM(t *testing.T) {
 	current := instance.snapshot.Load()
 	instance.snapshot.Store(&runtimeSnapshot{engine: current.engine, engineConfig: current.engineConfig, evaluator: evaluator, llmTimeout: time.Second, detectionMode: detectionModeColdStart, llmMaxConcurrency: 2, llmDailyRequestLimit: 500})
 	event := &ws.MessageEvent{BaseEvent: ws.BaseEvent{PostType: "message", Time: time.Now().Unix()}, MessageType: "group", GroupID: 100, UserID: 200, MessageID: 9, RawMessage: "普通聊天内容"}
-	err := instance.Handle(context.Background(), event)
+	err := dispatchEvent(instance, context.Background(), event)
 	// [决策理由] 冷启动低分消息必须调用模型，Safe/Low结论直接放行且不生成违规记录。
 	if err != nil || evaluator.calls != 1 {
 		t.Fatalf("Handle() error=%v calls=%d", err, evaluator.calls)
@@ -363,12 +363,12 @@ func TestLLMMinimumLengthOnlySkipsModel(t *testing.T) {
 	instance.snapshot.Store(&runtimeSnapshot{engine: engine, engineConfig: config, evaluator: evaluator, llmTimeout: time.Second, detectionMode: detectionModeColdStart, llmMaxConcurrency: 2, llmDailyRequestLimit: 500, minLLMMessageLength: 30})
 	shortSafe := &ws.MessageEvent{BaseEvent: ws.BaseEvent{PostType: "message", Time: time.Now().Unix()}, MessageType: "group", GroupID: 100, UserID: 200, MessageID: 10, RawMessage: "普通短消息"}
 	// [决策理由] 未命中本地高风险且不足30字符时必须在外部调用前放行。
-	if err := instance.Handle(context.Background(), shortSafe); err != nil || evaluator.calls != 0 {
+	if err := dispatchEvent(instance, context.Background(), shortSafe); err != nil || evaluator.calls != 0 {
 		t.Fatalf("short Handle() error=%v calls=%d", err, evaluator.calls)
 	}
 	shortBlocked := &ws.MessageEvent{BaseEvent: ws.BaseEvent{PostType: "message", Time: time.Now().Unix()}, MessageType: "group", GroupID: 100, UserID: 201, MessageID: 11, RawMessage: "短广告"}
 	// [决策理由] 长度门槛不能绕过位于前面的硬关键词处置。
-	if err := instance.Handle(context.Background(), shortBlocked); err != nil {
+	if err := dispatchEvent(instance, context.Background(), shortBlocked); err != nil {
 		t.Fatalf("blocked Handle() error=%v", err)
 	}
 	actions := instance.actions.(*fakeActions)
@@ -438,7 +438,7 @@ func TestHandleExactViolationModeratesAndRecords(t *testing.T) {
 	instance := &implementation{actions: actions, repository: repository, now: func() time.Time { return now }}
 	instance.snapshot.Store(&runtimeSnapshot{engine: engine, engineConfig: config, llmTimeout: time.Second})
 	event := &ws.MessageEvent{BaseEvent: ws.BaseEvent{PostType: "message", Time: now.Unix()}, MessageType: "group", GroupID: 100, UserID: 200, MessageID: 9, MessageSeq: 222, RawMessage: "内部渠道"}
-	err = instance.Handle(context.Background(), event)
+	err = dispatchEvent(instance, context.Background(), event)
 	// [决策理由] 成功处置和审计后事件允许后续插件继续处理且不返回错误。
 	if err != nil {
 		t.Fatalf("Handle() error = %v", err)
@@ -485,7 +485,7 @@ func TestHandleExactViolationIsIdempotent(t *testing.T) {
 	event := &ws.MessageEvent{BaseEvent: ws.BaseEvent{PostType: "message", Time: now.Unix()}, MessageType: "group", GroupID: 100, UserID: 200, MessageID: 9, MessageSeq: 222, RawMessage: "固定广告"}
 	for call := 0; call < 2; call++ {
 		// [决策理由] OneBot可能重复投递同一message_id，两次处理都应安全返回。
-		if err := instance.Handle(context.Background(), event); err != nil {
+		if err := dispatchEvent(instance, context.Background(), event); err != nil {
 			t.Fatalf("Handle() call%d error=%v", call+1, err)
 		}
 	}
@@ -515,7 +515,7 @@ func TestHandleExactViolationSkipsActionsWhenReservationFails(t *testing.T) {
 	instance := &implementation{actions: actions, repository: repository, now: time.Now}
 	instance.snapshot.Store(&runtimeSnapshot{engine: engine, engineConfig: config, llmTimeout: time.Second})
 	event := &ws.MessageEvent{BaseEvent: ws.BaseEvent{PostType: "message"}, MessageType: "group", GroupID: 100, UserID: 200, MessageID: 9, MessageSeq: 222, RawMessage: "固定广告"}
-	err = instance.Handle(context.Background(), event)
+	err = dispatchEvent(instance, context.Background(), event)
 	// [决策理由] 无法落审计时必须返回错误且保持QQ外部状态不变。
 	if err == nil || len(actions.banParams) != 0 || len(actions.historyParams) != 0 || len(actions.deleted) != 0 {
 		t.Fatalf("Handle() error=%v bans=%d history=%d deleted=%d", err, len(actions.banParams), len(actions.historyParams), len(actions.deleted))
@@ -534,7 +534,7 @@ func TestHandleWhitelistBypassesDetection(t *testing.T) {
 	repository := instance.repository.(*fakeMonitorRepository)
 	repository.whitelisted = true
 	event := &ws.MessageEvent{BaseEvent: ws.BaseEvent{PostType: "message"}, MessageType: "group", GroupID: 100, UserID: 200, MessageID: 9, RawMessage: "微信 vxabc123"}
-	err := instance.Handle(context.Background(), event)
+	err := dispatchEvent(instance, context.Background(), event)
 	// [决策理由] 白名单必须在任何硬词或评分检测前直接放行。
 	if err != nil || len(instance.actions.(*fakeActions).banParams) != 0 || len(repository.created) != 0 {
 		t.Fatalf("Handle() error=%v bans=%+v audits=%+v", err, instance.actions.(*fakeActions).banParams, repository.created)
@@ -543,4 +543,24 @@ func TestHandleWhitelistBypassesDetection(t *testing.T) {
 	// >>> 数据演变示例
 	// 1. whitelist=true+任意文本 -> 无禁言无审计。
 	// 2. whitelist=false -> 其他测试验证进入精准检测。
+}
+
+// staticAuthorizer 是测试用的放行授权器。
+type staticAuthorizer struct{}
+
+func (staticAuthorizer) Authorize(management.Actor) error { return nil }
+
+// dispatchEvent 复用观察器的事件路由，替代已移除的广播 Handle。
+func dispatchEvent(instance *implementation, ctx context.Context, event ws.Event) error {
+	service := &Service{implementation: instance, authorizer: staticAuthorizer{}}
+	groupID := int64(0)
+	switch typed := event.(type) {
+	case *ws.MessageEvent:
+		groupID = typed.GroupID
+	case *ws.GroupBanNotice:
+		groupID = typed.GroupID
+	case *ws.NoticeEvent:
+		groupID = typed.GroupID
+	}
+	return service.observe(plugin.ObserverContext{Context: ctx, GroupID: groupID, Event: event})
 }

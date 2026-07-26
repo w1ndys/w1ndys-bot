@@ -26,7 +26,7 @@ import (
 	projectlogger "github.com/w1ndys/w1ndys-bot/pkg/logger"
 	_ "github.com/w1ndys/w1ndys-bot/plugins/admin"
 	"github.com/w1ndys/w1ndys-bot/plugins/echo"
-	_ "github.com/w1ndys/w1ndys-bot/plugins/forbidden_message_monitor"
+	forbiddenmonitor "github.com/w1ndys/w1ndys-bot/plugins/forbidden_message_monitor"
 	keywordreply "github.com/w1ndys/w1ndys-bot/plugins/keyword_reply"
 )
 
@@ -178,7 +178,13 @@ func main() {
 		projectlogger.Error("构建关键词回复服务失败", "error", err)
 		return
 	}
-	specCatalog, err := plugin.NewSpecCatalog([]plugin.PluginSpec{echoSpec, keywordReplyService.Spec()})
+	forbiddenMonitorService, err := forbiddenmonitor.New(botAPI, pool, adminService)
+	// [决策理由] 检测引擎与词库仓库缺失时不能带着空载监控继续启动。
+	if err != nil {
+		projectlogger.Error("构建违禁消息监控服务失败", "error", err)
+		return
+	}
+	specCatalog, err := plugin.NewSpecCatalog([]plugin.PluginSpec{echoSpec, keywordReplyService.Spec(), forbiddenMonitorService.Spec()})
 	// [决策理由] 重复 Key 或触发词冲突必须在启动期暴露，而不是运行期产生不确定路由。
 	if err != nil {
 		projectlogger.Error("构建目标插件目录失败", "error", err)
