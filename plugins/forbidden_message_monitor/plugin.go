@@ -37,6 +37,9 @@ var manifest = plugin.Manifest{
 }
 
 type implementation struct {
+	lexicon       atomic.Pointer[Lexicon]
+	lexiconStore  lexiconLoader
+	configJSON    atomic.Pointer[json.RawMessage]
 	actions       plugin.ActionAPI
 	repository    monitorRepository
 	httpClient    *http.Client
@@ -470,7 +473,11 @@ func (p *implementation) AdminResources() []plugin.AdminResourceRegistration {
 // @param ctx：首次刷新上下文。
 // @returns nil；维护错误由后台记录并在下一周期重试。
 // ⚠️副作用说明：启动一个可取消的维护协程，后台访问数据库和NapCat。
-func (p *implementation) OnEnable(_ context.Context) error {
+func (p *implementation) OnEnable(ctx context.Context) error {
+	// [决策理由] 词库存放在插件自有业务表，必须在开始接收群消息前加载，否则引擎空载静默放行。
+	if err := p.reloadLexicon(ctx, p.currentConfigJSON()); err != nil {
+		return fmt.Errorf("加载违禁词库: %w", err)
+	}
 	p.transitionMu.Lock()
 	defer p.transitionMu.Unlock()
 	p.lifecycleMu.Lock()
@@ -806,7 +813,12 @@ func newPlugin(runtime plugin.Runtime) (plugin.Plugin, error) {
 		return nil, fmt.Errorf("%s 缺少 Database", pluginName)
 	}
 	repository := newPostgresMonitorRepository(runtime.Database)
-	result := &implementation{actions: runtime.Actions, repository: repository, httpClient: &http.Client{}, now: time.Now}
+	lexiconStore, err := newLexiconRepository(runtime.Database)
+	// [决策理由] 词库来自插件自有业务表，仓库缺失会让检测引擎长期空载。
+	if err != nil {
+		return nil, fmt.Errorf("初始化%s词库仓库: %w", pluginName, err)
+	}
+	result := &implementation{actions: runtime.Actions, repository: repository, lexiconStore: lexiconStore, httpClient: &http.Client{}, now: time.Now}
 	normalized, err := plugin.NormalizeConfig(result.ConfigSchema(), json.RawMessage(`{}`))
 	// [决策理由] 默认Schema无法规范化表示代码和平台配置契约已失配。
 	if err != nil {

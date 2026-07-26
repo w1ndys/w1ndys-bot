@@ -133,7 +133,7 @@ func (f *fakeActions) DeleteMessage(_ context.Context, messageID any) error {
 func testImplementation() *implementation {
 	engineConfig := DefaultEngineConfig()
 	engine, _ := NewEngine(engineConfig)
-	result := &implementation{actions: &fakeActions{}, repository: &fakeMonitorRepository{}, httpClient: &http.Client{}, now: func() time.Time { return time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC) }}
+	result := &implementation{actions: &fakeActions{}, repository: &fakeMonitorRepository{}, lexiconStore: staticLexicon{}, httpClient: &http.Client{}, now: func() time.Time { return time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC) }}
 	result.snapshot.Store(&runtimeSnapshot{engine: engine, engineConfig: engineConfig, llmTimeout: time.Second})
 
 	// >>> 数据演变示例
@@ -198,6 +198,14 @@ func TestFactoryAndName(t *testing.T) {
 // @param t：Go测试上下文。
 // @returns 无。
 // ⚠️副作用说明：仅调用无状态实例的生命周期方法。
+// staticLexicon 是测试用的内存词库来源。
+type staticLexicon struct {
+	lexicon Lexicon
+	err     error
+}
+
+func (s staticLexicon) Load(context.Context) (Lexicon, error) { return s.lexicon, s.err }
+
 func TestLifecycleIsIdempotent(t *testing.T) {
 	instance := testImplementation()
 	for call := 0; call < 2; call++ {

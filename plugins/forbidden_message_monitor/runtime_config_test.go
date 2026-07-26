@@ -60,7 +60,7 @@ func TestDefaultRuntimeConfigBuildsWithoutLLM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := buildRuntimeSnapshot(raw, instance.httpClient)
+	snapshot, err := buildRuntimeSnapshot(raw, Lexicon{}, instance.httpClient)
 	// [决策理由] 新安装默认关闭LLM仍应具备确定性检测引擎。
 	if err != nil || snapshot.engine == nil || snapshot.evaluator != nil {
 		t.Fatalf("buildRuntimeSnapshot() snapshot=%+v error=%v", snapshot, err)
@@ -108,34 +108,36 @@ func TestOpenAICompatibleEvaluatorUsesAuthAndStrictResult(t *testing.T) {
 // @returns 无。
 // ⚠️副作用说明：无。
 func TestRuntimeConfigRejectsInvalidLLMAndRuleJSON(t *testing.T) {
-	base := pluginConfig{HardKeywordsJSON: "[]", WeightedKeywordsJSON: "[]", SafeKeywordsJSON: "[]", CombinationsJSON: "[]", LowThreshold: 20, HighThreshold: 60, LLMTimeoutSeconds: 20}
-	base.WeightedKeywordsJSON = `[{"text":"x","weight":1,"unknown":true}]`
+	base := pluginConfig{LowThreshold: 20, HighThreshold: 60, LLMTimeoutSeconds: 20}
 	raw, _ := json.Marshal(base)
-	_, err := buildRuntimeSnapshot(raw, &http.Client{})
-	// [决策理由] 未知规则字段必须拒绝，避免管理员以为配置生效。
+	// [决策理由] 词库来自业务表，非法权重必须由引擎校验拒绝，不能发布不可运行快照。
+	_, err := buildRuntimeSnapshot(raw, Lexicon{Risk: []WeightedKeyword{{Text: "x", Weight: -1}}}, &http.Client{})
 	if err == nil {
-		t.Fatal("unknown weighted keyword field accepted")
+		t.Fatal("negative weighted keyword accepted")
 	}
-	base.WeightedKeywordsJSON = "[]"
+	_, err = buildRuntimeSnapshot(raw, Lexicon{Combinations: []CombinationRule{{Terms: []string{""}, Bonus: 1}}}, &http.Client{})
+	if err == nil {
+		t.Fatal("empty combination term accepted")
+	}
 	base.LLMEnabled = true
 	base.LLMEndpoint = "file:///tmp/model"
 	base.LLMModel = "test"
 	raw, _ = json.Marshal(base)
-	_, err = buildRuntimeSnapshot(raw, &http.Client{})
+	_, err = buildRuntimeSnapshot(raw, Lexicon{}, &http.Client{})
 	// [决策理由] 非HTTP协议不得成为消息外发目标。
 	if err == nil {
 		t.Fatal("file LLM endpoint accepted")
 	}
 	base.LLMEndpoint = "http://llm.example/v1/chat/completions"
 	raw, _ = json.Marshal(base)
-	_, err = buildRuntimeSnapshot(raw, &http.Client{})
+	_, err = buildRuntimeSnapshot(raw, Lexicon{}, &http.Client{})
 	// [决策理由] 远程HTTP会明文泄露群消息和密钥，必须在配置阶段拒绝。
 	if err == nil {
 		t.Fatal("remote HTTP LLM endpoint accepted")
 	}
 	base.LLMEndpoint = "http://127.0.0.1:11434/v1/chat/completions"
 	raw, _ = json.Marshal(base)
-	_, err = buildRuntimeSnapshot(raw, &http.Client{})
+	_, err = buildRuntimeSnapshot(raw, Lexicon{}, &http.Client{})
 	// [决策理由] 本机回环HTTP用于本地模型，且流量不离开主机，应允许配置。
 	if err != nil {
 		t.Fatalf("loopback HTTP LLM endpoint rejected: %v", err)

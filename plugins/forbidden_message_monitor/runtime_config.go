@@ -24,10 +24,6 @@ const (
 )
 
 type pluginConfig struct {
-	HardKeywordsJSON     string `json:"hard_keywords_json"`
-	WeightedKeywordsJSON string `json:"weighted_keywords_json"`
-	SafeKeywordsJSON     string `json:"safe_keywords_json"`
-	CombinationsJSON     string `json:"combinations_json"`
 	LowThreshold         int    `json:"low_threshold"`
 	HighThreshold        int    `json:"high_threshold"`
 	DetectionMode        string `json:"detection_mode"`
@@ -65,10 +61,6 @@ type openAICompatibleEvaluator struct {
 // ⚠️副作用说明：无。
 func (p *implementation) ConfigSchema() plugin.ConfigSchema {
 	result := plugin.ConfigSchema{Fields: []plugin.ConfigField{
-		{Key: "hard_keywords_json", DisplayName: "硬性关键词", Description: "确定性零误报词；逐条添加，无需手写JSON", Type: plugin.FieldStringListJSON, Default: json.RawMessage(`"[]"`)},
-		{Key: "weighted_keywords_json", DisplayName: "风险词权重", Description: "逐条设置风险词及其加分", Type: plugin.FieldWeightedTermsJSON, Default: json.RawMessage(`"[]"`)},
-		{Key: "safe_keywords_json", DisplayName: "安全词抵扣", Description: "逐条设置安全词及其抵扣分值", Type: plugin.FieldWeightedTermsJSON, Default: json.RawMessage(`"[]"`)},
-		{Key: "combinations_json", DisplayName: "组合加成", Description: "设置需同时出现的关键词（逗号分隔）及组合加分", Type: plugin.FieldCombinationRulesJSON, Default: json.RawMessage(`"[]"`)},
 		{Key: "low_threshold", DisplayName: "低风险阈值", Description: "低于此分值直接放行", Type: plugin.FieldInteger, Default: json.RawMessage(`20`)},
 		{Key: "high_threshold", DisplayName: "高风险阈值", Description: "达到此分值直接处置", Type: plugin.FieldInteger, Default: json.RawMessage(`60`)},
 		{Key: "min_llm_message_length", DisplayName: "大模型最短消息长度", Description: "仅在消息即将进入大模型时生效；短于该Unicode字符数则直接放行，不影响硬关键词和本地高风险处置", Type: plugin.FieldInteger, Default: json.RawMessage(`30`)},
@@ -97,7 +89,7 @@ func (p *implementation) ValidateConfig(ctx context.Context, raw json.RawMessage
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_, err := buildRuntimeSnapshot(raw, p.httpClient)
+	_, err := buildRuntimeSnapshot(raw, p.currentLexicon(), p.httpClient)
 
 	// >>> 数据演变示例
 	// 1. 空词库+20/60+LLM关闭 -> Engine构造成功 -> nil。
@@ -114,7 +106,7 @@ func (p *implementation) ApplyConfig(ctx context.Context, raw json.RawMessage) e
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	next, err := buildRuntimeSnapshot(raw, p.httpClient)
+	next, err := buildRuntimeSnapshot(raw, p.currentLexicon(), p.httpClient)
 	// [决策理由] 只有完整解析和构造成功才能替换旧快照。
 	if err != nil {
 		return err
@@ -134,6 +126,9 @@ func (p *implementation) ApplyConfig(ctx context.Context, raw json.RawMessage) e
 		}
 		next = adjusted
 	}
+	// [决策理由] 词库变更需要按最近一次生效配置重建引擎，因此保留已应用的原始配置。
+	applied := append(json.RawMessage(nil), raw...)
+	p.configJSON.Store(&applied)
 	p.snapshot.Store(next)
 
 	// >>> 数据演变示例
@@ -146,7 +141,7 @@ func (p *implementation) ApplyConfig(ctx context.Context, raw json.RawMessage) e
 // @param raw：完整配置 JSON；client：共享且带全局连接复用的 HTTP Client。
 // @returns 可原子发布的快照或配置错误。
 // ⚠️副作用说明：构造规则快照并分配内存；不发起网络请求。
-func buildRuntimeSnapshot(raw json.RawMessage, client *http.Client) (*runtimeSnapshot, error) {
+func buildRuntimeSnapshot(raw json.RawMessage, lexicon Lexicon, client *http.Client) (*runtimeSnapshot, error) {
 	var config pluginConfig
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -173,22 +168,11 @@ func buildRuntimeSnapshot(raw json.RawMessage, client *http.Client) (*runtimeSna
 	engineConfig := DefaultEngineConfig()
 	engineConfig.LowThreshold = float64(config.LowThreshold)
 	engineConfig.HighThreshold = float64(config.HighThreshold)
-	// [决策理由] 四个 JSON 文本必须全部严格解码，避免部分词库静默失效。
-	if err := decodeStrictJSONText(config.HardKeywordsJSON, &engineConfig.HardKeywords); err != nil {
-		return nil, fmt.Errorf("解析硬性关键词: %w", err)
-	}
-	// [决策理由] 风险词权重决定自动处置，结构错误必须安全失败。
-	if err := decodeStrictJSONText(config.WeightedKeywordsJSON, &engineConfig.WeightedKeywords); err != nil {
-		return nil, fmt.Errorf("解析风险词权重: %w", err)
-	}
-	// [决策理由] 安全词影响误报率，结构错误不能回退为空列表。
-	if err := decodeStrictJSONText(config.SafeKeywordsJSON, &engineConfig.SafeKeywords); err != nil {
-		return nil, fmt.Errorf("解析安全词权重: %w", err)
-	}
-	// [决策理由] 组合规则参与高风险分流，必须作为完整数组校验。
-	if err := decodeStrictJSONText(config.CombinationsJSON, &engineConfig.Combinations); err != nil {
-		return nil, fmt.Errorf("解析组合加成: %w", err)
-	}
+	// [决策理由] 词库来自插件自有业务表，配置只承载有限标量；引擎仍对词条与组合执行完整校验。
+	engineConfig.HardKeywords = append([]string(nil), lexicon.Hard...)
+	engineConfig.WeightedKeywords = append([]WeightedKeyword(nil), lexicon.Risk...)
+	engineConfig.SafeKeywords = append([]WeightedKeyword(nil), lexicon.Safe...)
+	engineConfig.Combinations = append([]CombinationRule(nil), lexicon.Combinations...)
 	engine, err := NewEngine(engineConfig)
 	// [决策理由] 引擎阈值或容量非法时不能发布不可运行快照。
 	if err != nil {
@@ -271,29 +255,6 @@ func secureLLMHTTPClient(client *http.Client) *http.Client {
 	// 1. HTTPS -> HTTPS跳转 -> 每跳校验通过 -> 继续请求。
 	// 2. localhost HTTP -> remote HTTP跳转 -> 校验拒绝且不发送消息。
 	return result
-}
-
-// decodeStrictJSONText 解码 WebUI multiline 中承载的单个 JSON 值。
-// @param text：JSON 文本；target：强类型目标指针。
-// @returns 未知字段、尾随内容或类型错误。
-// ⚠️副作用说明：修改 target 指向的临时构造值。
-func decodeStrictJSONText(text string, target any) error {
-	decoder := json.NewDecoder(strings.NewReader(text))
-	decoder.DisallowUnknownFields()
-	// [决策理由] 规则结构必须精确匹配强类型定义。
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	var trailing any
-	// [决策理由] 尾随 JSON 会让管理员看到的配置与实际解析不一致。
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return fmt.Errorf("只能包含一个 JSON 值")
-	}
-
-	// >>> 数据演变示例
-	// 1. [{"text":"免费","weight":20}] -> []WeightedKeyword -> nil。
-	// 2. []{} -> 第二个JSON值 -> error。
-	return nil
 }
 
 // validateLLMEndpoint 校验管理员配置的 OpenAI-compatible URL。
