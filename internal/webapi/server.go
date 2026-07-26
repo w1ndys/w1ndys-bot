@@ -322,6 +322,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/plugin-runtimes/{plugin_key}", s.authenticate(http.HandlerFunc(s.getPluginRuntime)))
 	mux.Handle("PATCH /api/plugin-runtimes/{plugin_key}", s.authenticate(http.HandlerFunc(s.patchPluginRuntime)))
 	mux.Handle("PUT /api/plugin-runtimes/{plugin_key}/groups/{group_id}", s.authenticate(http.HandlerFunc(s.putPluginRuntimeGroup)))
+	mux.Handle("GET /api/plugin-runtimes/{plugin_key}/config", s.authenticate(http.HandlerFunc(s.getPluginRuntimeConfig)))
+	mux.Handle("PUT /api/plugin-runtimes/{plugin_key}/config", s.authenticate(http.HandlerFunc(s.putPluginRuntimeConfig)))
 	mux.Handle("GET /api/commands", s.authenticate(http.HandlerFunc(s.listCommands)))
 	mux.Handle("POST /api/commands", s.authenticate(http.HandlerFunc(s.createCommand)))
 	mux.Handle("PATCH /api/commands/{command_id}", s.authenticate(http.HandlerFunc(s.renameCommand)))

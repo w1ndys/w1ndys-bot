@@ -3,6 +3,7 @@ package webapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,13 +18,26 @@ import (
 type fakeRuntimeStates struct {
 	states  []plugin.RuntimeStateView
 	state   plugin.RuntimeStateView
+	config  plugin.RuntimeConfigView
 	err     error
 	actor   management.Actor
 	key     string
 	enabled bool
 	groupID int64
 	version int64
+	payload json.RawMessage
 	calls   []string
+}
+
+func (f *fakeRuntimeStates) GetConfig(_ context.Context, actor management.Actor, key string) (plugin.RuntimeConfigView, error) {
+	f.actor, f.key, f.calls = actor, key, append(f.calls, "get-config")
+	return f.config, f.err
+}
+
+func (f *fakeRuntimeStates) SetConfig(_ context.Context, actor management.Actor, key string, config json.RawMessage, version int64) (plugin.RuntimeConfigView, error) {
+	f.actor, f.key, f.payload, f.version = actor, key, config, version
+	f.calls = append(f.calls, "set-config")
+	return f.config, f.err
 }
 
 func (f *fakeRuntimeStates) List(_ context.Context, actor management.Actor) ([]plugin.RuntimeStateView, error) {
@@ -126,6 +140,9 @@ func TestPluginRuntimeRoutesRejectInvalidInput(t *testing.T) {
 		{name: "群负版本", method: http.MethodPut, path: "/api/plugin-runtimes/echo/groups/100", body: `{"enabled":true,"expected_version":-1}`},
 		{name: "群号非法", method: http.MethodPut, path: "/api/plugin-runtimes/echo/groups/0", body: `{"enabled":true,"expected_version":0}`},
 		{name: "群号非数字", method: http.MethodPut, path: "/api/plugin-runtimes/echo/groups/abc", body: `{"enabled":true,"expected_version":0}`},
+		{name: "配置缺少版本", method: http.MethodPut, path: "/api/plugin-runtimes/echo/config", body: `{"config":{}}`},
+		{name: "配置缺少对象", method: http.MethodPut, path: "/api/plugin-runtimes/echo/config", body: `{"expected_version":1}`},
+		{name: "配置未知字段", method: http.MethodPut, path: "/api/plugin-runtimes/echo/config", body: `{"config":{},"expected_version":1,"extra":1}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -181,6 +198,8 @@ func TestPluginRuntimeRoutesRequireAuthentication(t *testing.T) {
 		{method: http.MethodGet, path: "/api/plugin-runtimes/echo"},
 		{method: http.MethodPatch, path: "/api/plugin-runtimes/echo"},
 		{method: http.MethodPut, path: "/api/plugin-runtimes/echo/groups/100"},
+		{method: http.MethodGet, path: "/api/plugin-runtimes/echo/config"},
+		{method: http.MethodPut, path: "/api/plugin-runtimes/echo/config"},
 	}
 	for _, target := range paths {
 		request := httptest.NewRequest(target.method, target.path, strings.NewReader(`{"enabled":true,"expected_version":1}`))
@@ -200,5 +219,59 @@ func TestNewRejectsMissingRuntimeController(t *testing.T) {
 	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, nil)
 	if server != nil || err == nil {
 		t.Fatalf("New() = %v,%v", server, err)
+	}
+}
+
+func TestPluginRuntimeConfigRoutes(t *testing.T) {
+	runtimes := &fakeRuntimeStates{
+		config: plugin.RuntimeConfigView{
+			PluginKey: "echo",
+			Schema:    plugin.ConfigSchema{Fields: []plugin.ConfigField{{Key: "response_prefix", DisplayName: "回复前缀", Type: plugin.FieldString}}},
+			Config:    json.RawMessage(`{"response_prefix":"[bot] "}`),
+			Version:   2,
+		},
+	}
+	server, token := newRuntimeTestServer(t, runtimes)
+
+	getRecorder := runtimeRequest(t, server, token, http.MethodGet, "/api/plugin-runtimes/echo/config", "", "req-config")
+	body := getRecorder.Body.String()
+	if getRecorder.Code != http.StatusOK || !strings.Contains(body, `"response_prefix"`) || !strings.Contains(body, `"version":2`) {
+		t.Fatalf("get status=%d body=%s", getRecorder.Code, body)
+	}
+
+	putRecorder := runtimeRequest(t, server, token, http.MethodPut, "/api/plugin-runtimes/echo/config", `{"config":{"response_prefix":"[bot] "},"expected_version":2}`, "req-save")
+	if putRecorder.Code != http.StatusOK || runtimes.version != 2 || runtimes.key != "echo" {
+		t.Fatalf("put status=%d fake=%+v", putRecorder.Code, runtimes)
+	}
+	// 配置载荷必须原样透传给服务层，由平台按 Schema 规范化。
+	if !strings.Contains(string(runtimes.payload), `"response_prefix":"[bot] "`) {
+		t.Fatalf("payload = %s", runtimes.payload)
+	}
+	if runtimes.actor.RequestID != "req-save" || runtimes.actor.Channel != management.ChannelWebUI {
+		t.Fatalf("actor = %+v", runtimes.actor)
+	}
+}
+
+func TestPluginRuntimeConfigRoutesMapDomainErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+		code string
+	}{
+		{name: "未声明配置", err: plugin.ErrRuntimeConfigNotSupported, want: http.StatusNotFound, code: "plugin_runtime_config_not_supported"},
+		{name: "配置行缺失", err: plugin.ErrRuntimeConfigNotFound, want: http.StatusNotFound, code: "plugin_runtime_config_not_supported"},
+		{name: "配置无效", err: plugin.ErrRuntimeConfigInvalid, want: http.StatusBadRequest, code: "invalid_plugin_runtime_config"},
+		{name: "版本冲突", err: plugin.ErrRuntimeStateConflict, want: http.StatusConflict, code: "plugin_runtime_conflict"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtimes := &fakeRuntimeStates{err: test.err}
+			server, token := newRuntimeTestServer(t, runtimes)
+			recorder := runtimeRequest(t, server, token, http.MethodPut, "/api/plugin-runtimes/echo/config", `{"config":{},"expected_version":1}`, "req-error")
+			if recorder.Code != test.want || !strings.Contains(recorder.Body.String(), test.code) {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
 	}
 }

@@ -3,6 +3,7 @@ package webapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -11,12 +12,19 @@ import (
 	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 )
 
-// RuntimeStateController 定义目标插件架构对 WebUI 开放的开关能力。
+// RuntimeStateController 定义目标插件架构对 WebUI 开放的开关与配置能力。
 type RuntimeStateController interface {
 	List(context.Context, management.Actor) ([]plugin.RuntimeStateView, error)
 	Get(context.Context, management.Actor, string) (plugin.RuntimeStateView, error)
 	SetGlobalEnabled(context.Context, management.Actor, string, bool, int64) (plugin.RuntimeStateView, error)
 	SetGroupEnabled(context.Context, management.Actor, string, int64, bool, int64) (plugin.RuntimeStateView, error)
+	GetConfig(context.Context, management.Actor, string) (plugin.RuntimeConfigView, error)
+	SetConfig(context.Context, management.Actor, string, json.RawMessage, int64) (plugin.RuntimeConfigView, error)
+}
+
+type runtimeConfigWriteRequest struct {
+	Config          json.RawMessage `json:"config"`
+	ExpectedVersion int64           `json:"expected_version"`
 }
 
 type runtimeStateWriteRequest struct {
@@ -110,6 +118,46 @@ func (s *Server) putPluginRuntimeGroup(writer http.ResponseWriter, request *http
 	// 2. 全局关闭时写入群意图 -> 200，但命令仍被全局门禁拒绝。
 }
 
+// getPluginRuntimeConfig 返回插件配置 Schema 与脱敏后的当前值。
+// @param writer：响应写入器；request：携带插件 Key 的已鉴权请求。
+// @returns 无。
+// ⚠️副作用说明：读取 PostgreSQL 并写 JSON 响应。
+func (s *Server) getPluginRuntimeConfig(writer http.ResponseWriter, request *http.Request) {
+	view, err := s.runtimes.GetConfig(request.Context(), actorFromRequest(request), request.PathValue("plugin_key"))
+	if err != nil {
+		writeRuntimeError(writer, err)
+		return
+	}
+	writeSuccess(writer, view)
+
+	// >>> 数据演变示例
+	// 1. echo -> Schema+脱敏值+版本 -> 200。
+	// 2. 未声明配置的插件 -> 404。
+}
+
+// putPluginRuntimeConfig 按乐观锁保存插件配置并热应用。
+// @param writer：响应写入器；request：已鉴权严格 JSON 请求。
+// @returns 无。
+// ⚠️副作用说明：写入配置与审计，并调用插件热应用钩子。
+func (s *Server) putPluginRuntimeConfig(writer http.ResponseWriter, request *http.Request) {
+	var input runtimeConfigWriteRequest
+	// [决策理由] 配置行随目录同步预建，版本必须为正；未知字段与缺失配置对象一律拒绝。
+	if err := decodeJSON(writer, request, &input); err != nil || input.ExpectedVersion <= 0 || len(input.Config) == 0 {
+		writeError(writer, http.StatusBadRequest, "invalid_plugin_runtime_config", "插件配置参数无效")
+		return
+	}
+	view, err := s.runtimes.SetConfig(request.Context(), actorFromRequest(request), request.PathValue("plugin_key"), input.Config, input.ExpectedVersion)
+	if err != nil {
+		writeRuntimeError(writer, err)
+		return
+	}
+	writeSuccess(writer, view)
+
+	// >>> 数据演变示例
+	// 1. echo+{response_prefix:"[bot] "}+v1 -> 保存并热应用 -> v2。
+	// 2. 陈旧版本 -> 409。
+}
+
 // writeRuntimeError 将目标插件开关的领域错误映射为稳定 HTTP 响应。
 // @param writer：响应写入器；err：服务层错误。
 // @returns 无。
@@ -131,6 +179,12 @@ func writeRuntimeError(writer http.ResponseWriter, err error) {
 	// [决策理由] 群号非法属于可修正输入。
 	case errors.Is(err, plugin.ErrInvalidRuntimeGroupID):
 		writeError(writer, http.StatusBadRequest, "invalid_plugin_runtime", "群号无效")
+	// [决策理由] 未声明配置的插件没有该子资源，不应伪装成空 Schema。
+	case errors.Is(err, plugin.ErrRuntimeConfigNotSupported), errors.Is(err, plugin.ErrRuntimeConfigNotFound):
+		writeError(writer, http.StatusNotFound, "plugin_runtime_config_not_supported", "插件未声明可管理配置")
+	// [决策理由] Schema 或插件领域校验失败属于客户端配置错误。
+	case errors.Is(err, plugin.ErrRuntimeConfigInvalid):
+		writeError(writer, http.StatusBadRequest, "invalid_plugin_runtime_config", "插件配置无效")
 	default:
 		// [决策理由] 授权失败与未识别错误复用统一管理错误映射，避免两套响应语义。
 		writeManagementError(writer, err)
