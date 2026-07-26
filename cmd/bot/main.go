@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os/signal"
+	"sort"
 	"strconv"
 	"syscall"
 	"time"
@@ -24,7 +25,7 @@ import (
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 	projectlogger "github.com/w1ndys/w1ndys-bot/pkg/logger"
 	_ "github.com/w1ndys/w1ndys-bot/plugins/admin"
-	_ "github.com/w1ndys/w1ndys-bot/plugins/echo"
+	"github.com/w1ndys/w1ndys-bot/plugins/echo"
 	_ "github.com/w1ndys/w1ndys-bot/plugins/forbidden_message_monitor"
 	_ "github.com/w1ndys/w1ndys-bot/plugins/keyword_reply"
 )
@@ -111,9 +112,23 @@ func main() {
 		projectlogger.Error("初始化WebAPI失败", "error", err)
 		return
 	}
+	// [决策理由] 目标架构入口依赖只能在 botAPI 就绪后构建，但 WS 回调必须更早注册；监听开始前完成赋值，回调不会读到 nil。
+	var targetDispatcher *plugin.EventDispatcher
 	wsServer := ws.NewServer(cfg.NapCatToken, func(_ context.Context, event ws.Event) error {
 		logEvent(event)
 		message, isMessage := event.(*ws.MessageEvent)
+		// [决策理由] 目标架构插件只接收群消息和群事件，私聊仍由旧链路承担 QQ 管理入口。
+		if targetDispatcher != nil && (!isMessage || message.MessageType == "group") {
+			result, dispatchErr := targetDispatcher.Dispatch(ctx, event)
+			// [决策理由] 命中目标架构命令后不再进入旧链路，避免同一消息被两套体系重复处理。
+			if result.CommandMatched {
+				return targetCommandError(dispatchErr)
+			}
+			// [决策理由] 观察器失败不应阻断旧链路对同一事件的处理。
+			if dispatchErr != nil {
+				projectlogger.Error("目标插件观察链处理事件失败", "error", dispatchErr)
+			}
+		}
 		// [决策理由] 只有消息事件参与命令匹配，其他事件继续广播给观察型插件。
 		if !isMessage {
 			return pluginManager.Handle(ctx, event)
@@ -157,6 +172,67 @@ func main() {
 		return handleErr
 	})
 	botAPI := onebot.New(wsServer.Actions())
+	echoSpec, err := echo.Spec(botAPI)
+	// [决策理由] 规格构建失败表示插件依赖缺失，不能带着不完整目录继续启动。
+	if err != nil {
+		projectlogger.Error("构建目标插件规格失败", "error", err)
+		return
+	}
+	specCatalog, err := plugin.NewSpecCatalog([]plugin.PluginSpec{echoSpec})
+	// [决策理由] 重复 Key 或触发词冲突必须在启动期暴露，而不是运行期产生不确定路由。
+	if err != nil {
+		projectlogger.Error("构建目标插件目录失败", "error", err)
+		return
+	}
+	logTargetPlugins(specCatalog)
+	runtimeController, err := plugin.NewRuntimeController(specCatalog)
+	// [决策理由] 缺少运行控制器时命令无法通过 Ready 与群门禁，禁止降级运行。
+	if err != nil {
+		projectlogger.Error("构建插件运行控制器失败", "error", err)
+		return
+	}
+	runtimeStateRepository, err := plugin.NewPostgresRuntimeStateRepository(pool)
+	// [决策理由] 无状态仓库则管理员意图不可持久化，重启后开关全部丢失。
+	if err != nil {
+		projectlogger.Error("构建插件状态仓库失败", "error", err)
+		return
+	}
+	runtimeBootstrap, err := plugin.NewRuntimeBootstrap(specCatalog, runtimeController, runtimeStateRepository)
+	if err != nil {
+		projectlogger.Error("构建插件运行恢复服务失败", "error", err)
+		return
+	}
+	// [决策理由] 恢复失败时进程内状态与管理员意图不一致，继续启动会让插件在未知状态下接流量。
+	if err := runtimeBootstrap.Initialize(ctx); err != nil {
+		projectlogger.Error("恢复插件运行状态失败", "error", err)
+		return
+	}
+	superAdminID, err := parseSuperAdminID(cfg.SuperAdminQQ)
+	// [决策理由] 无法解析的最高管理员配置会静默降级授权范围，必须启动期失败。
+	if err != nil {
+		projectlogger.Error("解析最高管理员 QQ 失败", "error", err)
+		return
+	}
+	identityResolver, err := plugin.NewCodeIdentityResolver(superAdminID)
+	if err != nil {
+		projectlogger.Error("构建代码身份解析器失败", "error", err)
+		return
+	}
+	commandDispatcher, err := plugin.NewDispatcher(specCatalog, runtimeController, identityResolver)
+	if err != nil {
+		projectlogger.Error("构建目标插件命令分发器失败", "error", err)
+		return
+	}
+	observerDispatcher, err := plugin.NewObserverDispatcher(specCatalog, runtimeController)
+	if err != nil {
+		projectlogger.Error("构建目标插件观察分发器失败", "error", err)
+		return
+	}
+	targetDispatcher, err = plugin.NewEventDispatcher(commandDispatcher, observerDispatcher)
+	if err != nil {
+		projectlogger.Error("构建目标插件事件入口失败", "error", err)
+		return
+	}
 	for _, registration := range registrations {
 		implementation, err := registration.New(plugin.Runtime{Messenger: botAPI, Actions: botAPI, Management: adminService, Database: pool})
 		// [决策理由] 工厂失败或返回错误实现时该插件不能进入运行路由。
@@ -218,6 +294,85 @@ func main() {
 	// >>> 数据演变示例
 	// 1. 有效环境变量 + 可连接数据库 -> Config -> pgxpool -> WS 服务 -> 等待退出信号 -> 正常关闭。
 	// 2. 缺少 DB_PASSWORD -> 配置校验错误 -> 输出错误日志 -> 进程终止。
+}
+
+// targetCommandError 过滤目标插件命令链路中属于正常拒绝的门禁结果。
+// @param err：EventDispatcher 命中命令后返回的错误。
+// @returns 需要上报的错误；运行门禁与授权拒绝返回 nil。
+// ⚠️副作用说明：向标准日志写入门禁拒绝记录。
+func targetCommandError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	// [决策理由] 插件未启用或未在本群开启是预期状态，不应作为错误噪音上报。
+	case errors.Is(err, plugin.ErrPluginNotReady), errors.Is(err, plugin.ErrPluginGroupDisabled):
+		projectlogger.Debug("目标插件命令被运行门禁拒绝", "error", err)
+		return nil
+	// [决策理由] 身份不足属于日常拒绝，记录后安静结束，与旧链路行为一致。
+	case errors.Is(err, plugin.ErrCommandUnauthorized):
+		projectlogger.Warn("目标插件命令身份不足", "error", err)
+		return nil
+	default:
+		return err
+	}
+
+	// >>> 数据演变示例
+	// 1. ErrPluginGroupDisabled -> Debug 日志 -> nil。
+	// 2. Handler 返回发送失败 -> 原样返回 -> WS 层记录错误。
+}
+
+// parseSuperAdminID 将最高管理员配置解析为代码身份解析器使用的 QQ 号。
+// @param configured：SUPER_ADMIN_QQ 配置值，允许为空。
+// @returns 正数 QQ 号；未配置时返回 0，非法值返回错误。
+// ⚠️副作用说明：无。
+func parseSuperAdminID(configured string) (int64, error) {
+	// [决策理由] 未配置最高管理员时目标插件仍可按群身份运行，不应阻断启动。
+	if configured == "" {
+		return 0, nil
+	}
+	value, err := strconv.ParseInt(configured, 10, 64)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("SUPER_ADMIN_QQ %q 无效", configured)
+	}
+
+	// >>> 数据演变示例
+	// 1. "10001" -> 10001,nil。
+	// 2. "abc" -> 0,错误 -> 启动终止。
+	return value, nil
+}
+
+// logTargetPlugins 输出目标插件架构目录中的插件、命令与允许身份。
+// @param catalog：已完成冲突校验的规格目录。
+// @returns 无。
+// ⚠️副作用说明：向标准日志写入目标插件元数据。
+func logTargetPlugins(catalog *plugin.SpecCatalog) {
+	specs := catalog.Specs()
+	projectlogger.Info("已装载目标架构插件", "plugin_count", len(specs))
+	for _, spec := range specs {
+		commands := make([]map[string]any, 0, len(spec.Commands))
+		for _, command := range spec.Commands {
+			roles := make([]string, 0, len(command.AllowedRoles))
+			for role := range command.AllowedRoles {
+				roles = append(roles, string(role))
+			}
+			sort.Strings(roles)
+			commands = append(commands, map[string]any{
+				"key": command.Key, "display_name": command.DisplayName,
+				"triggers": command.Triggers, "scope": string(command.Scope), "allowed_roles": roles,
+			})
+		}
+		projectlogger.Info("目标架构插件",
+			"plugin", spec.Key,
+			"display_name", spec.DisplayName,
+			"command_count", len(commands),
+			"commands", commands,
+			"observer_count", len(spec.Observers),
+		)
+	}
+
+	// >>> 数据演变示例
+	// 1. [echo{1命令}] -> plugin_count=1 -> 输出触发词与允许身份。
+	// 2. 空目录 -> plugin_count=0 -> 不输出插件明细。
 }
 
 // logSupportedPlugins 输出当前二进制编译包含的插件及功能元数据。

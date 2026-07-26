@@ -760,6 +760,15 @@ func (s *Service) pluginUpdateLock(name string) *sync.Mutex {
 	return lock
 }
 
+// Authorize 供目标插件架构的开关服务复用同一套管理员与来源校验。
+// @param actor：待校验操作者。
+// @returns 授权通过返回 nil，否则返回稳定领域错误。
+// ⚠️副作用说明：读取最高管理员内存快照。
+func (s *Service) Authorize(actor Actor) error {
+	// [决策理由] QQ 与 WebUI 必须共享同一鉴权实现，禁止第二套开关授权规则。
+	return s.authorize(actor)
+}
+
 // authorize 使用服务端身份快照校验管理操作来源和操作者。
 // @param actor：待校验操作者。
 // @returns 身份有效且获授权时返回 nil，否则返回稳定领域错误。
