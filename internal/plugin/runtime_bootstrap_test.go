@@ -2,16 +2,21 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
 type runtimeBootstrapRepository struct {
-	states    []PersistedPluginState
-	syncErr   error
-	loadErr   error
-	syncCalls int
-	loadCalls int
+	states      []PersistedPluginState
+	configs     []PersistedPluginConfig
+	syncErr     error
+	loadErr     error
+	configErr   error
+	syncCalls   int
+	loadCalls   int
+	configCalls int
 }
 
 func (r *runtimeBootstrapRepository) SyncCatalog(context.Context, *SpecCatalog) error {
@@ -22,6 +27,11 @@ func (r *runtimeBootstrapRepository) SyncCatalog(context.Context, *SpecCatalog) 
 func (r *runtimeBootstrapRepository) LoadSnapshot(context.Context) ([]PersistedPluginState, error) {
 	r.loadCalls++
 	return r.states, r.loadErr
+}
+
+func (r *runtimeBootstrapRepository) LoadConfigs(context.Context) ([]PersistedPluginConfig, error) {
+	r.configCalls++
+	return r.configs, r.configErr
 }
 
 func runtimeBootstrapSpec(key string, trigger string, lifecycle Lifecycle) PluginSpec {
@@ -254,4 +264,69 @@ func TestNewRuntimeBootstrapRejectsMissingDependencies(t *testing.T) {
 			t.Fatalf("NewRuntimeBootstrap() = %v,%v", bootstrap, err)
 		}
 	}
+}
+
+func TestRuntimeBootstrapAppliesConfigBeforeEnabling(t *testing.T) {
+	order := make([]string, 0, 2)
+	lifecycle := &orderedBootstrapLifecycle{record: func(event string) { order = append(order, event) }}
+	spec := runtimeBootstrapSpec("echo", "echo", lifecycle)
+	spec.Config = &ConfigSpec{
+		Schema: ConfigSchema{Fields: []ConfigField{{Key: "response_prefix", DisplayName: "回复前缀", Type: FieldString, Default: json.RawMessage(`""`)}}},
+		Apply: func(_ context.Context, raw json.RawMessage) error {
+			order = append(order, "apply:"+string(raw))
+			return nil
+		},
+	}
+	repository := &runtimeBootstrapRepository{
+		states:  []PersistedPluginState{{PluginKey: "echo", DesiredEnabled: true, Version: 2}},
+		configs: []PersistedPluginConfig{{PluginKey: "echo", ConfigJSON: json.RawMessage(`{"response_prefix":"[bot] "}`), Version: 3}},
+	}
+	bootstrap, controller := newRuntimeBootstrapTestSubject(t, repository, spec)
+	if err := bootstrap.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// 配置必须在生命周期启用之前发布，插件不能带着未初始化快照进入 Ready。
+	if len(order) != 2 || !strings.HasPrefix(order[0], "apply:") || order[1] != "enable" {
+		t.Fatalf("order = %v", order)
+	}
+	if !strings.Contains(order[0], `"response_prefix":"[bot] "`) {
+		t.Fatalf("applied config = %q", order[0])
+	}
+	if state, _ := controller.State("echo"); state.Status != RuntimeReady {
+		t.Fatalf("status = %v", state.Status)
+	}
+}
+
+func TestRuntimeBootstrapStopsWhenConfigFails(t *testing.T) {
+	applyFailure := errors.New("apply failed")
+	lifecycle := &orderedBootstrapLifecycle{record: func(string) {}}
+	spec := runtimeBootstrapSpec("echo", "echo", lifecycle)
+	spec.Config = &ConfigSpec{
+		Schema: ConfigSchema{Fields: []ConfigField{{Key: "response_prefix", DisplayName: "回复前缀", Type: FieldString, Default: json.RawMessage(`""`)}}},
+		Apply:  func(context.Context, json.RawMessage) error { return applyFailure },
+	}
+	repository := &runtimeBootstrapRepository{states: []PersistedPluginState{{PluginKey: "echo", DesiredEnabled: true, Version: 2}}}
+	bootstrap, controller := newRuntimeBootstrapTestSubject(t, repository, spec)
+	if err := bootstrap.Initialize(context.Background()); !errors.Is(err, applyFailure) {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	// 配置失败必须阻止插件进入 Ready，避免带着错误配置接收流量。
+	if state, _ := controller.State("echo"); state.Status != RuntimeDisabled {
+		t.Fatalf("status = %v", state.Status)
+	}
+}
+
+// orderedBootstrapLifecycle 把启停调用写入共享顺序日志。
+type orderedBootstrapLifecycle struct {
+	record func(string)
+}
+
+func (l *orderedBootstrapLifecycle) OnEnable(context.Context) error {
+	l.record("enable")
+	return nil
+}
+
+func (l *orderedBootstrapLifecycle) OnDisable(context.Context) error {
+	l.record("disable")
+	return nil
 }

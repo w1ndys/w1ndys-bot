@@ -120,6 +120,16 @@ func clonePluginSpec(spec PluginSpec) PluginSpec {
 		result.Observers[index] = observer
 		result.Observers[index].EventKinds = append([]ObserverEventKind(nil), observer.EventKinds...)
 	}
+	// [决策理由] 配置字段切片会被管理 API 读取，必须与调用方隔离；钩子保持同一函数引用。
+	if spec.Config != nil {
+		config := *spec.Config
+		config.Schema.Fields = make([]ConfigField, len(spec.Config.Schema.Fields))
+		for index, field := range spec.Config.Schema.Fields {
+			config.Schema.Fields[index] = field
+			config.Schema.Fields[index].Options = append([]string(nil), field.Options...)
+		}
+		result.Config = &config
+	}
 
 	// >>> 数据演变示例
 	// 1. echo触发词[echo]+member角色 -> 复制后修改副本不影响输入。

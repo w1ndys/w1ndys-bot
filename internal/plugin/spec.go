@@ -3,6 +3,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -114,6 +115,16 @@ type Lifecycle interface {
 	OnDisable(context.Context) error
 }
 
+// ConfigSpec 声明插件的小型标量配置及其领域校验与热应用钩子。
+//
+// Validate 可选，必须无副作用且并发安全；Apply 必须原子发布不可变快照，
+// 返回错误或 panic 时不得改变旧快照。两者都不得在消息热路径上被调用。
+type ConfigSpec struct {
+	Schema   ConfigSchema
+	Validate func(context.Context, json.RawMessage) error
+	Apply    func(context.Context, json.RawMessage) error
+}
+
 // PluginSpec 是目标架构中由代码持有的完整插件规格。
 type PluginSpec struct {
 	Key          string
@@ -121,6 +132,7 @@ type PluginSpec struct {
 	Description  string
 	Commands     []CommandSpec
 	Observers    []ObserverSpec
+	Config       *ConfigSpec
 	Lifecycle    Lifecycle
 	AdminPageKey string
 }
@@ -238,10 +250,65 @@ func (s PluginSpec) Validate() error {
 		}
 	}
 
+	// [决策理由] 配置契约错误会在管理页面首次读取时才暴露，必须在启动期拒绝。
+	if err := s.validateConfig(); err != nil {
+		return err
+	}
+
 	// >>> 数据演变示例
 	// 1. echo+群命令+member角色+Handler -> 完整校验 -> nil。
 	// 2. monitor+未知事件类型 -> 观察器校验 -> 返回错误。
 	return nil
+}
+
+// validateConfig 校验可选的小型配置契约。
+// @param 无。
+// @returns Schema、字段类型或热应用钩子错误。
+// ⚠️副作用说明：无。
+func (s PluginSpec) validateConfig() error {
+	// [决策理由] 不声明配置的插件由通用页面只管理开关，属于正常形态。
+	if s.Config == nil {
+		return nil
+	}
+	if err := s.Config.Schema.Validate(); err != nil {
+		return fmt.Errorf("插件 %s 配置 Schema 无效: %w", s.Key, err)
+	}
+	// [决策理由] 空 Schema 会在管理页渲染出没有任何字段的配置表单。
+	if len(s.Config.Schema.Fields) == 0 {
+		return fmt.Errorf("插件 %s 声明配置但没有字段", s.Key)
+	}
+	// [决策理由] 无法热应用的配置只会写库不生效，属于不可解释状态。
+	if s.Config.Apply == nil {
+		return fmt.Errorf("插件 %s 配置缺少热应用钩子", s.Key)
+	}
+	for _, field := range s.Config.Schema.Fields {
+		// [决策理由] 目标架构的小型配置只承载有限标量；会增长的结构化数据必须使用插件自有表与专属页面。
+		if !validRuntimeConfigFieldType(field.Type) {
+			return fmt.Errorf("插件 %s 的配置字段 %s 类型 %q 不属于小型配置", s.Key, field.Key, field.Type)
+		}
+	}
+
+	// >>> 数据演变示例
+	// 1. echo+string字段+Apply -> nil。
+	// 2. monitor+weighted_terms_json -> 超出小型配置 -> 返回错误。
+	return nil
+}
+
+// validRuntimeConfigFieldType 判断字段类型是否属于目标架构的小型配置集合。
+// @param fieldType：待校验字段类型。
+// @returns 属于有限标量类型时为 true。
+// ⚠️副作用说明：无。
+func validRuntimeConfigFieldType(fieldType FieldType) bool {
+	switch fieldType {
+	case FieldString, FieldMultiline, FieldInteger, FieldBoolean, FieldEnum, FieldSecret:
+		return true
+	default:
+		return false
+	}
+
+	// >>> 数据演变示例
+	// 1. string -> true。
+	// 2. string_list_json -> false。
 }
 
 // validRole 判断身份是否属于目标架构封闭集合。

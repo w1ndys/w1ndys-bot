@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -13,6 +14,7 @@ const runtimeBootstrapCleanupTimeout = 10 * time.Second
 type RuntimeSnapshotRepository interface {
 	SyncCatalog(context.Context, *SpecCatalog) error
 	LoadSnapshot(context.Context) ([]PersistedPluginState, error)
+	LoadConfigs(context.Context) ([]PersistedPluginConfig, error)
 }
 
 // RuntimeBootstrap 将持久化管理员意图恢复到纯内存 RuntimeController。
@@ -41,6 +43,10 @@ func (b *RuntimeBootstrap) Initialize(ctx context.Context) error {
 	states, err := b.repository.LoadSnapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("加载运行时状态快照: %w", err)
+	}
+	// 配置必须在任何插件进入 Ready 之前发布，避免插件带着未初始化快照接收流量。
+	if err := b.applyConfigs(ctx); err != nil {
+		return err
 	}
 	known := make(map[string]struct{})
 	for _, spec := range b.catalog.Specs() {
@@ -91,6 +97,45 @@ func (b *RuntimeBootstrap) Initialize(ctx context.Context) error {
 			return errors.Join(fmt.Errorf("恢复插件 %s 生命周期: %w", state.PluginKey, err), b.cleanup(ctx, append(enabled, state.PluginKey)))
 		}
 		enabled = append(enabled, state.PluginKey)
+	}
+	return nil
+}
+
+// applyConfigs 把持久化配置发布到声明了配置的插件。
+func (b *RuntimeBootstrap) applyConfigs(ctx context.Context) error {
+	specs := b.catalog.Specs()
+	configured := false
+	for _, spec := range specs {
+		configured = configured || spec.Config != nil
+	}
+	if !configured {
+		return nil
+	}
+	configs, err := b.repository.LoadConfigs(ctx)
+	if err != nil {
+		return fmt.Errorf("加载运行时配置快照: %w", err)
+	}
+	stored := make(map[string]PersistedPluginConfig, len(configs))
+	for _, config := range configs {
+		stored[config.PluginKey] = config
+	}
+	// 按目录顺序应用，使多插件下的失败点可复现。
+	for _, spec := range specs {
+		if spec.Config == nil {
+			continue
+		}
+		config, found := stored[spec.Key]
+		// 目录同步应已建行；缺行时按空对象应用，由 Schema 补齐默认值。
+		if !found {
+			config = PersistedPluginConfig{PluginKey: spec.Key, ConfigJSON: json.RawMessage(`{}`)}
+		}
+		normalized, err := NormalizeConfig(spec.Config.Schema, config.ConfigJSON)
+		if err != nil {
+			return fmt.Errorf("%w: 插件 %s: %v", ErrRuntimeConfigInvalid, spec.Key, err)
+		}
+		if err := invokeConfigHook(ctx, spec.Config.Apply, normalized); err != nil {
+			return fmt.Errorf("热应用插件 %s 配置: %w", spec.Key, err)
+		}
 	}
 	return nil
 }

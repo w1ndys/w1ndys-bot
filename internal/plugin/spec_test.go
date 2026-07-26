@@ -3,6 +3,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -172,4 +173,58 @@ func TestPluginSpecValidateRejectsInvalidObservers(t *testing.T) {
 	// >>> 数据演变示例
 	// 1. group_message+Handler -> 合法观察入口。
 	// 2. private_message -> 不在群事件白名单 -> 返回错误。
+}
+
+func TestPluginSpecValidatesSmallConfigContract(t *testing.T) {
+	applyHook := func(context.Context, json.RawMessage) error { return nil }
+	stringField := ConfigField{Key: "response_prefix", DisplayName: "回复前缀", Type: FieldString}
+	tests := []struct {
+		name    string
+		config  *ConfigSpec
+		wantErr bool
+	}{
+		{name: "无配置", config: nil},
+		{name: "标量字段", config: &ConfigSpec{Schema: ConfigSchema{Fields: []ConfigField{stringField}}, Apply: applyHook}},
+		{name: "缺少热应用钩子", config: &ConfigSpec{Schema: ConfigSchema{Fields: []ConfigField{stringField}}}, wantErr: true},
+		{name: "空字段集合", config: &ConfigSpec{Schema: ConfigSchema{}, Apply: applyHook}, wantErr: true},
+		{name: "无效 Schema", config: &ConfigSpec{Schema: ConfigSchema{Fields: []ConfigField{{Key: "Bad-Key", DisplayName: "x", Type: FieldString}}}, Apply: applyHook}, wantErr: true},
+		{
+			name:    "结构化字段超出小型配置",
+			config:  &ConfigSpec{Schema: ConfigSchema{Fields: []ConfigField{{Key: "terms", DisplayName: "词库", Type: FieldWeightedTermsJSON}}}, Apply: applyHook},
+			wantErr: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			spec := validPluginSpec("echo", "echo")
+			spec.Config = test.config
+			err := spec.Validate()
+			if (err != nil) != test.wantErr {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestSpecCatalogIsolatesConfigFields(t *testing.T) {
+	spec := validPluginSpec("echo", "echo")
+	options := []string{"a", "b"}
+	spec.Config = &ConfigSpec{
+		Schema: ConfigSchema{Fields: []ConfigField{{Key: "mode", DisplayName: "模式", Type: FieldEnum, Options: options}}},
+		Apply:  func(context.Context, json.RawMessage) error { return nil },
+	}
+	catalog, err := NewSpecCatalog([]PluginSpec{spec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 目录必须与调用方切片隔离，避免运行期被外部修改配置选项。
+	options[0] = "mutated"
+	spec.Config.Schema.Fields[0].DisplayName = "mutated"
+	stored, found := catalog.Find("echo")
+	if !found || stored.Config == nil {
+		t.Fatalf("catalog config = %+v", stored.Config)
+	}
+	if stored.Config.Schema.Fields[0].Options[0] != "a" || stored.Config.Schema.Fields[0].DisplayName != "模式" {
+		t.Fatalf("config not isolated: %+v", stored.Config.Schema.Fields[0])
+	}
 }

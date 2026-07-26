@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -12,12 +13,31 @@ import (
 	"github.com/w1ndys/w1ndys-bot/internal/management"
 )
 
+const runtimeConfigCompensateTimeout = 10 * time.Second
+
 // RuntimeStateStore 是插件开关应用服务依赖的持久化意图读写契约。
 type RuntimeStateStore interface {
 	LoadSnapshot(context.Context) ([]PersistedPluginState, error)
 	FindState(context.Context, string) (PersistedPluginState, error)
 	UpdateDesiredEnabled(context.Context, management.Actor, string, bool, int64) (PersistedPluginState, error)
 	SetGroupEnabled(context.Context, management.Actor, string, int64, bool, int64) (PersistedGroupState, error)
+	FindConfig(context.Context, string) (PersistedPluginConfig, error)
+	SaveConfig(context.Context, management.Actor, string, json.RawMessage, int64) (PersistedPluginConfig, error)
+}
+
+var (
+	ErrRuntimeConfigNotSupported = errors.New("插件未声明小型配置")
+	ErrRuntimeConfigInvalid      = errors.New("插件配置无效")
+	ErrRuntimeConfigHookPanic    = errors.New("插件配置钩子发生 panic")
+)
+
+// RuntimeConfigView 是配置管理页需要的 Schema、脱敏值与乐观锁版本。
+type RuntimeConfigView struct {
+	PluginKey string          `json:"plugin_key"`
+	Schema    ConfigSchema    `json:"schema"`
+	Config    json.RawMessage `json:"config"`
+	Version   int64           `json:"version"`
+	UpdatedAt time.Time       `json:"updated_at"`
 }
 
 // RuntimeAuthorizer 由平台管理服务实现，校验管理操作者身份与来源。
@@ -55,6 +75,7 @@ type RuntimeStateView struct {
 	Status         RuntimeStatus        `json:"status"`
 	InFlight       int                  `json:"in_flight"`
 	LastError      string               `json:"last_error"`
+	HasConfig      bool                 `json:"has_config"`
 	Commands       []RuntimeCommandView `json:"commands"`
 	Groups         []RuntimeGroupView   `json:"groups"`
 }
@@ -204,6 +225,140 @@ func (s *RuntimeService) SetGroupEnabled(ctx context.Context, actor management.A
 	return s.view(spec, current), nil
 }
 
+// GetConfig 返回插件配置 Schema 与脱敏后的当前值。
+func (s *RuntimeService) GetConfig(ctx context.Context, actor management.Actor, pluginKey string) (RuntimeConfigView, error) {
+	if err := s.authorizer.Authorize(actor); err != nil {
+		return RuntimeConfigView{}, err
+	}
+	spec, err := s.configurableSpec(pluginKey)
+	if err != nil {
+		return RuntimeConfigView{}, err
+	}
+	stored, err := s.store.FindConfig(ctx, pluginKey)
+	if err != nil {
+		return RuntimeConfigView{}, fmt.Errorf("读取插件 %s 配置: %w", pluginKey, err)
+	}
+	// 脱敏同时补齐 Schema 默认值，首次保存前缺失的字段也能正常渲染。
+	redacted, err := RedactConfig(spec.Config.Schema, stored.ConfigJSON)
+	if err != nil {
+		return RuntimeConfigView{}, fmt.Errorf("%w: %v", ErrRuntimeConfigInvalid, err)
+	}
+	return RuntimeConfigView{
+		PluginKey: pluginKey, Schema: spec.Config.Schema, Config: redacted,
+		Version: stored.Version, UpdatedAt: stored.UpdatedAt.UTC(),
+	}, nil
+}
+
+// SetConfig 按乐观锁合并、校验并保存配置，随后热应用到运行实例。
+// 热应用失败会把数据库补偿回旧值，避免持久化配置与运行快照长期不一致。
+func (s *RuntimeService) SetConfig(ctx context.Context, actor management.Actor, pluginKey string, update json.RawMessage, expectedVersion int64) (RuntimeConfigView, error) {
+	if err := s.authorizer.Authorize(actor); err != nil {
+		return RuntimeConfigView{}, err
+	}
+	spec, err := s.configurableSpec(pluginKey)
+	if err != nil {
+		return RuntimeConfigView{}, err
+	}
+	unlock := s.lock(pluginKey)
+	defer unlock()
+
+	current, err := s.store.FindConfig(ctx, pluginKey)
+	if err != nil {
+		return RuntimeConfigView{}, fmt.Errorf("读取插件 %s 配置: %w", pluginKey, err)
+	}
+	if current.Version != expectedVersion {
+		return RuntimeConfigView{}, ErrRuntimeStateConflict
+	}
+	// 合并保留未提交的 secret 原值，随后严格规范化以拒绝未知字段和类型错误。
+	merged, err := MergeConfigUpdate(spec.Config.Schema, current.ConfigJSON, update)
+	if err != nil {
+		return RuntimeConfigView{}, fmt.Errorf("%w: %v", ErrRuntimeConfigInvalid, err)
+	}
+	normalized, err := NormalizeConfig(spec.Config.Schema, merged)
+	if err != nil {
+		return RuntimeConfigView{}, fmt.Errorf("%w: %v", ErrRuntimeConfigInvalid, err)
+	}
+	if err := invokeConfigHook(ctx, spec.Config.Validate, normalized); err != nil {
+		return RuntimeConfigView{}, fmt.Errorf("%w: %v", ErrRuntimeConfigInvalid, err)
+	}
+	saved, err := s.store.SaveConfig(ctx, actor, pluginKey, normalized, expectedVersion)
+	if err != nil {
+		return RuntimeConfigView{}, fmt.Errorf("保存插件 %s 配置: %w", pluginKey, err)
+	}
+	if applyErr := invokeConfigHook(ctx, spec.Config.Apply, normalized); applyErr != nil {
+		return RuntimeConfigView{}, s.compensateConfig(ctx, actor, spec, current, saved, applyErr)
+	}
+	return s.configView(spec, saved)
+}
+
+// compensateConfig 在热应用失败后把数据库写回旧配置并重新发布旧快照。
+func (s *RuntimeService) compensateConfig(ctx context.Context, actor management.Actor, spec PluginSpec, previous, saved PersistedPluginConfig, applyErr error) error {
+	failure := fmt.Errorf("热应用插件 %s 配置: %w", spec.Key, applyErr)
+	// 补偿必须脱离调用方取消信号，否则请求超时会留下已写库但未生效的配置。
+	compensateContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), runtimeConfigCompensateTimeout)
+	defer cancel()
+	restored, err := s.store.SaveConfig(compensateContext, actor, spec.Key, previous.ConfigJSON, saved.Version)
+	if err != nil {
+		return errors.Join(failure, fmt.Errorf("补偿插件 %s 配置: %w", spec.Key, err))
+	}
+	// 旧值曾经成功应用过，重新发布可确保运行快照与补偿后的数据库一致。
+	if err := invokeConfigHook(compensateContext, spec.Config.Apply, restored.ConfigJSON); err != nil {
+		return errors.Join(failure, fmt.Errorf("恢复插件 %s 配置快照: %w", spec.Key, err))
+	}
+	return failure
+}
+
+// ApplyStoredConfig 在启动恢复期把持久化配置发布到运行实例。
+func (s *RuntimeService) ApplyStoredConfig(ctx context.Context, spec PluginSpec, stored PersistedPluginConfig) error {
+	if spec.Config == nil {
+		return nil
+	}
+	normalized, err := NormalizeConfig(spec.Config.Schema, stored.ConfigJSON)
+	if err != nil {
+		return fmt.Errorf("%w: 插件 %s: %v", ErrRuntimeConfigInvalid, spec.Key, err)
+	}
+	if err := invokeConfigHook(ctx, spec.Config.Apply, normalized); err != nil {
+		return fmt.Errorf("热应用插件 %s 配置: %w", spec.Key, err)
+	}
+	return nil
+}
+
+func (s *RuntimeService) configView(spec PluginSpec, stored PersistedPluginConfig) (RuntimeConfigView, error) {
+	redacted, err := RedactConfig(spec.Config.Schema, stored.ConfigJSON)
+	if err != nil {
+		return RuntimeConfigView{}, fmt.Errorf("%w: %v", ErrRuntimeConfigInvalid, err)
+	}
+	return RuntimeConfigView{
+		PluginKey: spec.Key, Schema: spec.Config.Schema, Config: redacted,
+		Version: stored.Version, UpdatedAt: stored.UpdatedAt.UTC(),
+	}, nil
+}
+
+func (s *RuntimeService) configurableSpec(pluginKey string) (PluginSpec, error) {
+	spec, err := s.spec(pluginKey)
+	if err != nil {
+		return PluginSpec{}, err
+	}
+	// 未声明配置的插件没有该子资源，不应伪装成空 Schema。
+	if spec.Config == nil {
+		return PluginSpec{}, fmt.Errorf("%w: %s", ErrRuntimeConfigNotSupported, pluginKey)
+	}
+	return spec, nil
+}
+
+// invokeConfigHook 调用插件配置钩子并隔离 panic。
+func invokeConfigHook(ctx context.Context, hook func(context.Context, json.RawMessage) error, raw json.RawMessage) (err error) {
+	if hook == nil {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrRuntimeConfigHookPanic
+		}
+	}()
+	return hook(ctx, raw)
+}
+
 // enable 先持久化启用意图，再执行生命周期；生命周期失败不回滚意图，由运行状态暴露分歧。
 func (s *RuntimeService) enable(ctx context.Context, actor management.Actor, spec PluginSpec, current PersistedPluginState) (RuntimeStateView, error) {
 	saved, err := s.store.UpdateDesiredEnabled(ctx, actor, spec.Key, true, current.Version)
@@ -275,6 +430,7 @@ func (s *RuntimeService) view(spec PluginSpec, state PersistedPluginState) Runti
 		Version:        state.Version,
 		UpdatedAt:      state.UpdatedAt.UTC(),
 		Status:         RuntimeDisabled,
+		HasConfig:      spec.Config != nil,
 		Commands:       make([]RuntimeCommandView, 0, len(spec.Commands)),
 		Groups:         make([]RuntimeGroupView, 0, len(state.Groups)),
 	}

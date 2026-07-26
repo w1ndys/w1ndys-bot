@@ -2,8 +2,10 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,18 +17,54 @@ var runtimeServiceActor = management.Actor{ID: "10001", Role: "super_admin", Cha
 
 // runtimeServiceStore 是记录调用顺序和操作者的内存状态仓库。
 type runtimeServiceStore struct {
-	mu        sync.Mutex
-	states    map[string]PersistedPluginState
-	events    []string
-	actors    []management.Actor
-	loadErr   error
-	findErr   error
-	updateErr error
-	groupErr  error
+	mu            sync.Mutex
+	states        map[string]PersistedPluginState
+	configs       map[string]PersistedPluginConfig
+	events        []string
+	actors        []management.Actor
+	loadErr       error
+	findErr       error
+	updateErr     error
+	groupErr      error
+	findConfigErr error
+	saveConfigErr error
+}
+
+func (s *runtimeServiceStore) FindConfig(_ context.Context, pluginKey string) (PersistedPluginConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.findConfigErr != nil {
+		return PersistedPluginConfig{}, s.findConfigErr
+	}
+	config, found := s.configs[pluginKey]
+	if !found {
+		return PersistedPluginConfig{}, ErrRuntimeConfigNotFound
+	}
+	return config, nil
+}
+
+func (s *runtimeServiceStore) SaveConfig(_ context.Context, actor management.Actor, pluginKey string, configJSON json.RawMessage, expectedVersion int64) (PersistedPluginConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, "persist-config")
+	s.actors = append(s.actors, actor)
+	if s.saveConfigErr != nil {
+		return PersistedPluginConfig{}, s.saveConfigErr
+	}
+	config, found := s.configs[pluginKey]
+	if !found {
+		return PersistedPluginConfig{}, ErrRuntimeConfigNotFound
+	}
+	if config.Version != expectedVersion {
+		return PersistedPluginConfig{}, ErrRuntimeStateConflict
+	}
+	config.ConfigJSON, config.Version, config.UpdatedAt = append(json.RawMessage(nil), configJSON...), config.Version+1, time.Now().UTC()
+	s.configs[pluginKey] = config
+	return config, nil
 }
 
 func newRuntimeServiceStore(states ...PersistedPluginState) *runtimeServiceStore {
-	store := &runtimeServiceStore{states: make(map[string]PersistedPluginState, len(states))}
+	store := &runtimeServiceStore{states: make(map[string]PersistedPluginState, len(states)), configs: make(map[string]PersistedPluginConfig)}
 	for _, state := range states {
 		if state.Groups == nil {
 			state.Groups = make([]PersistedGroupState, 0)
@@ -578,4 +616,177 @@ func equalStrings(actual, want []string) bool {
 		}
 	}
 	return true
+}
+
+// runtimeConfigProbe 记录配置钩子的调用顺序与最终发布的快照。
+type runtimeConfigProbe struct {
+	mu          sync.Mutex
+	applied     []string
+	validated   []string
+	applyErr    error
+	applyPanic  bool
+	validateErr error
+}
+
+func (p *runtimeConfigProbe) validate(_ context.Context, raw json.RawMessage) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.validated = append(p.validated, string(raw))
+	return p.validateErr
+}
+
+func (p *runtimeConfigProbe) apply(_ context.Context, raw json.RawMessage) error {
+	p.mu.Lock()
+	shouldPanic, err := p.applyPanic, p.applyErr
+	p.applied = append(p.applied, string(raw))
+	p.mu.Unlock()
+	if shouldPanic {
+		panic("apply panic")
+	}
+	return err
+}
+
+func (p *runtimeConfigProbe) snapshots() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string{}, p.applied...)
+}
+
+func runtimeConfigSpec(probe *runtimeConfigProbe) PluginSpec {
+	spec := validPluginSpec("echo", "echo")
+	spec.Config = &ConfigSpec{
+		Schema: ConfigSchema{Fields: []ConfigField{
+			{Key: "response_prefix", DisplayName: "回复前缀", Type: FieldString, Default: json.RawMessage(`""`)},
+			{Key: "token", DisplayName: "令牌", Type: FieldSecret},
+		}},
+		Validate: probe.validate,
+		Apply:    probe.apply,
+	}
+	return spec
+}
+
+func newRuntimeConfigSubject(t *testing.T, probe *runtimeConfigProbe, stored string) (*RuntimeService, *runtimeServiceStore) {
+	t.Helper()
+	store := newRuntimeServiceStore(PersistedPluginState{PluginKey: "echo", Version: 1})
+	store.configs["echo"] = PersistedPluginConfig{PluginKey: "echo", ConfigJSON: json.RawMessage(stored), Version: 1}
+	service, _ := newRuntimeServiceSubject(t, store, &runtimeServiceAuthorizer{}, runtimeConfigSpec(probe))
+	return service, store
+}
+
+func TestRuntimeServiceGetConfigRedactsSecretsAndFillsDefaults(t *testing.T) {
+	probe := &runtimeConfigProbe{}
+	service, _ := newRuntimeConfigSubject(t, probe, `{"token":"s3cret"}`)
+	view, err := service.GetConfig(context.Background(), runtimeServiceActor, "echo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// secret 不得出现在管理读取结果中，缺失字段由 Schema 默认值补齐。
+	if strings.Contains(string(view.Config), "s3cret") {
+		t.Fatalf("secret leaked: %s", view.Config)
+	}
+	if !strings.Contains(string(view.Config), `"response_prefix":""`) {
+		t.Fatalf("default missing: %s", view.Config)
+	}
+	if view.Version != 1 || len(view.Schema.Fields) != 2 || view.PluginKey != "echo" {
+		t.Fatalf("view = %+v", view)
+	}
+}
+
+func TestRuntimeServiceConfigRejectsUnsupportedPlugin(t *testing.T) {
+	store := newRuntimeServiceStore(PersistedPluginState{PluginKey: "echo", Version: 1})
+	service, _ := newRuntimeServiceSubject(t, store, &runtimeServiceAuthorizer{}, validPluginSpec("echo", "echo"))
+	if _, err := service.GetConfig(context.Background(), runtimeServiceActor, "echo"); !errors.Is(err, ErrRuntimeConfigNotSupported) {
+		t.Fatalf("GetConfig() error = %v", err)
+	}
+	if _, err := service.SetConfig(context.Background(), runtimeServiceActor, "echo", json.RawMessage(`{}`), 1); !errors.Is(err, ErrRuntimeConfigNotSupported) {
+		t.Fatalf("SetConfig() error = %v", err)
+	}
+	// 未声明配置的插件不应触达存储层。
+	if len(store.log()) != 0 {
+		t.Fatalf("store called: %v", store.log())
+	}
+}
+
+func TestRuntimeServiceSetConfigPersistsThenApplies(t *testing.T) {
+	probe := &runtimeConfigProbe{}
+	service, store := newRuntimeConfigSubject(t, probe, `{"response_prefix":"","token":"s3cret"}`)
+	view, err := service.SetConfig(context.Background(), runtimeServiceActor, "echo", json.RawMessage(`{"response_prefix":"[bot] "}`), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !equalStrings(store.log(), []string{"persist-config"}) {
+		t.Fatalf("events = %v", store.log())
+	}
+	applied := probe.snapshots()
+	// 未提交的 secret 必须保留原值，而不是被合并成空字符串。
+	if len(applied) != 1 || !strings.Contains(applied[0], `"token":"s3cret"`) || !strings.Contains(applied[0], `"response_prefix":"[bot] "`) {
+		t.Fatalf("applied = %v", applied)
+	}
+	if view.Version != 2 || strings.Contains(string(view.Config), "s3cret") {
+		t.Fatalf("view = %+v", view)
+	}
+	if len(store.actors) != 1 || store.actors[0].RequestID != "req-1" {
+		t.Fatalf("actor not forwarded for audit: %+v", store.actors)
+	}
+}
+
+func TestRuntimeServiceSetConfigRejectsStaleVersionAndInvalidInput(t *testing.T) {
+	probe := &runtimeConfigProbe{}
+	service, store := newRuntimeConfigSubject(t, probe, `{"response_prefix":""}`)
+	if _, err := service.SetConfig(context.Background(), runtimeServiceActor, "echo", json.RawMessage(`{}`), 5); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("stale version error = %v", err)
+	}
+	// 未知字段必须在写库前被规范化拒绝。
+	if _, err := service.SetConfig(context.Background(), runtimeServiceActor, "echo", json.RawMessage(`{"unknown":1}`), 1); !errors.Is(err, ErrRuntimeConfigInvalid) {
+		t.Fatalf("unknown field error = %v", err)
+	}
+	probe.validateErr = errors.New("domain rejected")
+	if _, err := service.SetConfig(context.Background(), runtimeServiceActor, "echo", json.RawMessage(`{"response_prefix":"x"}`), 1); !errors.Is(err, ErrRuntimeConfigInvalid) {
+		t.Fatalf("domain validation error = %v", err)
+	}
+	if len(store.log()) != 0 || len(probe.snapshots()) != 0 {
+		t.Fatalf("rejected input reached persistence: events=%v applied=%v", store.log(), probe.snapshots())
+	}
+}
+
+func TestRuntimeServiceSetConfigCompensatesWhenApplyFails(t *testing.T) {
+	tests := []struct {
+		name       string
+		applyErr   error
+		applyPanic bool
+	}{
+		{name: "返回错误", applyErr: errors.New("apply failed")},
+		{name: "发生 panic", applyPanic: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			probe := &runtimeConfigProbe{applyErr: test.applyErr, applyPanic: test.applyPanic}
+			service, store := newRuntimeConfigSubject(t, probe, `{"response_prefix":"旧"}`)
+			_, err := service.SetConfig(context.Background(), runtimeServiceActor, "echo", json.RawMessage(`{"response_prefix":"新"}`), 1)
+			if err == nil {
+				t.Fatal("expected apply failure")
+			}
+			// 热应用失败后数据库必须补偿回旧值，避免持久化配置与运行快照长期不一致。
+			restored := store.configs["echo"]
+			if !strings.Contains(string(restored.ConfigJSON), "旧") {
+				t.Fatalf("config not compensated: %s", restored.ConfigJSON)
+			}
+			if !equalStrings(store.log(), []string{"persist-config", "persist-config"}) {
+				t.Fatalf("events = %v", store.log())
+			}
+		})
+	}
+}
+
+func TestRuntimeServiceStateViewMarksConfigurablePlugins(t *testing.T) {
+	probe := &runtimeConfigProbe{}
+	store := newRuntimeServiceStore(PersistedPluginState{PluginKey: "echo", Version: 1}, PersistedPluginState{PluginKey: "tools", Version: 1})
+	service, _ := newRuntimeServiceSubject(t, store, &runtimeServiceAuthorizer{}, runtimeConfigSpec(probe), validPluginSpec("tools", "tools"))
+	views, err := service.List(context.Background(), runtimeServiceActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 2 || !views[0].HasConfig || views[1].HasConfig {
+		t.Fatalf("has_config = %v,%v", views[0].HasConfig, views[1].HasConfig)
+	}
 }

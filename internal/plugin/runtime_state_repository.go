@@ -25,7 +25,23 @@ var (
 	ErrRuntimeStateConflict       = errors.New("插件状态版本冲突")
 	ErrRuntimeStateInvalidVersion = errors.New("插件状态版本无效")
 	ErrRuntimeStateNotFound       = errors.New("插件状态不存在")
+	ErrRuntimeConfigNotFound      = errors.New("插件配置不存在")
 )
+
+// PersistedPluginConfig 是插件已持久化的原始配置值与乐观锁版本。
+type PersistedPluginConfig struct {
+	PluginKey  string
+	ConfigJSON json.RawMessage
+	Version    int64
+	UpdatedAt  time.Time
+}
+
+// runtimeConfigAudit 是配置变更写入审计的前后快照。
+type runtimeConfigAudit struct {
+	PluginKey  string          `json:"plugin_key"`
+	ConfigJSON json.RawMessage `json:"config_json"`
+	Version    int64           `json:"version"`
+}
 
 // runtimeStateAudit 是全局意图变更写入审计的有界前后快照。
 type runtimeStateAudit struct {
@@ -94,7 +110,122 @@ ON CONFLICT (plugin_key) DO NOTHING`, keys)
 	if err != nil {
 		return fmt.Errorf("同步插件状态目录: %w", err)
 	}
+	configured := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		if spec.Config != nil {
+			configured = append(configured, spec.Key)
+		}
+	}
+	if len(configured) == 0 {
+		return nil
+	}
+	// 配置行随目录预建，使后续写入始终走正版本 CAS，无需区分新增与更新。
+	_, err = r.database.Exec(ctx, `INSERT INTO plugin_runtime_configs(plugin_key)
+SELECT plugin_key FROM unnest($1::text[]) AS plugin_key
+ON CONFLICT (plugin_key) DO NOTHING`, configured)
+	if err != nil {
+		return fmt.Errorf("同步插件配置目录: %w", err)
+	}
 	return nil
+}
+
+// FindConfig 读取插件已持久化的原始配置值与乐观锁版本。
+func (r *PostgresRuntimeStateRepository) FindConfig(ctx context.Context, pluginKey string) (PersistedPluginConfig, error) {
+	if r == nil || r.database == nil {
+		return PersistedPluginConfig{}, fmt.Errorf("插件状态仓库未初始化")
+	}
+	if !identifierPattern.MatchString(pluginKey) {
+		return PersistedPluginConfig{}, fmt.Errorf("无效插件 Key %q", pluginKey)
+	}
+	var config PersistedPluginConfig
+	err := r.database.QueryRow(ctx, `SELECT plugin_key,config_json,version,updated_at FROM plugin_runtime_configs WHERE plugin_key=$1`, pluginKey).
+		Scan(&config.PluginKey, &config.ConfigJSON, &config.Version, &config.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PersistedPluginConfig{}, fmt.Errorf("%w: %s", ErrRuntimeConfigNotFound, pluginKey)
+	}
+	if err != nil {
+		return PersistedPluginConfig{}, fmt.Errorf("查询插件 %s 配置: %w", pluginKey, err)
+	}
+	config.UpdatedAt = config.UpdatedAt.UTC()
+	return config, nil
+}
+
+// LoadConfigs 一次读取全部插件配置，供启动期热应用使用。
+func (r *PostgresRuntimeStateRepository) LoadConfigs(ctx context.Context) ([]PersistedPluginConfig, error) {
+	if r == nil || r.database == nil {
+		return nil, fmt.Errorf("插件状态仓库未初始化")
+	}
+	rows, err := r.database.Query(ctx, `SELECT plugin_key,config_json,version,updated_at FROM plugin_runtime_configs ORDER BY plugin_key`)
+	if err != nil {
+		return nil, fmt.Errorf("查询插件配置快照: %w", err)
+	}
+	defer rows.Close()
+
+	configs := make([]PersistedPluginConfig, 0)
+	for rows.Next() {
+		var config PersistedPluginConfig
+		if err := rows.Scan(&config.PluginKey, &config.ConfigJSON, &config.Version, &config.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("扫描插件配置快照: %w", err)
+		}
+		config.UpdatedAt = config.UpdatedAt.UTC()
+		configs = append(configs, config)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历插件配置快照: %w", err)
+	}
+	return configs, nil
+}
+
+// SaveConfig 使用乐观锁写入插件配置，并在同一事务写入审计。
+func (r *PostgresRuntimeStateRepository) SaveConfig(ctx context.Context, actor management.Actor, pluginKey string, configJSON json.RawMessage, expectedVersion int64) (PersistedPluginConfig, error) {
+	if r == nil || r.database == nil {
+		return PersistedPluginConfig{}, fmt.Errorf("插件状态仓库未初始化")
+	}
+	if !identifierPattern.MatchString(pluginKey) {
+		return PersistedPluginConfig{}, fmt.Errorf("无效插件 Key %q", pluginKey)
+	}
+	if expectedVersion <= 0 {
+		return PersistedPluginConfig{}, ErrRuntimeStateInvalidVersion
+	}
+	tx, err := r.database.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return PersistedPluginConfig{}, fmt.Errorf("开启插件配置事务: %w", err)
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+
+	before := runtimeConfigAudit{PluginKey: pluginKey}
+	err = tx.QueryRow(ctx, `SELECT config_json,version FROM plugin_runtime_configs WHERE plugin_key=$1 FOR UPDATE`, pluginKey).
+		Scan(&before.ConfigJSON, &before.Version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PersistedPluginConfig{}, fmt.Errorf("%w: %s", ErrRuntimeConfigNotFound, pluginKey)
+	}
+	if err != nil {
+		return PersistedPluginConfig{}, fmt.Errorf("锁定插件 %s 配置: %w", pluginKey, err)
+	}
+	if before.Version != expectedVersion {
+		return PersistedPluginConfig{}, ErrRuntimeStateConflict
+	}
+	var saved PersistedPluginConfig
+	err = tx.QueryRow(ctx, `UPDATE plugin_runtime_configs
+SET config_json=$2,version=version+1,updated_at=NOW()
+WHERE plugin_key=$1 AND version=$3
+RETURNING plugin_key,config_json,version,updated_at`, pluginKey, []byte(configJSON), expectedVersion).
+		Scan(&saved.PluginKey, &saved.ConfigJSON, &saved.Version, &saved.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PersistedPluginConfig{}, ErrRuntimeStateConflict
+	}
+	if err != nil {
+		return PersistedPluginConfig{}, fmt.Errorf("更新插件配置: %w", err)
+	}
+	after := runtimeConfigAudit{PluginKey: pluginKey, ConfigJSON: saved.ConfigJSON, Version: saved.Version}
+	if err := recordRuntimeAudit(ctx, tx, actor, "plugin.runtime.config.update", "plugin_runtime_config", pluginKey, before, after); err != nil {
+		return PersistedPluginConfig{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return PersistedPluginConfig{}, fmt.Errorf("提交插件配置事务: %w", err)
+	}
+	saved.UpdatedAt = saved.UpdatedAt.UTC()
+	return saved, nil
 }
 
 const runtimeStateSnapshotQuery = `SELECT s.plugin_key,s.desired_enabled,s.version,s.updated_at,
