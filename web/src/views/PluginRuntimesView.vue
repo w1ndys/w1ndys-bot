@@ -3,6 +3,7 @@
 import { NAlert, NButton, NCard, NDataTable, NEmpty, NInput, NSpace, NSwitch, NTag, type DataTableColumns } from 'naive-ui'
 import { h, onMounted, reactive, ref } from 'vue'
 import { listPluginRuntimes, setPluginRuntimeEnabled, setPluginRuntimeGroupEnabled, type PluginRuntimeCommand, type PluginRuntimeGroup, type PluginRuntimeState } from '../api'
+import PluginRuntimeConfigForm from '../components/PluginRuntimeConfigForm.vue'
 import { useAppFeedback } from '../feedback'
 
 const feedback = useAppFeedback()
@@ -291,6 +292,7 @@ onMounted(loadStates)
           <span>全局开关（关闭时保留群开关数据，但所有群均不生效）</span>
         </NSpace>
         <NDataTable :columns="commandColumns" :data="state.commands" :bordered="false" size="small" />
+        <PluginRuntimeConfigForm v-if="state.has_config" :plugin-key="state.plugin_key" />
         <NSpace>
           <NInput :value="groupInput(state.plugin_key)" :disabled="saving" placeholder="手工输入 QQ 群号" @update:value="(value: string) => updateGroupInput(state.plugin_key, value)" />
           <NButton :disabled="saving" @click="addGroup(state, true)">新增并开启</NButton>

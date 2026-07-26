@@ -19,6 +19,7 @@ interface RuntimeState {
   status: string
   in_flight: number
   last_error: string
+  has_config: boolean
   commands: { key: string; display_name: string; description: string; triggers: string[]; scope: string; allowed_roles: string[] }[]
   groups: RuntimeGroup[]
 }
@@ -39,6 +40,7 @@ function buildState(): RuntimeState {
     status: 'disabled',
     in_flight: 0,
     last_error: '',
+    has_config: false,
     commands: [{ key: 'echo', display_name: '回声', description: '引用回复输入参数', triggers: ['echo', '回声'], scope: 'group', allowed_roles: ['group_admin', 'group_member', 'group_owner', 'super_admin'] }],
     groups: [],
   }
@@ -187,3 +189,74 @@ async function testVersionConflictKeepsState({ page }: { page: Page }): Promise<
 
 test('目标插件可启用并开启单群', testEnablePluginAndGroup)
 test('乐观锁冲突后回到权威状态', testVersionConflictKeepsState)
+
+// mockRuntimeConfig 模拟带小型配置的插件运行状态与配置读写。
+// @param page：Playwright页面。
+// @returns Promise，在状态化路由注册后结束。
+// ⚠️副作用说明：拦截管理API并修改函数内配置状态。
+async function mockRuntimeConfig(page: Page): Promise<void> {
+  const state = { ...buildState(), has_config: true, desired_enabled: true, version: 2, status: 'ready' }
+  let config = { response_prefix: '' }
+  let version = 1
+  const schema = { fields: [{ key: 'response_prefix', display_name: '回复前缀', description: '添加到每条回复之前的文本', type: 'string', required: false }] }
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    const method = request.method()
+    switch (`${method} ${path}`) {
+      case 'GET /api/plugins':
+        await fulfill(route, [])
+        break
+      case 'GET /api/plugin-runtimes':
+        await fulfill(route, [state])
+        break
+      case 'GET /api/plugin-runtimes/echo/config':
+        await fulfill(route, { plugin_key: 'echo', schema, config, version, updated_at: '2026-07-26T12:00:00Z' })
+        break
+      case 'PUT /api/plugin-runtimes/echo/config': {
+        const input = request.postDataJSON()
+        // [决策理由] 保存必须携带读取到的权威版本，缺失会绕过乐观锁。
+        expect(input).toEqual({ config: { response_prefix: '[bot] ' }, expected_version: 1 })
+        config = { response_prefix: '[bot] ' }
+        version = 2
+        await fulfill(route, { plugin_key: 'echo', schema, config, version, updated_at: '2026-07-26T12:10:00Z' })
+        break
+      }
+      default:
+        throw new Error(`未处理配置API：${method} ${path}`)
+    }
+
+    // >>> 数据演变示例
+    // 1. GET config -> 空前缀 v1 -> 表单可编辑。
+    // 2. PUT config -> [bot] v2 -> 表单基线更新。
+  })
+
+  // >>> 数据演变示例
+  // 1. 初始 config={response_prefix:""} -> 保存 -> "[bot] "。
+  // 2. has_config=false 的插件 -> 不渲染配置表单。
+}
+
+// testConfigSaveAndHotApply 验证小型配置表单的保存链路。
+// @param page：Playwright注入页面。
+// @returns Promise，在保存提示可见后结束。
+// ⚠️副作用说明：操作测试页面并修改mock配置状态。
+async function testConfigSaveAndHotApply({ page }: { page: Page }): Promise<void> {
+  await seedSession(page)
+  await mockRuntimeConfig(page)
+  await page.goto('/plugin-runtimes')
+  // Naive UI 的表单标签不是原生 label，按表单项定位其输入框。
+  const prefixInput = page.locator('.n-form-item').filter({ hasText: '回复前缀' }).locator('input')
+  await expect(prefixInput).toBeVisible()
+  // 未修改时保存按钮必须保持禁用，避免无意义写入与审计噪音。
+  await expect(page.getByRole('button', { name: '保存并热应用' })).toBeDisabled()
+  await prefixInput.fill('[bot] ')
+  await page.getByRole('button', { name: '保存并热应用' }).click()
+  await expect(page.getByText('插件配置已保存并热应用')).toBeVisible()
+  await expect(page.getByRole('button', { name: '保存并热应用' })).toBeDisabled()
+
+  // >>> 数据演变示例
+  // 1. 填写 [bot] -> PUT v1 -> v2 且基线重置。
+  // 2. 保存后未再修改 -> 按钮回到禁用。
+}
+
+test('小型配置可保存并热应用', testConfigSaveAndHotApply)

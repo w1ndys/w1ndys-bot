@@ -653,6 +653,7 @@ export interface PluginRuntimeState {
   status: string
   in_flight: number
   last_error: string
+  has_config: boolean
   commands: PluginRuntimeCommand[]
   groups: PluginRuntimeGroup[]
 }
@@ -699,5 +700,42 @@ export function setPluginRuntimeGroupEnabled(pluginKey: string, groupID: number,
   // >>> 数据演变示例
   // 1. echo+100+true+v0 -> PUT -> 新增群记录v1。
   // 2. 全局关闭时写入 -> 200，但命令仍被全局门禁拒绝。
+  return result
+}
+
+export interface PluginRuntimeConfigState {
+  plugin_key: string
+  schema: PluginConfigSchema
+  config: Record<string, unknown>
+  version: number
+  updated_at: string
+}
+
+// getPluginRuntimeConfig 读取目标插件的配置 Schema 与脱敏后的当前值。
+// @param pluginKey：稳定插件 Key。
+// @returns Schema、脱敏配置与乐观锁版本。
+// ⚠️副作用说明：发起鉴权网络请求。
+export function getPluginRuntimeConfig(pluginKey: string): Promise<PluginRuntimeConfigState> {
+  const result = apiRequest<PluginRuntimeConfigState>(`/api/plugin-runtimes/${encodeURIComponent(pluginKey)}/config`)
+
+  // >>> 数据演变示例
+  // 1. echo -> Schema+脱敏值+v2。
+  // 2. 未声明配置的插件 -> 404 -> 抛错。
+  return result
+}
+
+// putPluginRuntimeConfig 按乐观锁保存目标插件配置并热应用。
+// @param pluginKey：稳定插件 Key；config：完整非敏感配置及用户填写的 secret；expectedVersion：当前版本。
+// @returns 保存并热应用后的权威配置快照。
+// ⚠️副作用说明：修改后端配置、审计记录并调用插件热应用钩子。
+export function putPluginRuntimeConfig(pluginKey: string, config: Record<string, unknown>, expectedVersion: number): Promise<PluginRuntimeConfigState> {
+  const result = apiRequest<PluginRuntimeConfigState>(`/api/plugin-runtimes/${encodeURIComponent(pluginKey)}/config`, {
+    method: 'PUT',
+    body: JSON.stringify({ config, expected_version: expectedVersion }),
+  })
+
+  // >>> 数据演变示例
+  // 1. echo+{response_prefix:"[bot] "}+v1 -> 保存并热应用 -> v2。
+  // 2. 陈旧版本 -> 409 -> 抛出冲突错误。
   return result
 }
