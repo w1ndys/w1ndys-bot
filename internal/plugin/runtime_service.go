@@ -33,19 +33,30 @@ type RuntimeGroupView struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// RuntimeCommandView 是代码持有的命令声明，WebUI 只读展示，不接受修改。
+type RuntimeCommandView struct {
+	Key          string   `json:"key"`
+	DisplayName  string   `json:"display_name"`
+	Description  string   `json:"description"`
+	Triggers     []string `json:"triggers"`
+	Scope        string   `json:"scope"`
+	AllowedRoles []string `json:"allowed_roles"`
+}
+
 // RuntimeStateView 同时暴露管理员意图与进程内实际运行状态，供 WebUI 展示两者分歧。
 type RuntimeStateView struct {
-	PluginKey      string             `json:"plugin_key"`
-	DisplayName    string             `json:"display_name"`
-	Description    string             `json:"description"`
-	AdminPageKey   string             `json:"admin_page_key"`
-	DesiredEnabled bool               `json:"desired_enabled"`
-	Version        int64              `json:"version"`
-	UpdatedAt      time.Time          `json:"updated_at"`
-	Status         RuntimeStatus      `json:"status"`
-	InFlight       int                `json:"in_flight"`
-	LastError      string             `json:"last_error"`
-	Groups         []RuntimeGroupView `json:"groups"`
+	PluginKey      string               `json:"plugin_key"`
+	DisplayName    string               `json:"display_name"`
+	Description    string               `json:"description"`
+	AdminPageKey   string               `json:"admin_page_key"`
+	DesiredEnabled bool                 `json:"desired_enabled"`
+	Version        int64                `json:"version"`
+	UpdatedAt      time.Time            `json:"updated_at"`
+	Status         RuntimeStatus        `json:"status"`
+	InFlight       int                  `json:"in_flight"`
+	LastError      string               `json:"last_error"`
+	Commands       []RuntimeCommandView `json:"commands"`
+	Groups         []RuntimeGroupView   `json:"groups"`
 }
 
 // RuntimeService 是 WebUI 与 QQ 应急入口共用的插件开关唯一写路径。
@@ -264,7 +275,20 @@ func (s *RuntimeService) view(spec PluginSpec, state PersistedPluginState) Runti
 		Version:        state.Version,
 		UpdatedAt:      state.UpdatedAt.UTC(),
 		Status:         RuntimeDisabled,
+		Commands:       make([]RuntimeCommandView, 0, len(spec.Commands)),
 		Groups:         make([]RuntimeGroupView, 0, len(state.Groups)),
+	}
+	for _, command := range spec.Commands {
+		roles := make([]string, 0, len(command.AllowedRoles))
+		for role := range command.AllowedRoles {
+			roles = append(roles, string(role))
+		}
+		// 身份集合来自映射，排序后输出使 API 响应稳定可比对。
+		sort.Strings(roles)
+		view.Commands = append(view.Commands, RuntimeCommandView{
+			Key: command.Key, DisplayName: command.DisplayName, Description: command.Description,
+			Triggers: append([]string{}, command.Triggers...), Scope: string(command.Scope), AllowedRoles: roles,
+		})
 	}
 	if runtimeState, found := s.controller.State(spec.Key); found {
 		view.Status, view.InFlight = runtimeState.Status, runtimeState.InFlight

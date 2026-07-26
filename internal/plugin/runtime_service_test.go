@@ -237,6 +237,14 @@ func TestRuntimeServiceListExposesIntentAndRuntimeStatus(t *testing.T) {
 	if views[1].DesiredEnabled || views[1].Status != RuntimeDisabled || views[1].Version != 0 {
 		t.Fatalf("tools view = %+v", views[1])
 	}
+	// 代码持有的命令声明必须只读暴露，且身份集合顺序稳定。
+	command := views[0].Commands[0]
+	if len(views[0].Commands) != 1 || command.Key != "run" || command.Scope != string(CommandScopeGroup) {
+		t.Fatalf("commands = %+v", views[0].Commands)
+	}
+	if !equalStrings(command.AllowedRoles, []string{"group_member"}) || !equalStrings(command.Triggers, []string{"echo"}) {
+		t.Fatalf("command roles=%v triggers=%v", command.AllowedRoles, command.Triggers)
+	}
 }
 
 func TestRuntimeServiceGetReturnsViewAndPropagatesStoreErrors(t *testing.T) {
