@@ -10,6 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/w1ndys/w1ndys-bot/internal/management"
 )
 
 type runtimeStateTestDatabase struct {
@@ -18,12 +20,81 @@ type runtimeStateTestDatabase struct {
 	execErr   error
 	execCalls int
 	querySQL  string
+	queryArgs []any
 	queryErr  error
 	rows      pgx.Rows
 	rowSQL    string
 	rowArgs   []any
 	row       pgx.Row
+	tx        *runtimeStateTestTx
+	beginErr  error
 }
+
+// runtimeStateTestTx 按调用顺序回放事务内的 QueryRow 结果并记录审计写入。
+type runtimeStateTestTx struct {
+	rows       []pgx.Row
+	rowSQL     []string
+	rowArgs    [][]any
+	execSQL    string
+	execArgs   []any
+	execErr    error
+	commitErr  error
+	committed  bool
+	rolledBack bool
+}
+
+func (d *runtimeStateTestDatabase) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+	if d.beginErr != nil {
+		return nil, d.beginErr
+	}
+	if d.tx == nil {
+		d.tx = &runtimeStateTestTx{}
+	}
+	return d.tx, nil
+}
+
+func (t *runtimeStateTestTx) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
+	t.rowSQL = append(t.rowSQL, sql)
+	t.rowArgs = append(t.rowArgs, args)
+	if len(t.rows) == 0 {
+		return runtimeStateTestRow{err: errors.New("unexpected QueryRow")}
+	}
+	row := t.rows[0]
+	t.rows = t.rows[1:]
+	return row
+}
+
+func (t *runtimeStateTestTx) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	t.execSQL, t.execArgs = sql, args
+	return pgconn.NewCommandTag("INSERT 0 1"), t.execErr
+}
+
+func (t *runtimeStateTestTx) Commit(context.Context) error {
+	if t.commitErr != nil {
+		return t.commitErr
+	}
+	t.committed = true
+	return nil
+}
+
+func (t *runtimeStateTestTx) Rollback(context.Context) error {
+	t.rolledBack = true
+	return nil
+}
+
+func (t *runtimeStateTestTx) Begin(context.Context) (pgx.Tx, error) { return t, nil }
+func (t *runtimeStateTestTx) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return nil, errors.New("unused")
+}
+func (t *runtimeStateTestTx) CopyFrom(context.Context, pgx.Identifier, []string, pgx.CopyFromSource) (int64, error) {
+	return 0, errors.New("unused")
+}
+func (t *runtimeStateTestTx) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults { return nil }
+func (t *runtimeStateTestTx) LargeObjects() pgx.LargeObjects                         { return pgx.LargeObjects{} }
+func (t *runtimeStateTestTx) Prepare(context.Context, string, string) (*pgconn.StatementDescription, error) {
+	return nil, errors.New("unused")
+}
+func (t *runtimeStateTestTx) Conn() *pgx.Conn { return nil }
 
 func (d *runtimeStateTestDatabase) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
 	d.rowSQL = sql
@@ -38,8 +109,9 @@ func (d *runtimeStateTestDatabase) Exec(_ context.Context, sql string, args ...a
 	return pgconn.NewCommandTag("INSERT 0 1"), d.execErr
 }
 
-func (d *runtimeStateTestDatabase) Query(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
+func (d *runtimeStateTestDatabase) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
 	d.querySQL = sql
+	d.queryArgs = args
 	return d.rows, d.queryErr
 }
 
@@ -230,24 +302,104 @@ func TestRuntimeStateRepositoryRejectsMissingDependencies(t *testing.T) {
 	}
 }
 
-func TestRuntimeStateRepositoryUpdatesDesiredEnabledWithCAS(t *testing.T) {
-	zone := time.FixedZone("test", 8*60*60)
-	updatedAt := time.Date(2026, 7, 25, 20, 0, 0, 0, zone)
-	database := &runtimeStateTestDatabase{row: runtimeStateTestRow{values: []any{"echo", true, int64(3), updatedAt}}}
+var runtimeStateTestActor = management.Actor{ID: "10001", Role: "super_admin", Channel: management.ChannelWebUI, RequestID: "req-1"}
+
+func TestRuntimeStateRepositoryFindsSinglePluginState(t *testing.T) {
+	groupTime := time.Date(2026, 7, 25, 12, 0, 0, 0, time.FixedZone("test", 8*60*60))
+	rows := &runtimeStateTestRows{values: [][]any{
+		{"monitor", true, int64(3), groupTime, int64(200), false, int64(4), groupTime},
+		{"monitor", true, int64(3), groupTime, int64(100), true, int64(2), groupTime},
+	}}
+	database := &runtimeStateTestDatabase{rows: rows}
 	repository := &PostgresRuntimeStateRepository{database: database}
-	state, err := repository.UpdateDesiredEnabled(context.Background(), "echo", true, 2)
+	state, err := repository.FindState(context.Background(), "monitor")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(normalizeRuntimeStateSQL(database.querySQL), "WHERE s.plugin_key=$1 ORDER BY g.group_id") {
+		t.Fatalf("Query() sql = %q", database.querySQL)
+	}
+	if !reflect.DeepEqual(database.queryArgs, []any{"monitor"}) {
+		t.Fatalf("Query() args = %#v", database.queryArgs)
+	}
+	if state.PluginKey != "monitor" || state.Version != 3 || len(state.Groups) != 2 || state.UpdatedAt.Location() != time.UTC {
+		t.Fatalf("state = %+v", state)
+	}
+}
+
+func TestRuntimeStateRepositoryFindStateRejectsUnknownAndInvalidKeys(t *testing.T) {
+	repository := &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{rows: &runtimeStateTestRows{}}}
+	if _, err := repository.FindState(context.Background(), "missing"); !errors.Is(err, ErrRuntimeStateNotFound) {
+		t.Fatalf("FindState(missing) error = %v", err)
+	}
+	if _, err := repository.FindState(context.Background(), "bad-key"); err == nil {
+		t.Fatal("invalid plugin key accepted")
+	}
+}
+
+func TestRuntimeStateRepositoryUpdatesDesiredEnabledWithCASAndAudit(t *testing.T) {
+	zone := time.FixedZone("test", 8*60*60)
+	updatedAt := time.Date(2026, 7, 25, 20, 0, 0, 0, zone)
+	transaction := &runtimeStateTestTx{rows: []pgx.Row{
+		runtimeStateTestRow{values: []any{false, int64(2)}},
+		runtimeStateTestRow{values: []any{"echo", true, int64(3), updatedAt}},
+	}}
+	repository := &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{tx: transaction}}
+	state, err := repository.UpdateDesiredEnabled(context.Background(), runtimeStateTestActor, "echo", true, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transaction.rowSQL) != 2 || !strings.Contains(transaction.rowSQL[0], "FOR UPDATE") {
+		t.Fatalf("transaction QueryRow sql = %#v", transaction.rowSQL)
 	}
 	wantSQL := `UPDATE plugin_states
 SET desired_enabled=$2,version=version+1,updated_at=NOW()
 WHERE plugin_key=$1 AND version=$3
 RETURNING plugin_key,desired_enabled,version,updated_at`
-	if normalizeRuntimeStateSQL(database.rowSQL) != normalizeRuntimeStateSQL(wantSQL) || !reflect.DeepEqual(database.rowArgs, []any{"echo", true, int64(2)}) {
-		t.Fatalf("QueryRow() sql=%q args=%#v", database.rowSQL, database.rowArgs)
+	if normalizeRuntimeStateSQL(transaction.rowSQL[1]) != normalizeRuntimeStateSQL(wantSQL) || !reflect.DeepEqual(transaction.rowArgs[1], []any{"echo", true, int64(2)}) {
+		t.Fatalf("QueryRow() sql=%q args=%#v", transaction.rowSQL[1], transaction.rowArgs[1])
+	}
+	if !strings.Contains(transaction.execSQL, "admin_audit_logs") {
+		t.Fatalf("audit sql = %q", transaction.execSQL)
+	}
+	wantAudit := []any{"10001", "super_admin", management.ChannelWebUI, "plugin.runtime.global.update", "plugin_runtime_state", "echo"}
+	if !reflect.DeepEqual(transaction.execArgs[:6], wantAudit) || transaction.execArgs[8] != "req-1" {
+		t.Fatalf("audit args = %#v", transaction.execArgs)
+	}
+	if before, ok := transaction.execArgs[6].([]byte); !ok || !strings.Contains(string(before), `"version":2`) {
+		t.Fatalf("audit before = %#v", transaction.execArgs[6])
+	}
+	if after, ok := transaction.execArgs[7].([]byte); !ok || !strings.Contains(string(after), `"version":3`) {
+		t.Fatalf("audit after = %#v", transaction.execArgs[7])
+	}
+	if !transaction.committed {
+		t.Fatal("transaction not committed")
 	}
 	if state.PluginKey != "echo" || !state.DesiredEnabled || state.Version != 3 || state.UpdatedAt.Location() != time.UTC || len(state.Groups) != 0 {
 		t.Fatalf("state = %+v", state)
+	}
+}
+
+func TestRuntimeStateRepositoryGlobalWriteRejectsStaleAndMissingRows(t *testing.T) {
+	tests := []struct {
+		name string
+		lock pgx.Row
+		want error
+	}{
+		{name: "stale", lock: runtimeStateTestRow{values: []any{false, int64(5)}}, want: ErrRuntimeStateConflict},
+		{name: "missing", lock: runtimeStateTestRow{err: pgx.ErrNoRows}, want: ErrRuntimeStateNotFound},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			transaction := &runtimeStateTestTx{rows: []pgx.Row{test.lock}}
+			repository := &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{tx: transaction}}
+			if _, err := repository.UpdateDesiredEnabled(context.Background(), runtimeStateTestActor, "echo", true, 2); !errors.Is(err, test.want) {
+				t.Fatalf("UpdateDesiredEnabled() error = %v", err)
+			}
+			if transaction.execSQL != "" || transaction.committed || !transaction.rolledBack {
+				t.Fatalf("transaction wrote audit or committed: %+v", transaction)
+			}
+		})
 	}
 }
 
@@ -256,9 +408,11 @@ func TestRuntimeStateRepositorySetsGroupWithInsertOrCASUpdate(t *testing.T) {
 	tests := []struct {
 		name            string
 		expectedVersion int64
+		lockRows        []pgx.Row
 		wantSQL         string
 		wantArgs        []any
 		returnedVersion int64
+		wantBefore      bool
 	}{
 		{
 			name: "insert", expectedVersion: 0, returnedVersion: 1,
@@ -269,7 +423,8 @@ RETURNING group_id,enabled,version,updated_at`,
 			wantArgs: []any{"echo", int64(100), true},
 		},
 		{
-			name: "update", expectedVersion: 2, returnedVersion: 3,
+			name: "update", expectedVersion: 2, returnedVersion: 3, wantBefore: true,
+			lockRows: []pgx.Row{runtimeStateTestRow{values: []any{false, int64(2)}}},
 			wantSQL: `UPDATE plugin_group_states
 SET enabled=$3,version=version+1,updated_at=NOW()
 WHERE plugin_key=$1 AND group_id=$2 AND version=$4
@@ -279,17 +434,51 @@ RETURNING group_id,enabled,version,updated_at`,
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			database := &runtimeStateTestDatabase{row: runtimeStateTestRow{values: []any{int64(100), true, test.returnedVersion, updatedAt}}}
-			repository := &PostgresRuntimeStateRepository{database: database}
-			state, err := repository.SetGroupEnabled(context.Background(), "echo", 100, true, test.expectedVersion)
+			rows := append(append([]pgx.Row{}, test.lockRows...), runtimeStateTestRow{values: []any{int64(100), true, test.returnedVersion, updatedAt}})
+			transaction := &runtimeStateTestTx{rows: rows}
+			repository := &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{tx: transaction}}
+			state, err := repository.SetGroupEnabled(context.Background(), runtimeStateTestActor, "echo", 100, true, test.expectedVersion)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if normalizeRuntimeStateSQL(database.rowSQL) != normalizeRuntimeStateSQL(test.wantSQL) || !reflect.DeepEqual(database.rowArgs, test.wantArgs) {
-				t.Fatalf("QueryRow() sql=%q args=%#v", database.rowSQL, database.rowArgs)
+			writeIndex := len(test.lockRows)
+			if normalizeRuntimeStateSQL(transaction.rowSQL[writeIndex]) != normalizeRuntimeStateSQL(test.wantSQL) || !reflect.DeepEqual(transaction.rowArgs[writeIndex], test.wantArgs) {
+				t.Fatalf("QueryRow() sql=%q args=%#v", transaction.rowSQL[writeIndex], transaction.rowArgs[writeIndex])
+			}
+			wantAudit := []any{"plugin.runtime.group.update", "plugin_runtime_group_state", "echo:100"}
+			if !reflect.DeepEqual(transaction.execArgs[3:6], wantAudit) || !transaction.committed {
+				t.Fatalf("audit args = %#v committed=%v", transaction.execArgs, transaction.committed)
+			}
+			// 新增记录没有可信旧值，审计 before 必须为空。
+			before, _ := transaction.execArgs[6].([]byte)
+			if (len(before) > 0) != test.wantBefore {
+				t.Fatalf("audit before = %q", before)
 			}
 			if state.GroupID != 100 || !state.Enabled || state.Version != test.returnedVersion || state.UpdatedAt.Location() != time.UTC {
 				t.Fatalf("state = %+v", state)
+			}
+		})
+	}
+}
+
+func TestRuntimeStateRepositoryGroupWriteRejectsStaleAndMissingRows(t *testing.T) {
+	tests := []struct {
+		name string
+		lock pgx.Row
+		want error
+	}{
+		{name: "stale", lock: runtimeStateTestRow{values: []any{false, int64(5)}}, want: ErrRuntimeStateConflict},
+		{name: "missing", lock: runtimeStateTestRow{err: pgx.ErrNoRows}, want: ErrRuntimeStateConflict},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			transaction := &runtimeStateTestTx{rows: []pgx.Row{test.lock}}
+			repository := &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{tx: transaction}}
+			if _, err := repository.SetGroupEnabled(context.Background(), runtimeStateTestActor, "echo", 100, true, 2); !errors.Is(err, test.want) {
+				t.Fatalf("SetGroupEnabled() error = %v", err)
+			}
+			if transaction.execSQL != "" || transaction.committed {
+				t.Fatalf("transaction wrote audit or committed: %+v", transaction)
 			}
 		})
 	}
@@ -307,40 +496,88 @@ func TestRuntimeStateRepositoryWriteFailuresAndValidation(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run("global "+test.name, func(t *testing.T) {
-			repository := &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{row: test.row}}
-			if _, err := repository.UpdateDesiredEnabled(context.Background(), "echo", true, 1); !errors.Is(err, test.want) {
+			transaction := &runtimeStateTestTx{rows: []pgx.Row{runtimeStateTestRow{values: []any{false, int64(1)}}, test.row}}
+			repository := &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{tx: transaction}}
+			if _, err := repository.UpdateDesiredEnabled(context.Background(), runtimeStateTestActor, "echo", true, 1); !errors.Is(err, test.want) {
 				t.Fatalf("UpdateDesiredEnabled() error = %v", err)
+			}
+			if transaction.committed || !transaction.rolledBack {
+				t.Fatalf("transaction committed=%v rolledBack=%v", transaction.committed, transaction.rolledBack)
 			}
 		})
 		t.Run("group "+test.name, func(t *testing.T) {
-			repository := &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{row: test.row}}
-			for _, expectedVersion := range []int64{0, 1} {
-				if _, err := repository.SetGroupEnabled(context.Background(), "echo", 100, true, expectedVersion); !errors.Is(err, test.want) {
-					t.Fatalf("SetGroupEnabled(version=%d) error = %v", expectedVersion, err)
-				}
+			transaction := &runtimeStateTestTx{rows: []pgx.Row{test.row}}
+			repository := &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{tx: transaction}}
+			if _, err := repository.SetGroupEnabled(context.Background(), runtimeStateTestActor, "echo", 100, true, 0); !errors.Is(err, test.want) {
+				t.Fatalf("SetGroupEnabled() error = %v", err)
+			}
+			if transaction.committed || !transaction.rolledBack {
+				t.Fatalf("transaction committed=%v rolledBack=%v", transaction.committed, transaction.rolledBack)
 			}
 		})
 	}
+
+	// 审计写入失败必须回滚状态变更。
+	auditFailure := errors.New("audit failed")
+	transaction := &runtimeStateTestTx{
+		rows:    []pgx.Row{runtimeStateTestRow{values: []any{false, int64(1)}}, runtimeStateTestRow{values: []any{"echo", true, int64(2), time.Now().UTC()}}},
+		execErr: auditFailure,
+	}
+	repository := &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{tx: transaction}}
+	if _, err := repository.UpdateDesiredEnabled(context.Background(), runtimeStateTestActor, "echo", true, 1); !errors.Is(err, auditFailure) {
+		t.Fatalf("audit failure error = %v", err)
+	}
+	if transaction.committed || !transaction.rolledBack {
+		t.Fatal("audit failure did not roll back")
+	}
+
+	commitFailure := errors.New("commit failed")
+	transaction = &runtimeStateTestTx{
+		rows:      []pgx.Row{runtimeStateTestRow{values: []any{false, int64(1)}}, runtimeStateTestRow{values: []any{"echo", true, int64(2), time.Now().UTC()}}},
+		commitErr: commitFailure,
+	}
+	repository = &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{tx: transaction}}
+	if _, err := repository.UpdateDesiredEnabled(context.Background(), runtimeStateTestActor, "echo", true, 1); !errors.Is(err, commitFailure) {
+		t.Fatalf("commit failure error = %v", err)
+	}
+
+	beginFailure := errors.New("begin failed")
+	repository = &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{beginErr: beginFailure}}
+	if _, err := repository.UpdateDesiredEnabled(context.Background(), runtimeStateTestActor, "echo", true, 1); !errors.Is(err, beginFailure) {
+		t.Fatalf("begin failure error = %v", err)
+	}
+	if _, err := repository.SetGroupEnabled(context.Background(), runtimeStateTestActor, "echo", 100, true, 0); !errors.Is(err, beginFailure) {
+		t.Fatalf("group begin failure error = %v", err)
+	}
+
+	// 外键失败表示插件全局状态行缺失，而不是版本冲突。
 	foreignKeyError := &pgconn.PgError{Code: "23503", ConstraintName: "plugin_group_states_plugin_key_fkey"}
-	repository := &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{row: runtimeStateTestRow{err: foreignKeyError}}}
-	if _, err := repository.SetGroupEnabled(context.Background(), "missing", 100, true, 0); !errors.Is(err, ErrRuntimeStateConflict) {
+	transaction = &runtimeStateTestTx{rows: []pgx.Row{runtimeStateTestRow{err: foreignKeyError}}}
+	repository = &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{tx: transaction}}
+	if _, err := repository.SetGroupEnabled(context.Background(), runtimeStateTestActor, "missing", 100, true, 0); !errors.Is(err, ErrRuntimeStateNotFound) {
 		t.Fatalf("foreign key error = %v", err)
 	}
-	repository = &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{}}
-	if _, err := repository.UpdateDesiredEnabled(context.Background(), "bad-key", true, 1); err == nil {
+
+	// 参数校验必须在开启事务之前拒绝。
+	database := &runtimeStateTestDatabase{}
+	repository = &PostgresRuntimeStateRepository{database: database}
+	if _, err := repository.UpdateDesiredEnabled(context.Background(), runtimeStateTestActor, "bad-key", true, 1); err == nil {
 		t.Fatal("invalid global plugin key accepted")
 	}
-	if _, err := repository.UpdateDesiredEnabled(context.Background(), "echo", true, 0); !errors.Is(err, ErrRuntimeStateInvalidVersion) {
+	if _, err := repository.UpdateDesiredEnabled(context.Background(), runtimeStateTestActor, "echo", true, 0); !errors.Is(err, ErrRuntimeStateInvalidVersion) {
 		t.Fatalf("invalid global version error = %v", err)
 	}
-	if _, err := repository.SetGroupEnabled(context.Background(), "bad-key", 100, true, 0); err == nil {
+	if _, err := repository.SetGroupEnabled(context.Background(), runtimeStateTestActor, "bad-key", 100, true, 0); err == nil {
 		t.Fatal("invalid group plugin key accepted")
 	}
-	if _, err := repository.SetGroupEnabled(context.Background(), "echo", 0, true, 0); !errors.Is(err, ErrInvalidRuntimeGroupID) {
+	if _, err := repository.SetGroupEnabled(context.Background(), runtimeStateTestActor, "echo", 0, true, 0); !errors.Is(err, ErrInvalidRuntimeGroupID) {
 		t.Fatalf("invalid group error = %v", err)
 	}
-	if _, err := repository.SetGroupEnabled(context.Background(), "echo", 100, true, -1); !errors.Is(err, ErrRuntimeStateInvalidVersion) {
+	if _, err := repository.SetGroupEnabled(context.Background(), runtimeStateTestActor, "echo", 100, true, -1); !errors.Is(err, ErrRuntimeStateInvalidVersion) {
 		t.Fatalf("invalid group version error = %v", err)
+	}
+	if database.tx != nil {
+		t.Fatal("validation failure started a transaction")
 	}
 }
 
