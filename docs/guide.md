@@ -7,16 +7,31 @@
 
 ## 2. 当前架构
 
-消息处理链路如下：
+项目正在向 `docs/plugin-architecture-v2.md` 描述的目标插件架构迁移，当前处于**双链路过渡态**：群事件先进入目标链路，未被目标插件命中的事件再交给旧链路。
+
+目标链路（已迁移插件）：
+
+```text
+NapCat 群事件 → WebSocket 解析 → EventDispatcher
+              → 命令匹配 → 全局 Ready → 群 Enabled → 代码身份 → Handler
+```
+
+旧链路（尚未迁移的插件与私聊）：
 
 ```text
 NapCat 事件 → WebSocket 解析 → 命令匹配 → 权限解析
              → PluginManager → 插件实例 → BotAPI → Action Client → NapCat
 ```
 
+`cmd/bot` 按下列规则分流：群消息和群事件先调用目标 `EventDispatcher`，命中目标命令后直接返回，不再进入旧链路，避免同一消息被两套体系重复处理；私聊消息不进入目标插件，仍由旧链路承担 QQ 应急管理入口。运行门禁拒绝（插件未启用、当前群未开启）和身份授权拒绝属于预期状态，记录日志后安静结束，不作为系统故障上报。
+
+目标架构插件由代码持有稳定 Key、触发词、作用域和允许身份（`super_admin`、`group_owner`、`group_admin`、`group_member`），数据库只保存管理员的开关意图，不提供权限覆盖矩阵。身份取自 NapCat 上报的 `sender` 角色；发送者与事件用户不一致、角色缺失或未知一律 fail-closed。所有插件与所有群默认关闭。
+
+进程内 `runtime_status`（`disabled`/`enabling`/`ready`/`disabling`/`failed`）与持久化的 `desired_enabled` 分离，只有 `ready` 接受新调用。开关写入统一经由 `RuntimeService`：鉴权 → 乐观锁 → 与审计同事务落库 → 驱动生命周期。持久化与内存按“更保守的一侧先执行”排序，两个方向都 fail-closed——启用先落库再驱动生命周期，生命周期失败时运行时停在 `failed` 且保留意图供排查；关闭先停止准入并排空在途调用再落库，清理失败仍落库关闭意图，避免重启复活已关停的插件。
+
 Action Client 使用唯一 `echo` 关联请求与响应。WebSocket 读取循环优先处理响应，普通事件交给受限并发 worker，避免插件等待 Action 响应时阻塞收包。
 
-插件以 `Manifest + Factory` 注册：Manifest 描述插件、功能、默认命令及默认权限；Factory 在运行时接收 `Messenger` 等依赖并创建实例。插件默认关闭，Manifest 同步不会替管理员覆盖现有配置。
+尚未迁移的插件仍以 `Manifest + Factory` 注册：Manifest 描述插件、功能、默认命令及默认权限；Factory 在运行时接收 `Messenger` 等依赖并创建实例。插件默认关闭，Manifest 同步不会替管理员覆盖现有配置。已迁移插件改为导出 `Spec(依赖) (plugin.PluginSpec, error)`，由 `cmd/bot` 显式装入 `SpecCatalog`，不再使用 `init()` 全局注册。
 
 权限按以下优先级取首个匹配项，指定用户策略整体优先于角色策略：
 
@@ -36,12 +51,12 @@ internal/config/         Viper 配置加载
 internal/db/             pgx PostgreSQL 连接池
 internal/ws/             反向 WS、事件模型与 Action Client
 internal/onebot/         类型化 BotAPI
-internal/plugin/         Manifest、注册、同步与运行管理
+internal/plugin/         目标架构规格、分发、运行状态与旧 Manifest 注册管理
 internal/command/        多作用域命令注册及重复检测
 internal/permission/     多级权限解析
 internal/migration/      迁移执行器与 SQL 文件
 pkg/logger/              zap 结构化日志适配层
-plugins/echo/            Echo 正式示例插件
+plugins/echo/            Echo 示例插件（已迁移至目标架构）
 plugins/keyword_reply/   群关键词完全匹配回复插件
 plugins/forbidden_message_monitor/ 群内违禁消息监控与人工复核插件
 plugins/admin/           不可关闭的 QQ 系统管理插件
@@ -51,7 +66,7 @@ docs/                    设计与开发文档
 
 ## 4. 数据库迁移
 
-程序启动时自动向上迁移。当前迁移版本为 16：
+程序启动时自动向上迁移。当前迁移版本为 17：
 
 1. `plugin_config`：插件开关、优先级和 JSON 配置。
 2. `system_settings`、`system_admins`、`admin_audit_logs`：系统管理基础表。
@@ -69,6 +84,7 @@ docs/                    设计与开发文档
 14. 新增群内违禁消息监控的发言计数、活跃白名单、违规审核、反馈样本与周期权重偏移表。
 15. 新增违禁消息正向候选词证据、自动晋级权重与跨重启的大模型每日请求计数。
 16. 新增WebUI主动投喂的违禁训练样本及候选词证据，用于Few-shot正例和候选词晋级。
+17. 新增目标插件架构的全局意图表 `plugin_states` 与逐群开关表 `plugin_group_states`，均默认关闭并带乐观锁版本。
 
 每个版本同时提供 `up.sql` 与 `down.sql`，分别用于应用和回滚。不得修改已部署的迁移；结构变化应新增版本。
 
@@ -139,15 +155,32 @@ WebUI 产品名称固定为 `w1ndys-bot-webui`，不作为系统设置开放修�
 - [x] 声明式插件配置、通用 Schema 表单及敏感字段安全边界
 - [x] 通用 AdminResource CRUD API、WebUI 表格表单与关键词完全匹配回复插件
 - [x] 群内违禁消息分层检测、自动处置、人工复核与反馈学习插件
+- [x] 目标插件架构 `PluginSpec` 契约、编译期目录与跨插件触发词冲突校验
+- [x] 命令、观察器与统一事件入口的纯内存分发链
+- [x] 插件运行生命周期、群门禁、在途排空与启动状态恢复
+- [x] 全局与群开关状态表、乐观锁写入及与状态同事务的审计
+- [x] `RuntimeService` 开关应用服务与 `/api/plugin-runtimes` 管理 API
+- [x] Echo 迁移至目标架构并完成唯一执行链接线
 
 ## 7. 后续开发计划
 
-按以下顺序推进，每一步完成测试并独立提交：
+按以下顺序推进，每一步完成测试并独立提交。插件架构迁移的完整阶段表见 `docs/plugin-architecture-v2.md` 第 12 节，剩余阶段为：
 
-1. 建立 Git Tag 与多架构容器镜像发布流程。
-2. 首次发布前按部署手册执行全量备份、升级与回滚演练。
+1. WebUI 目标插件开关页面，消费 `/api/plugin-runtimes`。
+2. 小型 ConfigSchema 接入 `PluginSpec` 与通用配置页，并补回 Echo 的 `response_prefix`。
+3. 迁移 Keyword Reply，验证插件自有业务表、专属 API 与页面。
+4. 迁移 Forbidden Monitor，验证复杂工作流与外部副作用。
+5. QQ 应急入口改为复用 `RuntimeService`，不维护第二套开关逻辑。
+6. 删除旧权限矩阵、Feature/命令同步与通用 AdminResource，并重建数据库基线。
+
+迁移完成后：
+
+7. 建立 Git Tag 与多架构容器镜像发布流程。
+8. 首次发布前按部署手册执行全量备份、升级与回滚演练。
 
 WebUI Admin Console 已实现插件、功能触发词、权限策略、系统设置和只读审计日志页面。QQ 通道仅作为轻量应急入口，最高管理员可使用 `/插件列表`、`/启用插件 <名称>` 和 `/禁用插件 <名称>`；功能触发词、权限策略和优先级统一由 WebUI 管理。声明式插件配置已提供 Schema 驱动通用表单、secret 写入保留、脱敏读取、版本冲突检测、审计和热应用；普通插件无需单独编写配置页面。系统 `admin` 插件不可通过管理服务禁用。所有管理变更必须同时经过授权校验、重复检测、热更新和审计记录。
+
+已迁移到目标架构的插件不出现在上述旧页面中，其状态与全局、逐群开关目前只能通过 `/api/plugin-runtimes` 管理，WebUI 页面尚未提供。这些插件的触发词与允许身份由代码持有，WebUI 只读展示，不接受修改。
 
 ## 8. 阶段验收
 
