@@ -314,9 +314,9 @@ func targetCommandError(err error) error {
 	case errors.Is(err, plugin.ErrPluginNotReady), errors.Is(err, plugin.ErrPluginGroupDisabled):
 		projectlogger.Debug("目标插件命令被运行门禁拒绝", "error", err)
 		return nil
-	// [决策理由] 身份不足属于日常拒绝，记录后安静结束，与旧链路行为一致。
-	case errors.Is(err, plugin.ErrCommandUnauthorized):
-		projectlogger.Warn("目标插件命令身份不足", "error", err)
+	// [决策理由] 身份不足或身份无法解析都属于授权拒绝，记录后安静结束；上报事件缺少 sender 角色不应被当作系统故障。
+	case errors.Is(err, plugin.ErrCommandUnauthorized), errors.Is(err, plugin.ErrIdentityUnknownRole), errors.Is(err, plugin.ErrIdentityInvalidSubject):
+		projectlogger.Warn("目标插件命令未通过身份授权", "error", err)
 		return nil
 	default:
 		return err
