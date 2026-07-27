@@ -4,7 +4,6 @@ import { NAlert, NButton, NCard, NDataTable, NEmpty, NInput, NSpace, NSwitch, NT
 import { h, onMounted, reactive, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { listPluginRuntimes, setPluginRuntimeEnabled, setPluginRuntimeGroupEnabled, type PluginRuntimeCommand, type PluginRuntimeGroup, type PluginRuntimeState } from '../api'
-import PluginRuntimeConfigForm from '../components/PluginRuntimeConfigForm.vue'
 import { useAppFeedback } from '../feedback'
 
 const feedback = useAppFeedback()
@@ -293,7 +292,9 @@ onMounted(loadStates)
           <span>全局开关（关闭时保留群开关数据，但所有群均不生效）</span>
         </NSpace>
         <NDataTable :columns="commandColumns" :data="state.commands" :bordered="false" size="small" />
-        <PluginRuntimeConfigForm v-if="state.has_config" :plugin-key="state.plugin_key" />
+        <RouterLink v-if="state.has_config" :to="{ name: 'plugin-runtime-config', params: { pluginKey: state.plugin_key } }">
+          <NButton>打开插件配置</NButton>
+        </RouterLink>
         <RouterLink v-if="state.admin_page_key" :to="{ name: 'plugin-page', params: { pageKey: state.admin_page_key } }">
           <NButton>打开专属管理页面</NButton>
         </RouterLink>

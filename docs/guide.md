@@ -33,7 +33,7 @@ web/                     Vue 3 + TypeScript 管理界面
 
 ## 状态与管理
 
-平台公共页 `/plugin-runtimes` 管理全局/群开关、实际状态、错误和有限标量配置。复杂业务使用插件自有表、Repository、Service、语义化专属 API 和编译期 Vue 页面。安全的离线配置和历史读取可在插件关闭时使用；OneBot、模型、网络引擎和群副作用必须重新检查运行门禁。
+平台公共页 `/plugin-runtimes` 管理全局/群开关、实际状态和错误；每个插件的有限标量配置使用独立路由 `/plugin-runtimes/:pluginKey/config`。复杂业务使用插件自有表、Repository、Service、语义化专属 API 和编译期 Vue 页面。安全的离线配置和历史读取可在插件关闭时使用；OneBot、模型、网络引擎和群副作用必须重新检查运行门禁。
 
 持久化时间统一使用 `TIMESTAMPTZ` 和 UTC。WebAPI 返回含时区的时间，WebUI 按浏览器时区展示。操作反馈统一使用应用级全局 Toast。
 

@@ -189,12 +189,13 @@ test('乐观锁冲突后回到权威状态', testVersionConflictKeepsState)
 
 // mockRuntimeConfig 模拟带小型配置的插件运行状态与配置读写。
 // @param page：Playwright页面。
-// @returns Promise，在状态化路由注册后结束。
+// @returns Promise，返回已发生的配置读取次数查询函数。
 // ⚠️副作用说明：拦截管理API并修改函数内配置状态。
-async function mockRuntimeConfig(page: Page): Promise<void> {
+async function mockRuntimeConfig(page: Page): Promise<() => number> {
   const state = { ...buildState(), has_config: true, desired_enabled: true, version: 2, status: 'ready' }
   let config = { response_prefix: '' }
   let version = 1
+  let configReads = 0
   const schema = { fields: [{ key: 'response_prefix', display_name: '回复前缀', description: '添加到每条回复之前的文本', type: 'string', required: false }] }
   await page.route('**/api/**', async (route) => {
     const request = route.request()
@@ -205,6 +206,7 @@ async function mockRuntimeConfig(page: Page): Promise<void> {
         await fulfill(route, [state])
         break
       case 'GET /api/plugin-runtimes/echo/config':
+        configReads += 1
         await fulfill(route, { plugin_key: 'echo', schema, config, version, updated_at: '2026-07-26T12:00:00Z' })
         break
       case 'PUT /api/plugin-runtimes/echo/config': {
@@ -228,6 +230,7 @@ async function mockRuntimeConfig(page: Page): Promise<void> {
   // >>> 数据演变示例
   // 1. 初始 config={response_prefix:""} -> 保存 -> "[bot] "。
   // 2. has_config=false 的插件 -> 不渲染配置表单。
+  return () => configReads
 }
 
 // testConfigSaveAndHotApply 验证小型配置表单的保存链路。
@@ -236,8 +239,13 @@ async function mockRuntimeConfig(page: Page): Promise<void> {
 // ⚠️副作用说明：操作测试页面并修改mock配置状态。
 async function testConfigSaveAndHotApply({ page }: { page: Page }): Promise<void> {
   await seedSession(page)
-  await mockRuntimeConfig(page)
+  const getConfigReads = await mockRuntimeConfig(page)
   await page.goto('/plugin-runtimes')
+  await expect(page.getByRole('button', { name: '打开插件配置' })).toBeVisible()
+  await expect(page.locator('.n-form-item').filter({ hasText: '回复前缀' })).toHaveCount(0)
+  expect(getConfigReads()).toBe(0)
+  await page.getByRole('button', { name: '打开插件配置' }).click()
+  await expect(page).toHaveURL(/\/plugin-runtimes\/echo\/config$/)
   // Naive UI 的表单标签不是原生 label，按表单项定位其输入框。
   const prefixInput = page.locator('.n-form-item').filter({ hasText: '回复前缀' }).locator('input')
   await expect(prefixInput).toBeVisible()
@@ -254,3 +262,14 @@ async function testConfigSaveAndHotApply({ page }: { page: Page }): Promise<void
 }
 
 test('小型配置可保存并热应用', testConfigSaveAndHotApply)
+
+test('未知插件配置深链安全显示错误', async ({ page }) => {
+  await seedSession(page)
+  await page.route('**/api/plugin-runtimes/not_registered/config', async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer e2e-token')
+    await route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ code: 'plugin_not_found', message: '插件不存在', data: null }) })
+  })
+  await page.goto('/plugin-runtimes/not_registered/config')
+  await expect(page.getByText('插件不存在')).toBeVisible()
+  await expect(page.getByRole('button', { name: '保存并热应用' })).toHaveCount(0)
+})

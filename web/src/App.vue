@@ -14,7 +14,7 @@ const menuOptions: MenuOption[] = [
   { label: '系统设置', key: 'settings' },
   { label: '审计日志', key: 'audit-logs' },
 ]
-const activeMenuKey = computed(() => typeof route.name === 'string' ? route.name : '')
+const activeMenuKey = computed(() => typeof route.meta.menuKey === 'string' ? route.meta.menuKey : typeof route.name === 'string' ? route.name : '')
 const themeOverrides: GlobalThemeOverrides = {
   common: {
     primaryColor: '#8B5E3C', primaryColorHover: '#A87550', primaryColorPressed: '#70472D', primaryColorSuppl: '#8B5E3C',

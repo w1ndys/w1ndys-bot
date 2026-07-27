@@ -24,6 +24,7 @@ async function mockManagementAPI(page: Page): Promise<void> {
     expect(request.headers().authorization).toBe('Bearer e2e-token')
     expect(request.method()).toBe('GET')
     if (path === '/api/plugin-runtimes') await fulfillJSON(route, [runtime])
+    else if (path === '/api/plugin-runtimes/echo/config') await fulfillJSON(route, { plugin_key: 'echo', schema: { fields: [] }, config: {}, version: 1, updated_at: '2026-07-13T02:00:00Z' })
     else if (path === '/api/audit-logs') await fulfillJSON(route, { items: [auditSummary], page: 1, page_size: 20, total: 1 })
     else if (path === '/api/audit-logs/8') await fulfillJSON(route, { ...auditSummary, before: { api_key: '[已脱敏]' }, after: { enabled: true } })
     else await fulfillJSON(route, null, 404)
@@ -42,6 +43,26 @@ test('登录后进入插件运行页', async ({ page }) => {
   await page.getByRole('button', { name: '进入管理中心' }).click()
   await expect(page).toHaveURL(/\/plugin-runtimes$/)
   await expect(page.getByText('Ping')).toBeVisible()
+})
+
+test('插件配置深链登录后恢复并保持插件导航', async ({ page }) => {
+  await mockManagementAPI(page)
+  await page.goto('/plugin-runtimes/echo/config')
+  await expect(page).toHaveURL(/\/login\?redirect=/)
+  expect(new URL(page.url()).searchParams.get('redirect')).toBe('/plugin-runtimes/echo/config')
+  await page.getByPlaceholder('请输入 QQ 号').fill('2769731875')
+  await page.getByPlaceholder('请输入管理密码').fill('test-password')
+  await page.getByRole('button', { name: '进入管理中心' }).click()
+  await expect(page).toHaveURL(/\/plugin-runtimes\/echo\/config$/)
+  await expect(page.getByText('插件配置', { exact: true })).toBeVisible()
+
+  const viewport = page.viewportSize()
+  if (viewport !== null && viewport.width <= 1023) {
+    await page.getByRole('button', { name: '功能菜单' }).click()
+    await expect(page.locator('#mobile-admin-menu .n-menu-item-content--selected')).toContainText('插件运行')
+  } else {
+    await expect(page.locator('.desktop-sider .n-menu-item-content--selected')).toContainText('插件运行')
+  }
 })
 
 test('错误密码不建立会话', async ({ page }) => {
