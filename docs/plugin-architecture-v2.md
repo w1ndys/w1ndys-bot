@@ -38,7 +38,7 @@ QQ：最小应急入口
 ## 3. 编译与注册模型
 
 ```text
-compiled plugin package → PluginSpec → Catalog → Runtime Manager → Dispatcher
+compiled plugin package → PluginSpec → SpecCatalog → RuntimeController → Dispatcher
 ```
 
 目标 `PluginSpec` 声明稳定 Key、展示信息、命令、可选观察器、可选配置、可选生命周期和可选管理页面键。命令声明稳定 Key、触发词、群消息作用域、`AllowedRoles` 和 Handler。`ObserverSpec` 声明稳定 Key、平台支持的群事件类型和 Observer Handler；观察器没有命令身份语义，但始终经过全局和群门禁。纯后台插件通过生命周期启动任务，并使用受限的群门禁查询能力保护每次群副作用。
@@ -92,7 +92,7 @@ admin_audit_logs(...)
 
 ```text
 少量、有限、直接影响运行行为的标量设置
-→ plugin_configs + 小型 ConfigSchema
+→ plugin_runtime_configs + 小型 ConfigSchema
 
 会增长、分页、筛选、关联、审核或有独立生命周期的数据
 → 插件自有表 + Migration + Repository + Service
