@@ -1,10 +1,8 @@
 <!-- 📌 影响范围：定义插件系统重构后的目标架构、职责边界和迁移顺序；无外部变量。 -->
-# 插件目标架构（尚未实现）
+# 插件架构
 
 > [!IMPORTANT]
-> 本文描述重构后的目标架构，不代表当前代码已经实现。迁移完成前，现有运行时、Manifest、权限和 AdminResource 行为仍以代码及 `docs/guide.md` 为准。
->
-> 迁移进度（对应第 12 节阶段表）：阶段 1、2、3、4 已完成，Echo 已迁移并接线唯一执行链；阶段 5、6、7、8、9 未开始。目标插件的开关与小型配置已提供 `/api/plugin-runtimes` 与 WebUI「插件运行」页。
+> 本文描述当前已实现的插件架构。迁移阶段 1 至 10 已完成：所有内置业务插件使用 `PluginSpec` 和唯一执行链，旧 Manifest/Manager、数据库命令与权限矩阵、通用 AdminResource 均已删除，数据库重建为单一初始基线。
 
 ## 1. 目标与非目标
 
@@ -77,12 +75,12 @@ compiled plugin package → PluginSpec → Catalog → Runtime Manager → Dispa
 
 持久化的 `desired_enabled` 表示管理员意图；进程内 `runtime_status` 表示 `disabled`、`enabling`、`ready`、`disabling` 或 `failed`。WebUI 必须同时展示期望状态、实际状态和最近错误。
 
-目标平台表：
+平台表：
 
 ```text
 plugin_states(plugin_key, desired_enabled, version, updated_at)
 plugin_group_states(plugin_key, group_id, enabled, version, updated_at)
-plugin_configs(plugin_key, config_json, version, updated_at)
+plugin_runtime_configs(plugin_key, config_json, version, updated_at)
 admin_audit_logs(...)
 ```
 
@@ -169,18 +167,18 @@ POST /api/plugins/forbidden-message-monitor/groups/{group}/text-trials
 
 仅保留插件列表、状态查询、全局启停和当前群启停。QQ 与 WebUI 必须复用同一应用服务、鉴权、状态版本和审计，不能维护第二套开关逻辑。复杂配置和业务数据只在 WebUI 管理。
 
-## 12. 迁移阶段
+## 12. 已完成的迁移阶段
 
-1. 冻结 `PluginSpec`、命令、身份、状态表和 API 命名。
-2. 实现 Catalog、Dispatcher、全局/群门禁和生命周期状态。
-3. 实现小型 ConfigSchema 与通用配置页。
-4. 迁移 Echo，验证最小插件路径。
-5. 迁移 Keyword Reply，验证专属业务表、API 和页面。
-6. 迁移 Forbidden Monitor，验证复杂工作流和外部副作用。
-7. QQ 管理命令复用新应用服务。
-8. 删除旧权限矩阵、Feature/命令同步和通用 AdminResource。
-9. 项目尚未上线，重建数据库基线，避免长期双读和兼容层。
-10. 更新 `docs/guide.md`、`docs/plugin-development.md` 和测试后，将本文改为已实现架构。
+1. [x] 冻结 `PluginSpec`、命令、身份、状态表和 API 命名。
+2. [x] 实现 Catalog、Dispatcher、全局/群门禁和生命周期状态。
+3. [x] 实现小型 ConfigSchema 与通用配置页。
+4. [x] 迁移 Echo，验证最小插件路径。
+5. [x] 迁移 Keyword Reply，验证专属业务表、API 和页面。
+6. [x] 迁移 Forbidden Monitor，验证复杂工作流和外部副作用。
+7. [x] QQ 管理命令复用新应用服务。
+8. [x] 删除旧权限矩阵、Feature/命令同步和通用 AdminResource。
+9. [x] 项目尚未上线，重建数据库基线，避免长期双读和兼容层。
+10. [x] 更新架构、开发指南和测试，将本文确认为已实现架构。
 
 每一阶段必须有明确的旧代码删除条件，不允许新旧体系长期并存。
 

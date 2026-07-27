@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	commandregistry "github.com/w1ndys/w1ndys-bot/internal/command"
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 )
+
+var identifierPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 // Role 是目标插件架构允许在代码中声明的封闭群身份。
 type Role string

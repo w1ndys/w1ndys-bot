@@ -21,7 +21,7 @@ async function submitLogin(): Promise<void> {
   errorMessage.value = ''
   try {
     await login(qq.value.trim(), password.value)
-    const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/plugins'
+    const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/plugin-runtimes'
     await router.replace(redirect)
   } catch (error) {
     // [决策理由] Fetch 异常不一定是 Error 实例，必须提供稳定用户提示。
@@ -35,7 +35,7 @@ async function submitLogin(): Promise<void> {
   }
 
   // >>> 数据演变示例
-  // 1. 正确凭据 -> 保存 Token -> 跳转 /plugins。
+  // 1. 正确凭据 -> 保存 Token -> 跳转 /plugin-runtimes。
   // 2. 密码错误 -> 显示后端 message -> 停留登录页。
 }
 </script>

@@ -177,7 +177,7 @@ func (r *PostgresRuntimeStateRepository) LoadConfigs(ctx context.Context) ([]Per
 }
 
 // SaveConfig 使用乐观锁写入插件配置，并在同一事务写入审计。
-func (r *PostgresRuntimeStateRepository) SaveConfig(ctx context.Context, actor management.Actor, pluginKey string, configJSON json.RawMessage, expectedVersion int64) (PersistedPluginConfig, error) {
+func (r *PostgresRuntimeStateRepository) SaveConfig(ctx context.Context, actor management.Actor, pluginKey string, schema ConfigSchema, configJSON json.RawMessage, expectedVersion int64) (PersistedPluginConfig, error) {
 	if r == nil || r.database == nil {
 		return PersistedPluginConfig{}, fmt.Errorf("插件状态仓库未初始化")
 	}
@@ -217,7 +217,16 @@ RETURNING plugin_key,config_json,version,updated_at`, pluginKey, []byte(configJS
 	if err != nil {
 		return PersistedPluginConfig{}, fmt.Errorf("更新插件配置: %w", err)
 	}
-	after := runtimeConfigAudit{PluginKey: pluginKey, ConfigJSON: saved.ConfigJSON, Version: saved.Version}
+	redactedBefore, err := RedactConfig(schema, before.ConfigJSON)
+	if err != nil {
+		return PersistedPluginConfig{}, fmt.Errorf("脱敏插件 %s 原配置审计快照: %w", pluginKey, err)
+	}
+	redactedAfter, err := RedactConfig(schema, saved.ConfigJSON)
+	if err != nil {
+		return PersistedPluginConfig{}, fmt.Errorf("脱敏插件 %s 新配置审计快照: %w", pluginKey, err)
+	}
+	before.ConfigJSON = redactedBefore
+	after := runtimeConfigAudit{PluginKey: pluginKey, ConfigJSON: redactedAfter, Version: saved.Version}
 	if err := recordRuntimeAudit(ctx, tx, actor, "plugin.runtime.config.update", "plugin_runtime_config", pluginKey, before, after); err != nil {
 		return PersistedPluginConfig{}, err
 	}

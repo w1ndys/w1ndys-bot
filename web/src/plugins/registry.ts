@@ -6,6 +6,7 @@ import { defineAsyncComponent } from 'vue'
 // 后端只返回稳定 Key，绝不返回组件路径、URL、HTML 或脚本；未注册的 Key 视为不存在。
 const pluginPages: Record<string, Component> = {
   keyword_reply: defineAsyncComponent(() => import('./keyword_reply/Page.vue')),
+  forbidden_message_monitor: defineAsyncComponent(() => import('./forbidden_message_monitor/Page.vue')),
 }
 
 // resolvePluginPage 按稳定页面 Key 查找本地组件。

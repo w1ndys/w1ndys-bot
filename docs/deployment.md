@@ -16,17 +16,20 @@
 | `WS_BIND_ADDRESS` | 默认 `0.0.0.0` | 仅本机访问可改为 `127.0.0.1` |
 | `LOG_LEVEL` | 推荐 `info` | `debug` 会记录可能含聊天内容的原始事件 |
 | `LOG_FORMAT` | `text` 或 `json` | 生产日志采集推荐 `json` |
+| `BOT_IMAGE` | 推荐固定版本 Tag | 例如 `ghcr.io/w1ndys/w1ndys-bot:v2026.07.27.1200` |
 
 可用 `openssl rand -base64 48` 分别生成密码和密钥。不得复用不同用途的凭据，也不得提交 `.env`。
 
-启动并检查：
+正式部署应把 `BOT_IMAGE` 固定到经过审核的不可变版本 Tag，不要只依赖会移动的 `latest`。拉取发布镜像并启动：
 
 ```bash
-task compose-up
+task compose-up-image
 docker compose ps
 task migrate-version
 docker compose logs --tail=100 bot
 ```
+
+源码开发环境可使用 `task compose-up`，它会从当前工作树重新构建镜像。
 
 验收标准：`postgre` 为 `healthy`，`w1ndys-bot` 为 `Up`，迁移版本为最新且 `dirty=false`，日志出现“基础框架已启动”。随后验证：
 
@@ -59,7 +62,7 @@ docker exec postgre createdb -U bot_admin w1ndys_bot
 docker exec -i postgre pg_restore -U bot_admin -d w1ndys_bot --exit-on-error --single-transaction < backups/<备份文件>.dump
 ```
 
-恢复成功后不要执行 `docker compose start bot`，它只会启动原有容器，并不会应用刚切换的代码或镜像。先选择下方回滚方案重建 Bot 容器，再核对迁移版本。若是同版本灾难恢复，确认当前 `w1ndys-bot:latest` 镜像与备份版本兼容后，使用 `docker compose up --force-recreate -d bot` 创建新容器。
+恢复成功后不要执行 `docker compose start bot`，它只会启动原有容器，并不会应用刚切换的镜像。先把 `BOT_IMAGE` 设置为与备份兼容的不可变 Tag，执行 `task compose-up-image`，再核对迁移版本。
 
 不要通过删除 `postgres-data` 卷代替正常恢复；删除容器本身不会删除具名卷。归档校验成功不代表业务恢复一定成功，原备份文件必须保留到完整验收结束。
 
@@ -67,40 +70,38 @@ docker exec -i postgre pg_restore -U bot_admin -d w1ndys_bot --exit-on-error --s
 
 1. 阅读目标版本变更记录，确认配置项和数据库兼容性。
 2. 记录当前提交：`git rev-parse HEAD`。
-3. 备份数据库，并给当前镜像保留回滚标签：
+3. 备份数据库，并记录 `.env` 中当前 `BOT_IMAGE` 值作为回滚版本。
 
-   ```bash
-   docker image tag w1ndys-bot:latest "w1ndys-bot:rollback-$(date +%Y%m%d-%H%M%S)"
-   ```
-
-4. 拉取目标代码后运行：
+4. 拉取目标代码并完成本地验证：
 
    ```bash
    task lint
    task test
    task web-e2e-install # 新机器或首次运行时执行一次
    task web-e2e
-   task compose-rebuild
    ```
 
-5. 检查容器、迁移、WebUI 登录、NapCat 连接和审计日志。
+5. 将 `BOT_IMAGE` 改为目标版本 Tag，执行 `task compose-up-image`。
+
+6. 检查容器、镜像摘要、迁移、WebUI 登录、NapCat 连接和审计日志：
+
+   ```bash
+   docker inspect w1ndys-bot --format '{{.Config.Image}} {{.Image}}'
+   ```
 
 程序启动时会自动向上迁移。不要在新旧机器人进程同时运行时手工回滚迁移。
 
 ## 回滚流程
 
-若仅应用代码异常且数据库结构仍兼容，切回已记录的稳定提交并执行 `task compose-rebuild`。若目标提交要求更旧的数据库版本，必须在以下方案中二选一：
+若仅应用代码异常且数据库结构仍兼容，将 `BOT_IMAGE` 恢复为已记录的稳定 Tag 并执行 `task compose-up-image`。若目标版本要求更旧的数据库版本，必须在以下方案中二选一：
 
 ### 方案 A：恢复升级前备份（推荐）
 
 1. 停止机器人。
 2. 按“数据备份与恢复”恢复升级前归档。
-3. 选择一种方式创建匹配备份版本的新容器：
+3. 将 `BOT_IMAGE` 设置为匹配备份版本的不可变 GHCR Tag，执行 `task compose-up-image`。
 
-   - 从代码回滚：`git checkout <稳定提交>`，然后执行 `task compose-rebuild`。
-   - 从保留镜像回滚：先执行 `docker image tag <回滚镜像标签> w1ndys-bot:latest`，再执行 `docker compose up --force-recreate -d bot`，不得附加 `--build`。
-
-4. 使用 `docker inspect w1ndys-bot --format '{{.Image}}'` 核对容器镜像，并检查迁移版本和启动日志。
+4. 使用 `docker inspect w1ndys-bot --format '{{.Config.Image}} {{.Image}}'` 核对版本与摘要，并检查迁移版本和启动日志。
 
 恢复备份后不得再执行 `task migrate-down`；备份已经包含旧版本数据库，再 down 会额外回滚一版。
 
@@ -109,7 +110,7 @@ docker exec -i postgre pg_restore -U bot_admin -d w1ndys_bot --exit-on-error --s
 1. 停止机器人：`docker compose stop bot`。
 2. 保留并校验当前数据库备份。
 3. 确认每个 `.down.sql` 不会丢失所需数据后，使用 `task migrate-down` 逐版回滚到目标版本。
-4. 切回匹配该迁移版本的稳定代码并执行 `task compose-rebuild`。
+4. 将 `BOT_IMAGE` 切回匹配该迁移版本的稳定 Tag 并执行 `task compose-up-image`。
 5. 核验迁移版本、插件状态、命令、权限、设置和 NapCat 连接。
 
 `task migrate-down` 一次只回滚一版。不要在 down 完成前启动新版本机器人，否则自动向上迁移会抵消回滚；不得把 `dirty=true` 当作成功状态继续启动。

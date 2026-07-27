@@ -43,6 +43,7 @@ type implementation struct {
 	snapshot      atomic.Pointer[runtimeSnapshot]
 	offsets       atomic.Pointer[map[string]float64]
 	negative      atomic.Pointer[map[string]struct{}]
+	publicationMu sync.Mutex
 	transitionMu  sync.Mutex
 	lifecycleMu   sync.Mutex
 	llmMu         sync.Mutex
@@ -426,7 +427,7 @@ func (p *implementation) handleNotice(ctx context.Context, notice *ws.NoticeEven
 // ⚠️副作用说明：启动一个可取消的维护协程，后台访问数据库和NapCat。
 func (p *implementation) OnEnable(ctx context.Context) error {
 	// [决策理由] 词库存放在插件自有业务表，必须在开始接收群消息前加载，否则引擎空载静默放行。
-	if err := p.reloadLexicon(ctx, p.currentConfigJSON()); err != nil {
+	if err := p.reloadLexicon(ctx); err != nil {
 		return fmt.Errorf("加载违禁词库: %w", err)
 	}
 	p.transitionMu.Lock()
@@ -661,6 +662,8 @@ func (p *implementation) refreshGroupWhitelist(ctx context.Context, groupID int6
 // @returns 引擎配置错误。
 // ⚠️副作用说明：成功时替换运行快照中的检测引擎，保留LLM客户端与超时。
 func (p *implementation) publishWeightOffsets(offsets map[string]float64, negativeFeatures map[string]struct{}) error {
+	p.publicationMu.Lock()
+	defer p.publicationMu.Unlock()
 	current := p.snapshot.Load()
 	// [决策理由] 配置尚未发布时无法确定基础词库。
 	if current == nil {
@@ -775,7 +778,7 @@ func newImplementation(actions plugin.ActionAPI, pool *pgxpool.Pool) (*implement
 	if err != nil {
 		return nil, fmt.Errorf("初始化%s默认配置: %w", pluginKey, err)
 	}
-	// [决策理由] Factory必须发布可立即读取的默认引擎，避免启用前nil快照。
+	// [决策理由] 构造时必须发布可立即读取的默认引擎，避免启用前nil快照。
 	if err := result.ApplyConfig(context.Background(), normalized); err != nil {
 		return nil, err
 	}

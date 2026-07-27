@@ -75,7 +75,7 @@ func (r *Runner) Up() error {
 	}
 
 	// >>> 数据演变示例
-	// 1. version=0 -> Up -> 创建 plugin_config -> version=1。
+	// 1. version=0 -> Up -> 创建当前完整基线 -> version=1。
 	// 2. version=1 -> Up -> ErrNoChange -> nil。
 	return nil
 }

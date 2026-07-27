@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -334,6 +335,36 @@ func TestRuntimeStateRepositoryFindStateRejectsUnknownAndInvalidKeys(t *testing.
 	}
 	if _, err := repository.FindState(context.Background(), "bad-key"); err == nil {
 		t.Fatal("invalid plugin key accepted")
+	}
+}
+
+func TestRuntimeStateRepositorySaveConfigRedactsAuditSecrets(t *testing.T) {
+	updatedAt := time.Date(2026, 7, 27, 3, 0, 0, 0, time.UTC)
+	transaction := &runtimeStateTestTx{rows: []pgx.Row{
+		runtimeStateTestRow{values: []any{json.RawMessage(`{"mode":"old","token":"old-secret"}`), int64(2)}},
+		runtimeStateTestRow{values: []any{"monitor", json.RawMessage(`{"mode":"new","token":"new-secret"}`), int64(3), updatedAt}},
+	}}
+	repository := &PostgresRuntimeStateRepository{database: &runtimeStateTestDatabase{tx: transaction}}
+	schema := ConfigSchema{Fields: []ConfigField{
+		{Key: "mode", DisplayName: "模式", Type: FieldString},
+		{Key: "token", DisplayName: "令牌", Type: FieldSecret},
+	}}
+	_, err := repository.SaveConfig(context.Background(), runtimeStateTestActor, "monitor", schema, json.RawMessage(`{"mode":"new","token":"new-secret"}`), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := transaction.execArgs[6].([]byte)
+	after, _ := transaction.execArgs[7].([]byte)
+	for label, snapshot := range map[string][]byte{"before": before, "after": after} {
+		if strings.Contains(string(snapshot), "secret") || strings.Contains(string(snapshot), `"token"`) {
+			t.Fatalf("audit %s leaked secret: %s", label, snapshot)
+		}
+		if !strings.Contains(string(snapshot), `"mode"`) {
+			t.Fatalf("audit %s lost public config: %s", label, snapshot)
+		}
+	}
+	if !transaction.committed {
+		t.Fatal("transaction not committed")
 	}
 }
 

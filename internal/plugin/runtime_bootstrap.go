@@ -101,6 +101,21 @@ func (b *RuntimeBootstrap) Initialize(ctx context.Context) error {
 	return nil
 }
 
+// Shutdown 按目录逆序停止全部插件准入、排空在途调用并释放生命周期资源。
+func (b *RuntimeBootstrap) Shutdown(ctx context.Context) error {
+	if b == nil || b.catalog == nil || b.controller == nil {
+		return errors.New("运行时启动服务未初始化")
+	}
+	specs := b.catalog.Specs()
+	var shutdownErrors []error
+	for index := len(specs) - 1; index >= 0; index-- {
+		if err := b.controller.Disable(ctx, specs[index].Key); err != nil {
+			shutdownErrors = append(shutdownErrors, fmt.Errorf("关闭插件 %s: %w", specs[index].Key, err))
+		}
+	}
+	return errors.Join(shutdownErrors...)
+}
+
 // applyConfigs 把持久化配置发布到声明了配置的插件。
 func (b *RuntimeBootstrap) applyConfigs(ctx context.Context) error {
 	specs := b.catalog.Specs()

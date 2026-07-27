@@ -1,198 +1,73 @@
-<!-- 📌 影响范围：说明机器人架构、迁移版本和内置插件能力；无外部变量。 -->
+<!-- 📌 影响范围：说明机器人当前架构、数据库基线和开发验收；无外部变量。 -->
 # W1ndys Bot 开发指南
 
-## 1. 项目目标
+## 当前架构
 
-本项目是基于 Go 与 NapCat OneBot 11 的 QQ 机器人框架。NapCat 通过反向 WebSocket 连接机器人；机器人使用 PostgreSQL 保存插件元数据、命令、权限与系统配置。业务能力以编译时插件交付，并通过数据库配置控制运行状态。
-
-## 2. 当前架构
-
-项目正在向 `docs/plugin-architecture-v2.md` 描述的目标插件架构迁移，当前处于**双链路过渡态**：群事件先进入目标链路，未被目标插件命中的事件再交给旧链路。
-
-目标链路（已迁移插件）：
+本项目是 Go 编写的 NapCat OneBot 11 群机器人，使用 PostgreSQL 持久化运行状态、配置、审计和插件业务数据，Vue 3 WebUI 是主要管理入口。
 
 ```text
-NapCat 群事件 → WebSocket 解析 → EventDispatcher
+NapCat 群事件 → 反向 WebSocket → EventDispatcher
               → 命令匹配 → 全局 Ready → 群 Enabled → 代码身份 → Handler
+              → 未命中命令的群事件 → 观察器门禁 → Observer
 ```
 
-旧链路（尚未迁移的插件与私聊）：
+插件以 `PluginSpec` 编译进程序，由 `cmd/bot` 显式装入 `SpecCatalog`。代码持有稳定插件 Key、命令、触发词、作用域和允许身份；数据库不提供可变命令或权限覆盖矩阵。普通插件只处理群事件，私聊不进入插件执行链。QQ 应急入口直属平台管理服务，提供插件列表、状态以及全局/当前群启停，并与 WebUI 复用 `RuntimeService`。
 
-```text
-NapCat 事件 → WebSocket 解析 → 命令匹配 → 权限解析
-             → PluginManager → 插件实例 → BotAPI → Action Client → NapCat
-```
-
-`cmd/bot` 按下列规则分流：群消息和群事件先调用目标 `EventDispatcher`，命中目标命令后直接返回，不再进入旧链路，避免同一消息被两套体系重复处理；私聊消息不进入目标插件，仍由旧链路承担 QQ 应急管理入口。运行门禁拒绝（插件未启用、当前群未开启）和身份授权拒绝属于预期状态，记录日志后安静结束，不作为系统故障上报。
-
-目标架构插件由代码持有稳定 Key、触发词、作用域和允许身份（`super_admin`、`group_owner`、`group_admin`、`group_member`），数据库只保存管理员的开关意图，不提供权限覆盖矩阵。身份取自 NapCat 上报的 `sender` 角色；发送者与事件用户不一致、角色缺失或未知一律 fail-closed。所有插件与所有群默认关闭。
-
-进程内 `runtime_status`（`disabled`/`enabling`/`ready`/`disabling`/`failed`）与持久化的 `desired_enabled` 分离，只有 `ready` 接受新调用。开关写入统一经由 `RuntimeService`：鉴权 → 乐观锁 → 与审计同事务落库 → 驱动生命周期。持久化与内存按“更保守的一侧先执行”排序，两个方向都 fail-closed——启用先落库再驱动生命周期，生命周期失败时运行时停在 `failed` 且保留意图供排查；关闭先停止准入并排空在途调用再落库，清理失败仍落库关闭意图，避免重启复活已关停的插件。
+所有插件和所有群默认关闭。未知身份、缺失状态、私聊、未声明身份及非 `ready` 状态均 fail-closed。运行时状态与管理员的持久化意图分离；启停使用乐观锁和事务审计，禁用先停止准入并排空在途调用。
 
 Action Client 使用唯一 `echo` 关联请求与响应。WebSocket 读取循环优先处理响应，普通事件交给受限并发 worker，避免插件等待 Action 响应时阻塞收包。
 
-尚未迁移的插件仍以 `Manifest + Factory` 注册：Manifest 描述插件、功能、默认命令及默认权限；Factory 在运行时接收 `Messenger` 等依赖并创建实例。插件默认关闭，Manifest 同步不会替管理员覆盖现有配置。已迁移插件改为导出 `Spec(依赖) (plugin.PluginSpec, error)`，由 `cmd/bot` 显式装入 `SpecCatalog`，不再使用 `init()` 全局注册。
-
-权限按以下优先级取首个匹配项，指定用户策略整体优先于角色策略：
+## 目录
 
 ```text
-用户：群级功能 > 群级插件 > 全局功能 > 全局插件
-角色：群级功能 > 群级插件 > 全局功能 > 全局插件
-最终回退：Manifest 默认值
-```
-
-声明 `GroupControllable` 的插件使用平台统一群门禁。实际生效链路为全局开关、群默认值或单群覆盖、用户权限、插件处理；群门禁只约束带有效群号的消息，私聊保持原行为。运行时使用原子不可变快照，事件热路径不查询数据库。
-
-## 3. 目录结构
-
-```text
-cmd/bot/                 程序入口与依赖装配
-internal/config/         Viper 配置加载
-internal/db/             pgx PostgreSQL 连接池
-internal/ws/             反向 WS、事件模型与 Action Client
-internal/onebot/         类型化 BotAPI
-internal/plugin/         目标架构规格、分发、运行状态与旧 Manifest 注册管理
-internal/command/        多作用域命令注册及重复检测
-internal/permission/     多级权限解析
-internal/migration/      迁移执行器与 SQL 文件
-pkg/logger/              zap 结构化日志适配层
-plugins/echo/            Echo 示例插件（已迁移至目标架构）
-plugins/keyword_reply/   群关键词完全匹配回复插件
-plugins/forbidden_message_monitor/ 群内违禁消息监控与人工复核插件
-plugins/admin/           不可关闭的 QQ 系统管理插件
+cmd/bot/                 服务入口与依赖装配
+internal/ws/             反向 WebSocket、事件模型和 Action Client
+internal/onebot/         类型化 OneBot API
+internal/plugin/         PluginSpec、目录、分发、生命周期和运行状态服务
+internal/admin/          系统设置、管理员授权和审计
+internal/webapi/         平台与插件专属管理 API
+internal/migration/      数据库迁移执行器与 SQL
+plugins/                 编译期内置插件
 web/                     Vue 3 + TypeScript 管理界面
-docs/                    设计与开发文档
 ```
 
-## 4. 数据库迁移
+## 状态与管理
 
-程序启动时自动向上迁移。当前迁移版本为 18：
+平台公共页 `/plugin-runtimes` 管理全局/群开关、实际状态、错误和有限标量配置。复杂业务使用插件自有表、Repository、Service、语义化专属 API 和编译期 Vue 页面。安全的离线配置和历史读取可在插件关闭时使用；OneBot、模型、网络引擎和群副作用必须重新检查运行门禁。
 
-1. `plugin_config`：插件开关、优先级和 JSON 配置。
-2. `system_settings`、`system_admins`、`admin_audit_logs`：系统管理基础表。
-3. `plugin_definitions`、`plugin_features`：Manifest 元数据。
-4. `plugin_commands`：一个插件功能对应的全局及群级触发词。
-5. `permission_policies`：插件或功能的角色及指定用户权限覆盖。
-6. 将插件及功能的 `installed` 字段重命名为语义更准确的 `available`。
-7. 单管理员模式改由 `SUPER_ADMIN_QQ` 作为唯一权限根，删除废弃的 `system_admins` 表及动态 WebUI 标题设置。
-8. 权限主体扩展为角色或指定 QQ 用户，支持全局/群级功能和插件全功能授权。
-9. 删除未投入使用的插件 Schema 版本字段。
-10. 删除个人开发模式不需要的插件独立版本字段。
-11. 为声明式插件配置增加 `config_version` 乐观锁版本。
-12. 新增关键词回复规则业务表、唯一约束和乐观锁版本。
-13. 新增插件群控制能力、独立群默认策略版本和逐群覆盖表。
-14. 新增群内违禁消息监控的发言计数、活跃白名单、违规审核、反馈样本与周期权重偏移表。
-15. 新增违禁消息正向候选词证据、自动晋级权重与跨重启的大模型每日请求计数。
-16. 新增WebUI主动投喂的违禁训练样本及候选词证据，用于Few-shot正例和候选词晋级。
-17. 新增目标插件架构的全局意图表 `plugin_states` 与逐群开关表 `plugin_group_states`，均默认关闭并带乐观锁版本。
-18. 新增目标插件架构的小型配置表 `plugin_runtime_configs`，配置行随目录同步预建并带乐观锁版本。
+持久化时间统一使用 `TIMESTAMPTZ` 和 UTC。WebAPI 返回含时区的时间，WebUI 按浏览器时区展示。操作反馈统一使用应用级全局 Toast。
 
-每个版本同时提供 `up.sql` 与 `down.sql`，分别用于应用和回滚。不得修改已部署的迁移；结构变化应新增版本。
+## 数据库基线
 
-## 5. 开发与部署命令
+项目尚未上线，迁移已合并为 `000001_initial_schema`。基线包含：
 
-所有任务从仓库根目录执行：
+- `system_settings`、`admin_audit_logs`
+- `plugin_states`、`plugin_group_states`、`plugin_runtime_configs`
+- `keyword_reply_rules`
+- Forbidden Monitor 的发言、白名单、违规、反馈、权重、候选证据、模型用量、训练样本、词条和组合表
+
+基线不包含旧 `plugin_config`、Manifest/Feature/命令同步表、权限矩阵、旧群覆盖表或数据库管理员表。项目正式部署后不得修改已部署迁移，结构变化必须新增配对迁移。
+
+## 开发与验证
+
+从仓库根目录使用 Task：
 
 ```bash
-task setup              # 下载 Go 依赖
-task run                # 构建 WebUI 并启动机器人
-task web-dev            # 启动 WebUI 并代理本机 18800 API
-task web-build          # 类型检查并构建 WebUI
-task web-e2e-install    # 安装 WSL/CI 无头 Chromium 与系统依赖
-task web-e2e            # 运行桌面、平板与移动端 Playwright 测试
-task web-e2e-ui         # 打开 Playwright UI 调试测试
-task lint               # 检查 gofmt 与 go vet
-task test               # 运行全部测试
-task compose-up         # 构建并启动 bot 与 PostgreSQL
-task compose-rebuild    # 重建镜像并强制重建容器
-task compose-restart    # 重新读取 .env 并重建容器
-task compose-logs       # 持续查看容器日志
-task migrate-version    # 查看迁移版本与 dirty 状态
-task migrate-up         # 应用待执行迁移
-task migrate-down       # 回滚最近一个版本
-```
-
-敏感值仅写入未跟踪的 `.env`。首次部署应设置 `SUPER_ADMIN_QQ=你的QQ号`、至少 12 字符的 `WEBUI_PASSWORD` 和至少 32 字节的 `JWT_SECRET`。系统采用单管理员模式，QQ 与 WebUI 仅信任 `SUPER_ADMIN_QQ`；管理员账号和密码均不入库、不支持页面修改，轮换后需重启容器。Compose 内数据库名统一为 `w1ndys_bot`；删除容器不会删除具名卷，若需清空数据库必须明确移除卷。
-
-WebUI 产品名称固定为 `w1ndys-bot-webui`，不作为系统设置开放修改。
-
-所有数据库时间字段使用 `TIMESTAMPTZ`，PostgreSQL 会话固定为 UTC；WebAPI 统一输出 UTC RFC3339 时间，前端按浏览器所在时区转换展示。
-
-排查 OneBot 上报时可临时设置 `LOG_LEVEL=debug`；`internal/ws` 会以 `payload` 字段输出解析成功的原始事件 JSON。设置 `LOG_FORMAT=json` 可让整行日志使用 JSON 编码。原始事件可能包含聊天内容、QQ 标识、群组信息、文件名或 URL 等敏感数据，生产环境不应长期启用 debug，并应限制日志访问范围与留存时间。
-
-## 6. 已完成能力
-
-- [x] Viper 配置、pgx 连接池及 zap 日志层
-- [x] Token 鉴权反向 WebSocket 与强类型事件模型
-- [x] Action Client、类型化 BotAPI 和响应关联
-- [x] PluginManager、Manifest + Factory 注册及元数据同步
-- [x] 多作用域命令匹配、重复检测和用户优先的八级权限解析
-- [x] `echo` 插件参数提取与引用回复端到端链路
-- [x] 最高管理员环境引导、身份缓存与 QQ 插件管理命令
-- [x] 多功能触发词 CRUD、重复检测、事务审计与 Command Registry 热刷新服务
-- [x] WebUI 功能触发词 REST API 与统一前置鉴权
-- [x] WebUI 角色/指定用户权限策略 REST API、审计与热刷新
-- [x] 权限策略 CRUD、事务审计与 Permission Resolver 热刷新服务
-- [x] `SUPER_ADMIN_QQ` 单管理员授权及 WebUI 环境密码认证
-- [x] WebUI 插件列表、启停、优先级 REST API 与审计请求关联
-- [x] 受控系统设置、JSONB 审计、原子快照与命令前缀热更新
-- [x] WebUI 受控系统设置 REST API、覆盖状态与恢复默认
-- [x] WebUI 审计日志分页、筛选与只读详情 REST API
-- [x] Vue 3 WebUI 登录、会话路由守卫与插件管理首屏
-- [x] 插件功能元数据 API 与 WebUI 功能触发词管理页面
-- [x] WebUI 权限策略筛选、角色/指定用户授权与回退删除页面
-- [x] WebUI 受控系统设置编辑、覆盖状态与恢复默认页面
-- [x] 登录限流、HTTP 超时、严格 JSON、CSP 和请求 ID 安全加固
-- [x] 数据库自动迁移及迁移管理任务
-- [x] Dockerfile 与机器人/PostgreSQL Compose 编排
-- [x] WebUI 多阶段生产构建、Go 静态托管与 Vue History 路由回退
-- [x] Naive UI 组件库、亮色曲奇棕主题与系统设置页组件化样板
-- [x] 插件中心二级导航与概览、功能、命令、权限工作台
-- [x] WebUI 审计日志服务端分页、精确筛选、详情快照与敏感字段脱敏
-- [x] Playwright 无头 Chromium 基础设施及登录、会话、响应式导航、命令/权限/设置写操作和审计测试
-- [x] Compose 真实 API 写操作、运行时热更新、状态恢复与审计落库验收
-- [x] `vYYYY.MM.DD.HHmm` 北京时间日历版本规范与首个发布变更日志
-- [x] 正式内置 Echo 示例插件、命令参数上下文与插件开发指南
-- [x] 声明式插件配置、通用 Schema 表单及敏感字段安全边界
-- [x] 通用 AdminResource CRUD API、WebUI 表格表单与关键词完全匹配回复插件
-- [x] 群内违禁消息分层检测、自动处置、人工复核与反馈学习插件
-- [x] 目标插件架构 `PluginSpec` 契约、编译期目录与跨插件触发词冲突校验
-- [x] 命令、观察器与统一事件入口的纯内存分发链
-- [x] 插件运行生命周期、群门禁、在途排空与启动状态恢复
-- [x] 全局与群开关状态表、乐观锁写入及与状态同事务的审计
-- [x] `RuntimeService` 开关应用服务与 `/api/plugin-runtimes` 管理 API
-- [x] Echo 迁移至目标架构并完成唯一执行链接线
-- [x] WebUI 目标插件开关页面、意图与实际状态对照及只读命令声明
-- [x] 目标架构小型标量配置契约、乐观锁写入、热应用补偿与启动期发布
-- [x] 目标插件配置 REST API 与 WebUI 内联配置表单
-
-## 7. 后续开发计划
-
-按以下顺序推进，每一步完成测试并独立提交。插件架构迁移的完整阶段表见 `docs/plugin-architecture-v2.md` 第 12 节，剩余阶段为：
-
-1. 迁移 Keyword Reply，验证插件自有业务表、专属 API 与页面。
-2. 迁移 Forbidden Monitor，验证复杂工作流与外部副作用。
-3. QQ 应急入口改为复用 `RuntimeService`，不维护第二套开关逻辑。
-4. 删除旧权限矩阵、Feature/命令同步与通用 AdminResource，并重建数据库基线。
-
-迁移完成后：
-
-5. 建立 Git Tag 与多架构容器镜像发布流程。
-6. 首次发布前按部署手册执行全量备份、升级与回滚演练。
-
-WebUI Admin Console 已实现插件、功能触发词、权限策略、系统设置和只读审计日志页面。QQ 通道仅作为轻量应急入口，最高管理员可使用 `/插件列表`、`/启用插件 <名称>` 和 `/禁用插件 <名称>`；功能触发词、权限策略和优先级统一由 WebUI 管理。声明式插件配置已提供 Schema 驱动通用表单、secret 写入保留、脱敏读取、版本冲突检测、审计和热应用；普通插件无需单独编写配置页面。系统 `admin` 插件不可通过管理服务禁用。所有管理变更必须同时经过授权校验、重复检测、热更新和审计记录。
-
-已迁移到目标架构的插件不出现在上述旧页面中，其状态、全局与逐群开关由侧栏「插件运行」页（`/plugin-runtimes`）管理，该页同时展示管理员意图、进程内实际状态和最近一次运行错误。这些插件的触发词与允许身份由代码持有，WebUI 只读展示，不接受修改；声明了小型配置的插件在同一页内联渲染标量表单，secret 为 write-only，留空表示保留现有值。小型配置只承载有限标量，会增长的结构化数据必须使用插件自有表与专属页面。
-
-## 8. 阶段验收
-
-提交前至少运行：
-
-```bash
+task setup
+task run
+task web-dev
 task lint
 task test
+task web-build
 task web-e2e
-git diff --check
+task migrate-up
+task migrate-down
 ```
 
-新增功能需覆盖正常、边界和错误路径。涉及 Action Client 时必须验证 `echo` 关联、超时、断连及事件处理期间的响应收包；涉及管理写操作时必须验证权限、事务、冲突检测和审计。
+新增或修改插件前必须阅读 `.agents/skills/plugin-development/SKILL.md`。完整架构与验收边界见 `docs/plugin-architecture-v2.md`，实现指南见 `docs/plugin-development.md`。
+
+提交前至少运行 `task lint`、`task test`、涉及 WebUI 时运行 `task web-build` 和 `task web-e2e`，并运行相关 race test 与 `git diff --check`。
+
+## 安全配置
+
+密钥仅写入未跟踪的 `.env`。部署必须设置 `DB_PASSWORD`、`NAPCAT_TOKEN`、至少 32 字节的 `JWT_SECRET`、至少 12 字符的 `WEBUI_PASSWORD` 和启用管理入口所需的 `SUPER_ADMIN_QQ`。生产环境不应长期使用 `LOG_LEVEL=debug`，原始事件可能包含聊天内容、QQ 标识和 URL。

@@ -22,7 +22,7 @@ type RuntimeStateStore interface {
 	UpdateDesiredEnabled(context.Context, management.Actor, string, bool, int64) (PersistedPluginState, error)
 	SetGroupEnabled(context.Context, management.Actor, string, int64, bool, int64) (PersistedGroupState, error)
 	FindConfig(context.Context, string) (PersistedPluginConfig, error)
-	SaveConfig(context.Context, management.Actor, string, json.RawMessage, int64) (PersistedPluginConfig, error)
+	SaveConfig(context.Context, management.Actor, string, ConfigSchema, json.RawMessage, int64) (PersistedPluginConfig, error)
 }
 
 var (
@@ -281,7 +281,7 @@ func (s *RuntimeService) SetConfig(ctx context.Context, actor management.Actor, 
 	if err := invokeConfigHook(ctx, spec.Config.Validate, normalized); err != nil {
 		return RuntimeConfigView{}, fmt.Errorf("%w: %v", ErrRuntimeConfigInvalid, err)
 	}
-	saved, err := s.store.SaveConfig(ctx, actor, pluginKey, normalized, expectedVersion)
+	saved, err := s.store.SaveConfig(ctx, actor, pluginKey, spec.Config.Schema, normalized, expectedVersion)
 	if err != nil {
 		return RuntimeConfigView{}, fmt.Errorf("保存插件 %s 配置: %w", pluginKey, err)
 	}
@@ -297,7 +297,7 @@ func (s *RuntimeService) compensateConfig(ctx context.Context, actor management.
 	// 补偿必须脱离调用方取消信号，否则请求超时会留下已写库但未生效的配置。
 	compensateContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), runtimeConfigCompensateTimeout)
 	defer cancel()
-	restored, err := s.store.SaveConfig(compensateContext, actor, spec.Key, previous.ConfigJSON, saved.Version)
+	restored, err := s.store.SaveConfig(compensateContext, actor, spec.Key, spec.Config.Schema, previous.ConfigJSON, saved.Version)
 	if err != nil {
 		return errors.Join(failure, fmt.Errorf("补偿插件 %s 配置: %w", spec.Key, err))
 	}

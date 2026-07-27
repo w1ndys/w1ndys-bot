@@ -396,7 +396,10 @@ func (p *implementation) currentLexicon() Lexicon {
 
 // reloadLexicon 从业务表重建词库并按当前配置重新发布检测引擎。
 // 读取或构造失败时保留旧词库与旧引擎，避免部分词库静默失效。
-func (p *implementation) reloadLexicon(ctx context.Context, raw json.RawMessage) error {
+func (p *implementation) reloadLexicon(ctx context.Context) error {
+	p.publicationMu.Lock()
+	defer p.publicationMu.Unlock()
+	raw := p.currentConfigJSON()
 	if p.lexiconStore == nil {
 		return errors.New("违禁词库仓库未初始化")
 	}
@@ -407,6 +410,17 @@ func (p *implementation) reloadLexicon(ctx context.Context, raw json.RawMessage)
 	next, err := buildRuntimeSnapshot(raw, loaded, p.httpClient)
 	if err != nil {
 		return fmt.Errorf("按新词库重建检测引擎: %w", err)
+	}
+	if currentOffsets := p.offsets.Load(); currentOffsets != nil {
+		negativeFeatures := map[string]struct{}{}
+		if currentNegative := p.negative.Load(); currentNegative != nil {
+			negativeFeatures = *currentNegative
+		}
+		adjusted, _, _, buildErr := buildSnapshotWithWeightOffsets(next, *currentOffsets, negativeFeatures)
+		if buildErr != nil {
+			return fmt.Errorf("按反馈偏移重建检测引擎: %w", buildErr)
+		}
+		next = adjusted
 	}
 	p.lexicon.Store(&loaded)
 	p.snapshot.Store(next)

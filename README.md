@@ -1,6 +1,6 @@
 # w1ndys-bot
 
-面向个人开发者的 QQ 机器人开发框架。它负责 NapCat OneBot 11 接入、命令路由、权限、持久化和 Web 管理，开发者只需在 Go 代码中实现自己的机器人功能。
+面向个人开发者的 QQ 机器人开发框架。它负责 NapCat OneBot 11 接入、插件运行门禁、身份授权、持久化和 Web 管理，开发者只需在 Go 代码中实现自己的机器人功能。
 
 > 本项目采用源码内置插件模式，不提供插件市场、动态安装或独立插件版本。插件与主程序一起编译、测试和发布。
 
@@ -16,20 +16,20 @@
 
 - NapCat OneBot 11 反向 WebSocket 接入与 Token 鉴权
 - 带超时和 `echo` 关联的类型化 OneBot Action Client
-- 基于 `Manifest + Factory` 的编译时插件注册与运行时启停
-- 全局/群级命令、角色/指定用户权限策略及热更新
-- 插件、触发词、权限、系统设置和审计日志管理 API
+- 基于 `PluginSpec` 的编译时插件目录、生命周期与运行时启停
+- 全局/群级 fail-closed 门禁和代码声明的群身份授权
+- 插件运行、专属业务、系统设置和审计日志管理 API
 - Vue 3 + TypeScript + Naive UI 管理界面，采用亮色曲奇棕主题
 - PostgreSQL 自动迁移、Docker Compose 编排和结构化日志
 
 ## 一条消息如何被处理
 
 ```text
-NapCat 事件 → WebSocket → 命令匹配 → 权限解析
-             → PluginManager → 插件 → OneBot API → NapCat
+NapCat 群事件 → WebSocket → EventDispatcher → 命令匹配
+               → 全局 Ready → 群 Enabled → 代码身份 → Handler
 ```
 
-插件通过代码中的 `Manifest` 声明名称、功能、默认命令和默认权限，通过 `Factory` 接收发送消息等运行依赖。运行状态、管理员调整后的命令、权限和系统设置保存在 PostgreSQL。服务启动时会自动迁移数据库、同步当前源码包含的插件，并打印插件清单。
+插件通过代码中的 `PluginSpec` 声明稳定 Key、触发词、作用域、允许身份及 Handler。PostgreSQL 保存管理员开关意图、标量配置、审计和插件业务数据；命令与权限不接受数据库覆盖。服务启动时自动迁移数据库并恢复插件运行状态。
 
 ## 环境要求
 
@@ -96,11 +96,11 @@ cp -R plugins/echo plugins/my_plugin
 
 然后完成三件事：
 
-1. 在插件文件顶部修改 `Manifest` 的名称、功能键、默认命令和默认权限。
-2. 在 `Handle` 中实现消息处理，并通过注入的 `Messenger` 调用 OneBot。
-3. 在 `cmd/bot/main.go` 中 blank import 插件包，使其编译进主程序。
+1. 定义稳定的 `PluginSpec`、命令 Key、触发词和 `AllowedRoles`。
+2. 在 Handler 中实现消息处理，并通过注入的 `Messenger` 调用 OneBot。
+3. 在 `cmd/bot/main.go` 中显式构造 Spec 并加入目录。
 
-执行 `task test` 和 `task compose-rebuild` 后，即可在 WebUI 中启用插件并调整命令与权限。完整接口、生命周期和测试要求见 [插件开发指南](docs/plugin-development.md)。
+执行 `task test` 和 `task compose-rebuild` 后，即可在 WebUI 中管理全局/群开关和配置。完整接口、生命周期和测试要求见 [插件开发指南](docs/plugin-development.md)。
 
 ## 本地开发
 
@@ -132,11 +132,10 @@ git diff --check
 ```text
 cmd/                         服务与迁移工具入口
 internal/admin/              管理服务、设置与审计
-internal/command/            命令注册和匹配
+internal/command/            纯命令规范化与参数提取
 internal/migration/          迁移执行器与版本化 SQL
 internal/onebot/             类型化 OneBot API
-internal/permission/         多级权限解析
-internal/plugin/             插件定义、同步与运行管理
+internal/plugin/             PluginSpec、分发、门禁和运行状态管理
 internal/webapi/             WebUI 认证与管理 API
 internal/ws/                 反向 WebSocket 和 Action Client
 pkg/logger/                  zap 日志封装
@@ -145,7 +144,7 @@ web/                         Vue 3 管理界面
 docs/                        架构与开发文档
 ```
 
-架构与开发进度见 [开发指南](docs/guide.md)，部署、备份和回滚见 [部署手册](docs/deployment.md)，版本变化见 [变更日志](CHANGELOG.md)。贡献前请阅读 [Repository Guidelines](AGENTS.md)。
+架构见 [开发指南](docs/guide.md)，部署与回滚见 [部署手册](docs/deployment.md)，维护者发布流程见 [发布手册](docs/release.md)，版本变化见 [变更日志](CHANGELOG.md)。贡献前请阅读 [Repository Guidelines](AGENTS.md)。
 
 ## 配置与安全
 
@@ -155,10 +154,10 @@ docs/                        架构与开发文档
 
 ## 贡献
 
-功能和修复应包含正常、边界与错误路径测试。提交信息使用中文 Conventional Commits，并同时包含 emoji 和颜文字：
+功能和修复应包含正常、边界与错误路径测试。提交信息使用中文 Conventional Commits，并包含符合改动含义的 emoji：
 
 ```text
-feat(插件管理): 🔌 (｡•̀ᴗ-)✧ 新增插件优先级调整
+feat(插件运行): 🔌 新增插件群开关
 ```
 
 Pull Request 请说明目的、主要改动、验证命令并关联 issue；界面改动附截图，配置或兼容性变化说明迁移步骤。

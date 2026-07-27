@@ -15,7 +15,7 @@
 
 本仓库是 Go 1.26 编写的 NapCat OneBot 11 机器人，使用 PostgreSQL 持久化配置，并提供 Vue 3 + TypeScript 管理界面。`cmd/bot/` 是服务入口，`cmd/migrate/` 是迁移工具；核心实现位于 `internal/`（WebSocket、OneBot API、插件、命令、权限、管理 API 与数据库），可复用日志包位于 `pkg/logger/`，内置插件位于 `plugins/`。前端源码和依赖清单位于 `web/`，版本化 SQL 位于 `internal/migration/migrations/`，设计说明位于 `docs/guide.md`。Go 测试与实现同目录，文件名使用 `*_test.go`。
 
-事件链路为：NapCat → 反向 WebSocket → 命令与权限解析 → PluginManager → 插件 → OneBot Action Client。修改并发收包、`echo` 响应关联、权限优先级或插件 Manifest 同步时，应先阅读 `docs/guide.md`。
+事件链路为：NapCat → 反向 WebSocket → EventDispatcher → 全局/群门禁 → 代码身份授权 → 插件 → OneBot Action Client。修改并发收包、`echo` 响应关联、身份解析、门禁或插件生命周期时，应先阅读 `docs/guide.md`。
 
 ## 构建、测试与本地开发
 
@@ -41,7 +41,7 @@ WebUI 的成功、失败、警告和操作结果反馈必须统一使用应用�
 
 ## AI 辅助编程强制规范
 
-开发或评审插件、插件配置、插件业务数据 CRUD、通用管理 API 或 WebUI 时，必须先使用项目 Skill：`.agents/skills/plugin-development/SKILL.md`。详细的声明式配置与通用资源架构位于该 Skill 的 `references/architecture.md`。
+开发或评审插件、插件配置、插件业务数据 CRUD、管理 API 或 WebUI 时，必须先使用项目 Skill：`.agents/skills/plugin-development/SKILL.md`。详细架构位于该 Skill 的 `references/architecture.md`。
 
 AI 新增或修改代码时，应优先保持代码简洁、清晰，并遵循项目现有风格：
 

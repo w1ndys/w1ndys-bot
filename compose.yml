@@ -21,7 +21,7 @@ services:
 
   bot:
     container_name: w1ndys-bot
-    image: w1ndys-bot:latest
+    image: ${BOT_IMAGE:-ghcr.io/w1ndys/w1ndys-bot:latest}
     build:
       context: .
       dockerfile: Dockerfile

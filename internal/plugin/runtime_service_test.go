@@ -43,7 +43,7 @@ func (s *runtimeServiceStore) FindConfig(_ context.Context, pluginKey string) (P
 	return config, nil
 }
 
-func (s *runtimeServiceStore) SaveConfig(_ context.Context, actor management.Actor, pluginKey string, configJSON json.RawMessage, expectedVersion int64) (PersistedPluginConfig, error) {
+func (s *runtimeServiceStore) SaveConfig(_ context.Context, actor management.Actor, pluginKey string, _ ConfigSchema, configJSON json.RawMessage, expectedVersion int64) (PersistedPluginConfig, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.events = append(s.events, "persist-config")

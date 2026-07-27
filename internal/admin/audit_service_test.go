@@ -13,7 +13,7 @@ import (
 // @returns 无。
 // ⚠️副作用说明：执行内存替身并可能终止当前测试。
 func TestListAuditLogsValidatesPaginationAndTimeRange(t *testing.T) {
-	service := NewService(&fakeRepository{}, nil, nil, nil, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
+	service := NewService(&fakeRepository{}, nil, &fakeAuthorizer{allowed: map[string]bool{"100": true}})
 	_, err := service.ListAuditLogs(context.Background(), Actor{ID: "100", Channel: ChannelWebUI}, AuditQuery{Page: 1, PageSize: 201})
 	// [决策理由] 超过单页上限必须返回稳定参数错误。
 	if !errors.Is(err, ErrInvalidAuditQuery) {
@@ -37,7 +37,7 @@ func TestListAuditLogsValidatesPaginationAndTimeRange(t *testing.T) {
 // @returns 无。
 // ⚠️副作用说明：执行内存授权替身并可能终止当前测试。
 func TestGetAuditLogRequiresSuperAdmin(t *testing.T) {
-	service := NewService(&fakeRepository{}, nil, nil, nil, nil, &fakeAuthorizer{})
+	service := NewService(&fakeRepository{}, nil, &fakeAuthorizer{})
 	_, err := service.GetAuditLog(context.Background(), Actor{ID: "200", Channel: ChannelWebUI}, 8)
 	// [决策理由] 非最高管理员必须被统一授权层拒绝。
 	if !errors.Is(err, ErrForbidden) {

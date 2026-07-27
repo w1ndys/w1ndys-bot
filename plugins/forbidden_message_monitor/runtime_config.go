@@ -102,6 +102,8 @@ func (p *implementation) ValidateConfig(ctx context.Context, raw json.RawMessage
 // @returns 取消或配置构造错误。
 // ⚠️副作用说明：成功时替换后续群消息读取的运行快照；不立即访问外部服务。
 func (p *implementation) ApplyConfig(ctx context.Context, raw json.RawMessage) error {
+	p.publicationMu.Lock()
+	defer p.publicationMu.Unlock()
 	// [决策理由] 调用方取消后不得发布已经放弃的配置。
 	if err := ctx.Err(); err != nil {
 		return err

@@ -54,7 +54,7 @@ func (f *fakeKeywordReply) DeleteRule(_ context.Context, actor management.Actor,
 func newKeywordTestServer(t *testing.T, rules *fakeKeywordReply) (*Server, string) {
 	t.Helper()
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{"100": {UserID: "100", Enabled: true}}}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, &fakeRuntimeStates{}, rules)
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, &fakeRuntimeStates{}, rules, &fakeForbiddenMonitor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestKeywordRuleRoutesRequireAuthentication(t *testing.T) {
 
 func TestNewRejectsMissingKeywordReplyController(t *testing.T) {
 	admins := &fakeAdmins{accounts: map[string]admin.SystemAdmin{}}
-	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, &fakeRuntimeStates{}, nil)
+	server, err := New("correct-horse-battery-staple", strings.Repeat("s", 32), admins, &fakePlugins{}, &fakeRuntimeStates{}, nil, &fakeForbiddenMonitor{})
 	if server != nil || err == nil {
 		t.Fatalf("New() = %v,%v", server, err)
 	}

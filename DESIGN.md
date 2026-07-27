@@ -1,4 +1,7 @@
-## Project Understanding
+> [!WARNING]
+> 本文件是旧插件工作台的历史界面设计稿，其中 Manifest、可编辑命令/权限和通用插件工作台已被移除，不再代表当前产品。当前架构与界面以 `docs/plugin-architecture-v2.md`、`docs/guide.md` 和实际 WebUI 为准。
+
+## Project Understanding（历史）
 
 ### 业务理解
 

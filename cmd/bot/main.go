@@ -13,18 +13,16 @@ import (
 	"time"
 
 	"github.com/w1ndys/w1ndys-bot/internal/admin"
-	commandregistry "github.com/w1ndys/w1ndys-bot/internal/command"
 	"github.com/w1ndys/w1ndys-bot/internal/config"
 	"github.com/w1ndys/w1ndys-bot/internal/db"
 	"github.com/w1ndys/w1ndys-bot/internal/migration"
 	"github.com/w1ndys/w1ndys-bot/internal/onebot"
-	"github.com/w1ndys/w1ndys-bot/internal/permission"
 	"github.com/w1ndys/w1ndys-bot/internal/plugin"
 	"github.com/w1ndys/w1ndys-bot/internal/webapi"
 	"github.com/w1ndys/w1ndys-bot/internal/webui"
 	"github.com/w1ndys/w1ndys-bot/internal/ws"
 	projectlogger "github.com/w1ndys/w1ndys-bot/pkg/logger"
-	_ "github.com/w1ndys/w1ndys-bot/plugins/admin"
+	adminplugin "github.com/w1ndys/w1ndys-bot/plugins/admin"
 	"github.com/w1ndys/w1ndys-bot/plugins/echo"
 	forbiddenmonitor "github.com/w1ndys/w1ndys-bot/plugins/forbidden_message_monitor"
 	keywordreply "github.com/w1ndys/w1ndys-bot/plugins/keyword_reply"
@@ -72,26 +70,6 @@ func main() {
 		projectlogger.Error("执行数据库迁移失败", "error", err)
 		return
 	}
-	registrations := plugin.Registrations()
-	logSupportedPlugins(registrations)
-	pluginSynchronizer := plugin.NewSynchronizer(pool)
-	// [决策理由] 插件定义必须在加载运行状态前与当前二进制 Manifest 保持一致。
-	if err := pluginSynchronizer.Sync(ctx, plugin.Manifests()); err != nil {
-		projectlogger.Error("同步插件元数据失败", "error", err)
-		return
-	}
-	commands := commandregistry.NewRegistry(pool)
-	// [决策理由] 启动时发布完整命令快照，后续消息路由无需逐条查询数据库。
-	if err := commands.Load(ctx); err != nil {
-		projectlogger.Error("加载命令注册表失败", "error", err)
-		return
-	}
-	permissions := permission.NewResolver(pool)
-	// [决策理由] 启动时发布完整权限快照，为后续命令路由提供无数据库查询的判断能力。
-	if err := permissions.Load(ctx); err != nil {
-		projectlogger.Error("加载权限策略失败", "error", err)
-		return
-	}
 	adminRepository := admin.NewPostgresRepository(pool)
 	// [决策理由] 空配置允许纯事件模式启动，但需要明确提示所有管理入口均不可用。
 	if cfg.SuperAdminQQ == "" {
@@ -104,66 +82,29 @@ func main() {
 		projectlogger.Error("加载系统设置失败", "error", err)
 		return
 	}
-	pluginManager := plugin.NewManager(plugin.NewPostgresStore(pool), plugin.NewPostgresGroupGate(pool))
-	adminService := admin.NewService(adminRepository, pluginManager, commands, permissions, settingsResolver, adminResolver)
+	adminService := admin.NewService(adminRepository, settingsResolver, adminResolver)
 	// [决策理由] 目标架构入口依赖只能在 botAPI 就绪后构建，但 WS 回调必须更早注册；监听开始前完成赋值，回调不会读到 nil。
 	var targetDispatcher *plugin.EventDispatcher
+	var emergencyHandler *adminplugin.EmergencyHandler
 	wsServer := ws.NewServer(cfg.NapCatToken, func(_ context.Context, event ws.Event) error {
 		logEvent(event)
 		message, isMessage := event.(*ws.MessageEvent)
-		// [决策理由] 目标架构插件只接收群消息和群事件，私聊仍由旧链路承担 QQ 管理入口。
+		if isMessage && emergencyHandler != nil && adminResolver.IsSuperAdmin(strconv.FormatInt(message.UserID, 10)) {
+			matched, emergencyErr := emergencyHandler.Handle(ctx, message, settingsResolver.CommandPrefix())
+			if matched {
+				return emergencyErr
+			}
+		}
 		if targetDispatcher != nil && (!isMessage || message.MessageType == "group") {
 			result, dispatchErr := targetDispatcher.Dispatch(ctx, event)
-			// [决策理由] 命中目标架构命令后不再进入旧链路，避免同一消息被两套体系重复处理。
 			if result.CommandMatched {
 				return targetCommandError(dispatchErr)
 			}
-			// [决策理由] 观察器失败不应阻断旧链路对同一事件的处理。
 			if dispatchErr != nil {
 				projectlogger.Error("目标插件观察链处理事件失败", "error", dispatchErr)
 			}
 		}
-		// [决策理由] 只有消息事件参与命令匹配，其他事件继续广播给观察型插件。
-		if !isMessage {
-			return pluginManager.Handle(ctx, event)
-		}
-		binding, matched := commands.Resolve(strconv.FormatInt(message.GroupID, 10), message.RawMessage, settingsResolver.CommandPrefix())
-		// [决策理由] 未匹配命令的消息仍可由观察型插件处理。
-		if !matched {
-			return pluginManager.Handle(ctx, event)
-		}
-		defaults, found := featureDefaults(registrations, binding.PluginName, binding.FeatureKey)
-		// [决策理由] 命令指向当前二进制不存在的功能时拒绝执行，避免陈旧数据库映射。
-		if !found {
-			return fmt.Errorf("命令目标 %s 不存在", binding.Target())
-		}
-		allowed, routeErr := pluginManager.RouteAllowed(binding.PluginName, event)
-		// [决策理由] 命令在权限解析前统一执行全局状态和群策略预检，保持全局→群→权限→处理顺序。
-		if routeErr != nil {
-			return routeErr
-		}
-		// [决策理由] 群策略关闭是安静忽略命令，不进入身份与权限计算。
-		if !allowed {
-			return nil
-		}
-		role := messageRole(message)
-		// [决策理由] NapCat 群角色不包含系统最高管理员，必须用服务端身份快照提升对应 QQ 权限角色。
-		if adminResolver.IsSuperAdmin(strconv.FormatInt(message.UserID, 10)) {
-			role = permission.RoleSuperAdmin
-		}
-		// [决策理由] 权限拒绝时不得调用插件实现。
-		if !permissions.Allowed(strconv.FormatInt(message.GroupID, 10), binding.PluginName, binding.FeatureKey, strconv.FormatInt(message.UserID, 10), role, defaults) {
-			projectlogger.Warn("命令权限不足", "target", binding.Target(), "user_id", message.UserID, "role", role)
-			return nil
-		}
-		arguments := commandregistry.ExtractArguments(message.RawMessage, settingsResolver.CommandPrefix(), binding.NormalizedCommand)
-		routedContext := plugin.WithInvocation(ctx, plugin.Invocation{FeatureKey: binding.FeatureKey, Command: binding.Command, Arguments: arguments})
-		handleErr := pluginManager.HandleNamed(routedContext, binding.PluginName, event)
-
-		// >>> 数据演变示例
-		// 1. /echo Hello -> Command Binding -> Invocation{echo,Hello} -> echo.HandleNamed。
-		// 2. 未匹配消息 -> PluginManager 广播给观察型插件。
-		return handleErr
+		return nil
 	})
 	botAPI := onebot.New(wsServer.Actions())
 	echoSpec, err := echo.Spec(botAPI)
@@ -195,6 +136,10 @@ func main() {
 	// [决策理由] 缺少运行控制器时命令无法通过 Ready 与群门禁，禁止降级运行。
 	if err != nil {
 		projectlogger.Error("构建插件运行控制器失败", "error", err)
+		return
+	}
+	if err := forbiddenMonitorService.BindRuntimeController(runtimeController); err != nil {
+		projectlogger.Error("绑定违禁消息监控运行门禁失败", "error", err)
 		return
 	}
 	runtimeStateRepository, err := plugin.NewPostgresRuntimeStateRepository(pool)
@@ -245,28 +190,15 @@ func main() {
 		projectlogger.Error("构建插件开关服务失败", "error", err)
 		return
 	}
-	webServer, err := webapi.New(cfg.WebUIPassword, cfg.JWTSecret, adminResolver, adminService, runtimeService, keywordReplyService)
+	emergencyHandler, err = adminplugin.NewEmergencyHandler(botAPI, runtimeService)
+	if err != nil {
+		projectlogger.Error("构建 QQ 应急管理入口失败", "error", err)
+		return
+	}
+	webServer, err := webapi.New(cfg.WebUIPassword, cfg.JWTSecret, adminResolver, adminService, runtimeService, keywordReplyService, forbiddenMonitorService)
 	// [决策理由] WebUI 认证配置不安全时不得开放包含管理能力的 HTTP 服务。
 	if err != nil {
 		projectlogger.Error("初始化WebAPI失败", "error", err)
-		return
-	}
-	for _, registration := range registrations {
-		implementation, err := registration.New(plugin.Runtime{Messenger: botAPI, Actions: botAPI, Management: adminService, Database: pool})
-		// [决策理由] 工厂失败或返回错误实现时该插件不能进入运行路由。
-		if err != nil {
-			projectlogger.Error("创建插件运行实例失败", "plugin", registration.Manifest.Name, "error", err)
-			return
-		}
-		// [决策理由] Manager 注册再次校验运行实例名称和重复项。
-		if err := pluginManager.Register(implementation); err != nil {
-			projectlogger.Error("注册插件运行实例失败", "plugin", registration.Manifest.Name, "error", err)
-			return
-		}
-	}
-	// [决策理由] 所有实例注册完成后再应用数据库启用状态和优先级。
-	if err := pluginManager.Load(ctx); err != nil {
-		projectlogger.Error("加载插件状态失败", "error", err)
 		return
 	}
 	rootMux := http.NewServeMux()
@@ -306,6 +238,11 @@ func main() {
 	// [决策理由] 收到退出信号后停止接受新连接，并等待活跃请求结束。
 	if err := httpServer.Shutdown(context.Background()); err != nil {
 		projectlogger.Error("关闭 WebSocket 服务失败", "error", err)
+	}
+	pluginShutdownContext, cancelPluginShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelPluginShutdown()
+	if err := runtimeBootstrap.Shutdown(pluginShutdownContext); err != nil {
+		projectlogger.Error("关闭插件运行时失败", "error", err)
 	}
 	projectlogger.Info("基础框架正在关闭")
 
@@ -391,84 +328,6 @@ func logTargetPlugins(catalog *plugin.SpecCatalog) {
 	// >>> 数据演变示例
 	// 1. [echo{1命令}] -> plugin_count=1 -> 输出触发词与允许身份。
 	// 2. 空目录 -> plugin_count=0 -> 不输出插件明细。
-}
-
-// logSupportedPlugins 输出当前二进制编译包含的插件及功能元数据。
-// @param registrations：按插件名排序的编译时插件注册快照。
-// @returns 无。
-// ⚠️副作用说明：向标准日志写入插件名称、优先级、系统标记、描述和功能元数据。
-func logSupportedPlugins(registrations []plugin.Registration) {
-	projectlogger.Info("已发现当前支持的插件", "plugin_count", len(registrations))
-	for _, registration := range registrations {
-		manifest := registration.Manifest
-		features := make([]map[string]any, 0, len(manifest.Features))
-		for _, feature := range manifest.Features {
-			features = append(features, map[string]any{
-				"key":                 feature.Key,
-				"display_name":        feature.DisplayName,
-				"description":         feature.Description,
-				"default_commands":    feature.DefaultCommands,
-				"default_permissions": feature.DefaultPermissions,
-			})
-		}
-		projectlogger.Info("当前支持插件",
-			"plugin", manifest.Name,
-			"display_name", manifest.DisplayName,
-			"description", manifest.Description,
-			"priority", manifest.Priority,
-			"system", manifest.System,
-			"feature_count", len(features),
-			"features", features,
-		)
-	}
-
-	// >>> 数据演变示例
-	// 1. [admin{3项功能},echo{1项功能}] -> 汇总 plugin_count=2 -> 分别输出两条完整插件日志。
-	// 2. [] -> 汇总 plugin_count=0 -> 不输出插件明细。
-}
-
-// featureDefaults 查找功能 Manifest 并转换默认权限。
-// @param registrations：插件注册快照；pluginName：插件名；featureKey：功能键。
-// @returns 权限默认值及是否找到。
-// ⚠️副作用说明：无。
-func featureDefaults(registrations []plugin.Registration, pluginName string, featureKey string) (permission.Defaults, bool) {
-	for _, registration := range registrations {
-		// [决策理由] 仅在目标插件内查找功能，避免不同插件同名 feature_key 混淆。
-		if registration.Manifest.Name != pluginName {
-			continue
-		}
-		for _, feature := range registration.Manifest.Features {
-			// [决策理由] 找到稳定功能键后立即转换并返回对应默认权限。
-			if feature.Key == featureKey {
-				value := feature.DefaultPermissions
-				return permission.Defaults{SuperAdmin: value.SuperAdmin, GroupOwner: value.GroupOwner, GroupAdmin: value.GroupAdmin, Member: value.Member}, true
-			}
-		}
-	}
-
-	// >>> 数据演变示例
-	// 1. echo.echo -> Manifest Feature -> Defaults,true。
-	// 2. removed.missing -> 无匹配 -> 零值,false。
-	return permission.Defaults{}, false
-}
-
-// messageRole 将 NapCat 群角色转换为权限角色。
-// @param event：消息事件。
-// @returns owner/admin/member 对应权限角色；私聊和未知角色按 member 处理。
-// ⚠️副作用说明：无。
-func messageRole(event *ws.MessageEvent) permission.Role {
-	switch event.Sender.Role {
-	case "owner":
-		return permission.RoleGroupOwner
-	case "admin":
-		return permission.RoleGroupAdmin
-	default:
-		return permission.RoleMember
-	}
-
-	// >>> 数据演变示例
-	// 1. sender.role=owner -> RoleGroupOwner。
-	// 2. private sender.role="" -> RoleMember。
 }
 
 // logEvent 按强类型事件输出其专属关键字段。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -131,6 +132,36 @@ func TestRuntimeBootstrapCleansEnabledPluginsAfterLifecycleFailure(t *testing.T)
 	}
 	if first.disableCalls != 1 || second.disableCalls != 1 {
 		t.Fatalf("cleanup calls first=%d second=%d", first.disableCalls, second.disableCalls)
+	}
+	for _, key := range []string{"first", "second"} {
+		state, _ := controller.State(key)
+		if state.Status != RuntimeDisabled {
+			t.Fatalf("%s State() = %+v", key, state)
+		}
+	}
+}
+
+func TestRuntimeBootstrapShutdownDisablesReadyPlugins(t *testing.T) {
+	order := make([]string, 0, 4)
+	first := &orderedBootstrapLifecycle{record: func(action string) { order = append(order, "first:"+action) }}
+	second := &orderedBootstrapLifecycle{record: func(action string) { order = append(order, "second:"+action) }}
+	repository := &runtimeBootstrapRepository{states: []PersistedPluginState{
+		{PluginKey: "first", DesiredEnabled: true},
+		{PluginKey: "second", DesiredEnabled: true},
+	}}
+	bootstrap, controller := newRuntimeBootstrapTestSubject(t, repository,
+		runtimeBootstrapSpec("first", "first", first),
+		runtimeBootstrapSpec("second", "second", second),
+	)
+	if err := bootstrap.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := bootstrap.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantOrder := []string{"first:enable", "second:enable", "second:disable", "first:disable"}
+	if !reflect.DeepEqual(order, wantOrder) {
+		t.Fatalf("lifecycle order = %#v, want %#v", order, wantOrder)
 	}
 	for _, key := range []string{"first", "second"} {
 		state, _ := controller.State(key)

@@ -1,8 +1,9 @@
-// 📌 影响范围：纯内存验证群内违禁消息监控插件的Manifest、Factory、生命周期与空处理行为；不访问外部服务。
+// 📌 影响范围：纯内存验证群内违禁消息监控插件的规格、依赖、生命周期与空处理行为；不访问外部服务。
 package forbiddenmessagemonitor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -172,23 +173,91 @@ func TestSpecContract(t *testing.T) {
 	}
 }
 
-// TestFactoryAndName 验证Factory依赖边界和稳定名称。
+func newManagementRuntime(t *testing.T) *plugin.RuntimeController {
+	t.Helper()
+	catalog, err := plugin.NewSpecCatalog([]plugin.PluginSpec{{
+		Key: pluginKey, DisplayName: "违禁监控", Description: "测试运行门禁",
+		Observers: []plugin.ObserverSpec{{Key: "test", Description: "测试观察入口", EventKinds: []plugin.ObserverEventKind{plugin.ObserverGroupMessage}, Handler: func(plugin.ObserverContext) error { return nil }}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := plugin.NewRuntimeController(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return controller
+}
+
+func TestManagementLiveOperationsRequireRuntimeAdmission(t *testing.T) {
+	instance := testImplementation()
+	repository := instance.repository.(*fakeMonitorRepository)
+	repository.stored = storedViolation{ID: 7, Version: 1, Data: violationData{GroupID: 100, UserID: 200, Status: statusPendingReview, ActionResult: json.RawMessage(`{"ban_succeeded":false}`)}}
+	repository.record = management.ResourceRecord{ID: 7, Version: 2, Data: json.RawMessage(`{"status":"confirmed_pending_kick"}`)}
+	service := &Service{implementation: instance, authorizer: staticAuthorizer{}}
+	controller := newManagementRuntime(t)
+	if err := service.BindRuntimeController(controller); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.RunTextTrial(context.Background(), management.Actor{}, "测试"); !errors.Is(err, ErrRuntimeUnavailable) {
+		t.Fatalf("disabled trial error = %v", err)
+	}
+	if _, err := service.ReviewViolation(context.Background(), management.Actor{}, 7, 1, "确认"); !errors.Is(err, ErrRuntimeUnavailable) {
+		t.Fatalf("disabled review error = %v", err)
+	}
+	if err := controller.Enable(context.Background(), pluginKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RunTextTrial(context.Background(), management.Actor{}, "测试"); err != nil {
+		t.Fatalf("ready trial error = %v", err)
+	}
+	if _, err := service.ReviewViolation(context.Background(), management.Actor{}, 7, 1, "确认"); !errors.Is(err, ErrRuntimeUnavailable) {
+		t.Fatalf("closed group review error = %v", err)
+	}
+	if err := controller.SetGroupEnabled(pluginKey, 100, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReviewViolation(context.Background(), management.Actor{}, 7, 1, "确认"); err != nil {
+		t.Fatalf("enabled group review error = %v", err)
+	}
+}
+
+func TestRefreshLexiconFailureFailsRuntimeClosed(t *testing.T) {
+	instance := testImplementation()
+	instance.lexiconStore = staticLexicon{err: errors.New("load failed")}
+	service := &Service{implementation: instance, authorizer: staticAuthorizer{}}
+	controller := newManagementRuntime(t)
+	if err := service.BindRuntimeController(controller); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Enable(context.Background(), pluginKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.refreshLexicon(context.Background()); err == nil {
+		t.Fatal("refreshLexicon() error = nil")
+	}
+	state, ok := controller.State(pluginKey)
+	if !ok || state.Status != plugin.RuntimeDisabled {
+		t.Fatalf("runtime state = %+v,%v", state, ok)
+	}
+}
+
+// TestConstructorDependencies 验证构造依赖边界。
 // @param t：Go测试上下文。
 // @returns 无。
 // ⚠️副作用说明：仅分配内存实例。
-func TestFactoryAndName(t *testing.T) {
+func TestConstructorDependencies(t *testing.T) {
 	_, err := newImplementation(nil, nil)
 	// [决策理由] 自动处置插件缺少Action和数据库时必须拒绝启动。
 	if err == nil {
 		t.Fatal("newImplementation() missing dependencies error=nil")
 	}
 	instance, err := newImplementation(&fakeActions{}, &pgxpool.Pool{})
-	// [决策理由] Factory成功时必须返回可注册的非空实现。
+	// [决策理由] 构造成功时必须返回可注册的非空实现。
 	if err != nil || instance == nil {
 		t.Fatalf("newImplementation() instance/error = %v/%v", instance, err)
 	}
-	// [决策理由] 运行实例名称必须与Manifest一致，Manager才能注册实例。
-
 	// >>> 数据演变示例
 	// 1. Runtime{} -> 缺依赖错误。
 	// 2. Runtime{Actions,Database} -> implementation且Name匹配。
@@ -413,6 +482,30 @@ func TestPublishWeightOffsetsKeepsHardKeywordWithoutNegativeEvidence(t *testing.
 	// >>> 数据演变示例
 	// 1. hard词+learned10+无误报 -> 保留hard拦截。
 	// 2. minimum30+发布学习权重 -> 新快照仍保持minimum30。
+}
+
+func TestReloadLexiconPreservesNegativeFeedback(t *testing.T) {
+	instance := testImplementation()
+	lexicon := Lexicon{Hard: []string{"内部渠道"}}
+	instance.lexiconStore = staticLexicon{lexicon: lexicon}
+	instance.lexicon.Store(&lexicon)
+	snapshot, err := buildRuntimeSnapshot(instance.currentConfigJSON(), lexicon, instance.httpClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance.snapshot.Store(snapshot)
+	if err := instance.publishWeightOffsets(map[string]float64{"内部渠道": -10}, map[string]struct{}{"内部渠道": {}}); err != nil {
+		t.Fatal(err)
+	}
+	if instance.snapshot.Load().engine.CheckExactText("内部渠道").Blocked {
+		t.Fatal("negative feedback did not suppress hard keyword")
+	}
+	if err := instance.reloadLexicon(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if instance.snapshot.Load().engine.CheckExactText("内部渠道").Blocked {
+		t.Fatal("reloadLexicon() dropped negative feedback")
+	}
 }
 
 // TestHandleExactViolationModeratesAndRecords 验证精准规则执行禁言、筛选撤回和审计。

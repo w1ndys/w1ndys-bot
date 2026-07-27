@@ -99,9 +99,6 @@ async function mockRuntimeWrites(page: Page, options: { failGlobal?: boolean } =
     const path = new URL(request.url()).pathname
     const method = request.method()
     switch (`${method} ${path}`) {
-      case 'GET /api/plugins':
-        await fulfill(route, [])
-        break
       case 'GET /api/plugin-runtimes':
         await fulfill(route, [state])
         break
@@ -204,9 +201,6 @@ async function mockRuntimeConfig(page: Page): Promise<void> {
     const path = new URL(request.url()).pathname
     const method = request.method()
     switch (`${method} ${path}`) {
-      case 'GET /api/plugins':
-        await fulfill(route, [])
-        break
       case 'GET /api/plugin-runtimes':
         await fulfill(route, [state])
         break

@@ -48,10 +48,6 @@ async function mockKeywordRules(page: Page): Promise<void> {
     const url = new URL(request.url())
     const path = url.pathname
     const method = request.method()
-    if (path === '/api/plugins') {
-      await fulfill(route, [])
-      return
-    }
     // 群作用域必须出现在路径里，避免请求体覆盖群号造成跨群写入。
     const listMatch = path.match(/^\/api\/plugins\/keyword_reply\/groups\/(\d+)\/rules$/)
     if (listMatch !== null && method === 'GET') {
@@ -133,8 +129,7 @@ async function testRuleLifecycleIsGroupScoped({ page }: { page: Page }): Promise
 // ⚠️副作用说明：操作测试页面。
 async function testUnknownPageKeyIsRejected({ page }: { page: Page }): Promise<void> {
   await seedSession(page)
-  await page.route('**/api/plugins', async (route) => fulfill(route, []))
-  await page.goto('/plugin-pages/not_registered')
+	await page.goto('/plugin-pages/not_registered')
   await expect(page.getByText('当前版本没有这个插件页面')).toBeVisible()
 
   // >>> 数据演变示例

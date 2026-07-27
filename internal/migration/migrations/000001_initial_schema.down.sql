@@ -1,0 +1,19 @@
+-- 按依赖关系逆序删除初始数据库结构及其中全部数据。
+DROP TABLE IF EXISTS forbidden_monitor_combinations;
+DROP TABLE IF EXISTS forbidden_monitor_terms;
+DROP TABLE IF EXISTS forbidden_monitor_candidate_training_evidence;
+DROP TABLE IF EXISTS forbidden_monitor_training_samples;
+DROP TABLE IF EXISTS forbidden_monitor_llm_usage_daily;
+DROP TABLE IF EXISTS forbidden_monitor_candidate_evidence;
+DROP TABLE IF EXISTS forbidden_monitor_risk_candidates;
+DROP TABLE IF EXISTS forbidden_monitor_weight_offsets;
+DROP TABLE IF EXISTS forbidden_monitor_feedback_samples;
+DROP TABLE IF EXISTS forbidden_monitor_violation_audits;
+DROP TABLE IF EXISTS forbidden_monitor_whitelist;
+DROP TABLE IF EXISTS forbidden_monitor_daily_speech_counts;
+DROP TABLE IF EXISTS keyword_reply_rules;
+DROP TABLE IF EXISTS plugin_runtime_configs;
+DROP TABLE IF EXISTS plugin_group_states;
+DROP TABLE IF EXISTS plugin_states;
+DROP TABLE IF EXISTS admin_audit_logs;
+DROP TABLE IF EXISTS system_settings;

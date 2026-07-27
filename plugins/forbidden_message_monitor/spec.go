@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -47,7 +49,11 @@ type Service struct {
 	implementation *implementation
 	lexicon        *lexiconRepository
 	authorizer     plugin.RuntimeAuthorizer
+	runtime        *plugin.RuntimeController
+	lexiconMu      sync.Mutex
 }
+
+var ErrRuntimeUnavailable = errors.New("违禁消息监控当前未启用")
 
 // New 创建违禁监控服务。
 func New(actions plugin.ActionAPI, pool *pgxpool.Pool, authorizer plugin.RuntimeAuthorizer) (*Service, error) {
@@ -90,6 +96,15 @@ func (s *Service) Spec() plugin.PluginSpec {
 	}
 }
 
+// BindRuntimeController 绑定平台运行门禁；必须在开放管理 API 前完成。
+func (s *Service) BindRuntimeController(controller *plugin.RuntimeController) error {
+	if controller == nil {
+		return errors.New("违禁消息监控缺少运行控制器")
+	}
+	s.runtime = controller
+	return nil
+}
+
 // observe 处理已通过全局与群门禁的群消息和群通知。
 func (s *Service) observe(observed plugin.ObserverContext) error {
 	switch typed := observed.Event.(type) {
@@ -125,6 +140,15 @@ func (s *Service) ReviewViolation(ctx context.Context, actor management.Actor, i
 	if id < 1 || expectedVersion < 1 {
 		return Record{}, fmt.Errorf("%w: 记录 ID 与版本必须为正数", ErrInvalidInput)
 	}
+	current, err := s.implementation.repository.GetViolation(ctx, id)
+	if err != nil {
+		return Record{}, err
+	}
+	admission, ok := s.runtimeAdmission(current.Data.GroupID)
+	if !ok {
+		return Record{}, ErrRuntimeUnavailable
+	}
+	defer admission.Release()
 	payload, err := json.Marshal(map[string]string{"status": status})
 	if err != nil {
 		return Record{}, fmt.Errorf("%w: 无法编码复核结论", ErrInvalidInput)
@@ -142,6 +166,11 @@ func (s *Service) RunTextTrial(ctx context.Context, actor management.Actor, text
 	if err := s.authorizer.Authorize(actor); err != nil {
 		return Record{}, err
 	}
+	admission, ok := s.runtimeAdmission(0)
+	if !ok {
+		return Record{}, ErrRuntimeUnavailable
+	}
+	defer admission.Release()
 	payload, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {
 		return Record{}, fmt.Errorf("%w: 无法编码试判文本", ErrInvalidInput)
@@ -152,6 +181,21 @@ func (s *Service) RunTextTrial(ctx context.Context, actor management.Actor, text
 		return Record{}, err
 	}
 	return Record{ID: record.ID, Version: record.Version, Data: record.Data}, nil
+}
+
+func (s *Service) runtimeAdmission(groupID int64) (plugin.Admission, bool) {
+	if s.runtime == nil {
+		return nil, false
+	}
+	admission, ok := s.runtime.Admit(pluginKey)
+	if !ok {
+		return nil, false
+	}
+	if groupID > 0 && !admission.GroupEnabled(groupID) {
+		admission.Release()
+		return nil, false
+	}
+	return admission, true
 }
 
 // ListTrainingSamples 分页读取管理员主动投喂的违规正例。
@@ -226,6 +270,8 @@ func (s *Service) ListTerms(ctx context.Context, actor management.Actor, kind st
 
 // CreateTerm 新增词条并按新词库重建检测引擎。
 func (s *Service) CreateTerm(ctx context.Context, actor management.Actor, input TermInput) (Term, error) {
+	s.lexiconMu.Lock()
+	defer s.lexiconMu.Unlock()
 	normalized, err := s.prepareTerm(actor, input)
 	if err != nil {
 		return Term{}, err
@@ -239,6 +285,8 @@ func (s *Service) CreateTerm(ctx context.Context, actor management.Actor, input 
 
 // UpdateTerm 按乐观锁更新词条并按新词库重建检测引擎。
 func (s *Service) UpdateTerm(ctx context.Context, actor management.Actor, id, expectedVersion int64, input TermInput) (Term, error) {
+	s.lexiconMu.Lock()
+	defer s.lexiconMu.Unlock()
 	normalized, err := s.prepareTerm(actor, input)
 	if err != nil {
 		return Term{}, err
@@ -255,6 +303,8 @@ func (s *Service) UpdateTerm(ctx context.Context, actor management.Actor, id, ex
 
 // DeleteTerm 按乐观锁删除词条并按新词库重建检测引擎。
 func (s *Service) DeleteTerm(ctx context.Context, actor management.Actor, id, expectedVersion int64) error {
+	s.lexiconMu.Lock()
+	defer s.lexiconMu.Unlock()
 	if err := s.authorizer.Authorize(actor); err != nil {
 		return err
 	}
@@ -277,6 +327,8 @@ func (s *Service) ListCombinations(ctx context.Context, actor management.Actor, 
 
 // CreateCombination 新增组合规则并按新词库重建检测引擎。
 func (s *Service) CreateCombination(ctx context.Context, actor management.Actor, input CombinationInput) (Combination, error) {
+	s.lexiconMu.Lock()
+	defer s.lexiconMu.Unlock()
 	if err := s.authorizer.Authorize(actor); err != nil {
 		return Combination{}, err
 	}
@@ -293,6 +345,8 @@ func (s *Service) CreateCombination(ctx context.Context, actor management.Actor,
 
 // DeleteCombination 按乐观锁删除组合规则并按新词库重建检测引擎。
 func (s *Service) DeleteCombination(ctx context.Context, actor management.Actor, id, expectedVersion int64) error {
+	s.lexiconMu.Lock()
+	defer s.lexiconMu.Unlock()
 	if err := s.authorizer.Authorize(actor); err != nil {
 		return err
 	}
@@ -355,8 +409,17 @@ func normalizeCombination(input CombinationInput) (CombinationInput, error) {
 
 // refreshLexicon 词库写入成功后按数据库权威结果重建检测引擎。
 func (s *Service) refreshLexicon(ctx context.Context) error {
-	if err := s.implementation.reloadLexicon(ctx, s.implementation.currentConfigJSON()); err != nil {
-		return fmt.Errorf("刷新违禁词库快照: %w", err)
+	if err := s.implementation.reloadLexicon(ctx); err != nil {
+		refreshErr := fmt.Errorf("刷新违禁词库快照: %w", err)
+		if s.runtime == nil {
+			return refreshErr
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if disableErr := s.runtime.Disable(shutdownCtx, pluginKey); disableErr != nil {
+			return errors.Join(refreshErr, fmt.Errorf("词库快照不一致后关闭插件: %w", disableErr))
+		}
+		return refreshErr
 	}
 	return nil
 }

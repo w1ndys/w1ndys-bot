@@ -78,6 +78,12 @@ tasks:
     cmds:
       - env -u DB_PASSWORD -u NAPCAT_TOKEN -u JWT_SECRET docker compose up --build -d
 
+  compose-up-image:
+    desc: 拉取 BOT_IMAGE 指定的发布镜像并后台启动服务
+    cmds:
+      - env -u DB_PASSWORD -u NAPCAT_TOKEN -u JWT_SECRET docker compose pull bot
+      - env -u DB_PASSWORD -u NAPCAT_TOKEN -u JWT_SECRET docker compose up --no-build -d
+
   compose-rebuild:
     desc: 重新构建镜像并强制创建机器人和 PostgreSQL 容器
     cmds:
