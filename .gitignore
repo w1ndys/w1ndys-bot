@@ -1,0 +1,10 @@
+# 📌 影响范围：控制 Git 忽略规则，不引用外部变量。
+.env
+*.log
+bin/
+coverage.out
+.cache/
+web/node_modules/
+web/dist/
+web/playwright-report/
+web/test-results/

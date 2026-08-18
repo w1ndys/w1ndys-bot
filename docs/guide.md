@@ -1,0 +1,73 @@
+<!-- 📌 影响范围：说明机器人当前架构、数据库基线和开发验收；无外部变量。 -->
+# W1ndys Bot 开发指南
+
+## 当前架构
+
+本项目是 Go 编写的 NapCat OneBot 11 群机器人，使用 PostgreSQL 持久化运行状态、配置、审计和插件业务数据，Vue 3 WebUI 是主要管理入口。
+
+```text
+NapCat 群事件 → 反向 WebSocket → EventDispatcher
+              → 命令匹配 → 全局 Ready → 群 Enabled → 代码身份 → Handler
+              → 未命中命令的群事件 → 观察器门禁 → Observer
+```
+
+插件以 `PluginSpec` 编译进程序，由 `cmd/bot` 显式装入 `SpecCatalog`。代码持有稳定插件 Key、命令、触发词、作用域和允许身份；数据库不提供可变命令或权限覆盖矩阵。普通插件只处理群事件，私聊不进入插件执行链。QQ 应急入口直属平台管理服务，提供插件列表、状态以及全局/当前群启停，并与 WebUI 复用 `RuntimeService`。
+
+所有插件和所有群默认关闭。未知身份、缺失状态、私聊、未声明身份及非 `ready` 状态均 fail-closed。运行时状态与管理员的持久化意图分离；启停使用乐观锁和事务审计，禁用先停止准入并排空在途调用。
+
+Action Client 使用唯一 `echo` 关联请求与响应。WebSocket 读取循环优先处理响应，普通事件交给受限并发 worker，避免插件等待 Action 响应时阻塞收包。
+
+## 目录
+
+```text
+cmd/bot/                 服务入口与依赖装配
+internal/ws/             反向 WebSocket、事件模型和 Action Client
+internal/onebot/         类型化 OneBot API
+internal/plugin/         PluginSpec、目录、分发、生命周期和运行状态服务
+internal/admin/          系统设置、管理员授权和审计
+internal/webapi/         平台与插件专属管理 API
+internal/migration/      数据库迁移执行器与 SQL
+plugins/                 编译期内置插件
+web/                     Vue 3 + TypeScript 管理界面
+```
+
+## 状态与管理
+
+平台公共页 `/plugin-runtimes` 管理全局/群开关、实际状态和错误；每个插件的有限标量配置使用独立路由 `/plugin-runtimes/:pluginKey/config`。复杂业务使用插件自有表、Repository、Service、语义化专属 API 和编译期 Vue 页面。安全的离线配置和历史读取可在插件关闭时使用；OneBot、模型、网络引擎和群副作用必须重新检查运行门禁。
+
+持久化时间统一使用 `TIMESTAMPTZ` 和 UTC。WebAPI 返回含时区的时间，WebUI 按浏览器时区展示。操作反馈统一使用应用级全局 Toast。
+
+## 数据库基线
+
+项目尚未上线，迁移已合并为 `000001_initial_schema`。基线包含：
+
+- `system_settings`、`admin_audit_logs`
+- `plugin_states`、`plugin_group_states`、`plugin_runtime_configs`
+- `keyword_reply_rules`
+- Forbidden Monitor 的发言、白名单、违规、反馈、权重、候选证据、模型用量、训练样本、词条和组合表
+
+基线不包含旧 `plugin_config`、Manifest/Feature/命令同步表、权限矩阵、旧群覆盖表或数据库管理员表。项目正式部署后不得修改已部署迁移，结构变化必须新增配对迁移。
+
+## 开发与验证
+
+从仓库根目录使用 Task：
+
+```bash
+task setup
+task run
+task web-dev
+task lint
+task test
+task web-build
+task web-e2e
+task migrate-up
+task migrate-down
+```
+
+新增或修改插件前必须阅读 `.agents/skills/plugin-development/SKILL.md`。完整架构与验收边界见 `docs/plugin-architecture-v2.md`，实现指南见 `docs/plugin-development.md`。
+
+提交前至少运行 `task lint`、`task test`、涉及 WebUI 时运行 `task web-build` 和 `task web-e2e`，并运行相关 race test 与 `git diff --check`。
+
+## 安全配置
+
+密钥仅写入未跟踪的 `.env`。部署必须设置 `DB_PASSWORD`、`NAPCAT_TOKEN`、至少 32 字节的 `JWT_SECRET`、至少 12 字符的 `WEBUI_PASSWORD` 和启用管理入口所需的 `SUPER_ADMIN_QQ`。生产环境不应长期使用 `LOG_LEVEL=debug`，原始事件可能包含聊天内容、QQ 标识和 URL。
