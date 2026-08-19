@@ -11,7 +11,7 @@
 
 ## 设计决策
 
-- 部署形态：单容器。多阶段 Dockerfile：`node:22` 构建 WebUI → `golang:1.26` 构建二进制 → `alpine` 运行（CA 证书、时区数据）；Go 服务同端口托管 REST + WS + SPA。
+- 部署形态：单容器。多阶段 Dockerfile：`node:22` 构建 WebUI → `golang:1.26` 构建二进制（Vite 产物经 `go:embed` 打入）→ `alpine` 运行（CA 证书、时区数据）；Go 服务同端口托管 REST + WS + SPA。
 - 配置：全部来自环境变量；`.env` 仅本地；生产用 compose 的 `env_file` 或部署平台的 secret 注入。
 - 数据库：compose 内置 postgres:16 + 数据卷；迁移由 `cmd/migrate up` 在启动前执行（entrypoint 顺序），也可手动 `task migrate-up`。
 - 健康检查：`/healthz` 供 compose healthcheck；容器启动依赖 DB healthy。
@@ -19,6 +19,7 @@
   - `DB_PASSWORD`、`NAPCAT_TOKEN`、`JWT_SECRET`（≥32 字节）、`WEBUI_PASSWORD`（≥12 字符）、`SUPER_ADMIN_QQ` 全部必设，缺失则启动失败。
   - 生产 `LOG_LEVEL=info`（debug 会记录原始聊天内容与 QQ 标识）。
   - 容器以非 root 用户运行；不暴露 DB 端口到公网。
+  - 不内建 TLS：`WEBUI_PORT`（默认 8080）纯 HTTP，本机/内网访问；需公网时由外部反代（nginx/caddy）加 TLS。
 - 发布：`CHANGELOG.md` 记录；`docs/` 更新指南（含"通用记录表 vs 专属路径"判定表、新插件开发模板、部署手册）。
 
 ## 实现任务（按序）

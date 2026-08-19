@@ -20,10 +20,10 @@ const (
     ColumnString ColumnType = iota // 单行文本，≤256 字符
     ColumnText                     // 多行文本，≤8K
     ColumnInteger                  // 64 位整数
-    ColumnNumber                   // 浮点
+    ColumnNumber                   // 浮点（64 位）
     ColumnBoolean
     ColumnEnum                     // 需提供 Options
-    ColumnTime                     // RFC3339 时间
+    ColumnDatetime                 // RFC3339 时间
 )
 
 type Column struct {
@@ -89,8 +89,8 @@ GET    /api/plugins/{key}/groups/{gid}/records/export  (CSV 下载, 全量, 上�
 
 ### CSV 导入导出
 
-- 导出：表头为列 Key（snake_case），值为字符串化后的列值。
-- 导入：按 `UniqueKeys` 匹配 upsert（存在则更新、不存在则新增）；逐行校验，返回 `{success, failed, errors[]}`（含行号与原因）；单次上限（如 5000 行）；`Content-Type` 与编码校验（UTF-8，拒绝 BOM 以外的异常编码）。
+- 导出：表头为列 Key（snake_case），值为字符串化后的列值；输出 UTF-8 with BOM（Excel 打开中文不乱码）。
+- 导入：按 `UniqueKeys` 匹配 upsert（存在则更新、不存在则新增）；逐行校验，返回 `{success, failed, errors[]}`（含行号与原因）；单次上限（如 5000 行）；编码自动识别 UTF-8/GBK。
 - 提供模板下载：`GET .../records/template`（表头 + 一行示例）。
 
 ### 通用 Vue 页面

@@ -12,8 +12,8 @@
 
 ## 设计决策
 
-- 配置：环境变量优先（`DB_*`、`NAPCAT_TOKEN`、`WS_PORT`、`JWT_SECRET`、`SUPER_ADMIN_QQ`、`WEBUI_PASSWORD`、`LOG_LEVEL`），CLI 参数可覆盖，`.env` 仅本地开发且不入库。
-- 日志：zap 结构化日志，`LOG_LEVEL=debug|info|warn|error`，生产默认 info。
+- 配置：`.env` 文件加载（godotenv）+ 环境变量覆盖，启动时一次性解析为强类型 `Config` 并校验（必填缺失/非法值 fatal）；配置项 `UPPER_SNAKE_CASE`：`DB_*`、`NAPCAT_TOKEN`、`WS_PORT`、`WEBUI_PORT`（默认 8080，可自定义；端口被占用则启动失败，不自动换端口）、`JWT_SECRET`、`SUPER_ADMIN_QQ`、`WEBUI_PASSWORD`、`LOG_LEVEL`；密钥只放未跟踪的 `.env`。
+- 日志：标准库 `log/slog` 结构化日志，`LOG_LEVEL=debug|info|warn|error`，生产默认 info。
 - 数据库：`github.com/jackc/pgx/v5` 连接池；迁移用 `golang-migrate`（SQL 文件配对 `NNNNNN_description.up.sql` / `.down.sql`，嵌入二进制）。
 - 健康检查：HTTP `GET /healthz`（含 DB ping），供 docker-compose healthcheck 与部署探针。
 - 优雅退出：收到 SIGINT/SIGTERM 后关闭 HTTP、关闭连接池，超时强制退出。
@@ -21,9 +21,9 @@
 
 ## 实现任务（按序）
 
-1. `go mod init github.com/w1ndys/w1ndys-bot`；安装依赖（viper、pflag、zap、pgx、golang-migrate）。
-2. `internal/config`：定义 `Config` 结构、`Load()`（env + flags + 校验：JWT_SECRET ≥32 字节、WEBUI_PASSWORD ≥12 字符、SUPER_ADMIN_QQ 非空、DB 必填项）。
-3. `internal/logger`：zap 初始化，按 `LOG_LEVEL` 和 `LOG_FORMAT` 切换开发/生产格式。
+1. `go mod init github.com/w1ndys/w1ndys-bot`；安装依赖（pgx、golang-migrate、godotenv；日志用标准库 slog）。
+2. `internal/config`：定义 `Config` 结构、`Load()`（godotenv 加载 .env → 环境变量 → 强类型解析 + 校验：JWT_SECRET ≥32 字节、WEBUI_PASSWORD ≥12 字符、SUPER_ADMIN_QQ 非空、DB 必填项、WEBUI_PORT 默认 8080）。
+3. `internal/logger`：slog 初始化，按 `LOG_LEVEL` 和 `LOG_FORMAT` 切换开发/生产格式。
 4. `internal/db`：`pgxpool` 连接池 + `Migrate(ctx)` 执行嵌入的迁移（up）；`cmd/migrate` 提供 `up`/`down` 子命令。
 5. 首个迁移 `000001_bootstrap.up.sql` / `.down.sql`：仅建 `schema_migrations` 占位或最小平台表（本 Spec 先只建 `system_meta` 表验证迁移链路，业务表在 Spec 03/04/06 新增配对迁移）。
 6. `cmd/bot`：装配 config→logger→db→HTTP 健康检查，`signal.NotifyContext` 优雅退出。
@@ -33,7 +33,7 @@
 
 ## 测试
 
-- `config`：合法配置通过；缺 `JWT_SECRET`、短密码、空 `SUPER_ADMIN_QQ` 报错；CLI 覆盖 env。
+- `config`：合法配置通过；缺 `JWT_SECRET`、短密码、空 `SUPER_ADMIN_QQ` 报错；环境变量覆盖 .env 生效。
 - `db`：迁移执行器接口的错误路径（迁移文件缺失、SQL 错误、重复执行 up 幂等）。
 - 手动：`task compose-up` 后 `task migrate-up` 幂等执行；`GET /healthz` 返回 200 且含 db 状态；Ctrl+C 优雅退出日志完整。
 

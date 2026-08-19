@@ -47,6 +47,7 @@ type Lifecycle interface {
 }
 ```
 
+- 命令触发规则：首词精确匹配命令触发词 + 空格分隔参数（如 `echo 你好` → 命令 `echo`、参数 `你好`）；不加 `/` 前缀；触发词大小写敏感、统一小写；参数原样透传，由插件自行解析。
 - 唯一执行链（与现行版一致，不可绕行）：
 
 ```text
@@ -54,6 +55,7 @@ type Lifecycle interface {
 未命中命令的群事件 → 观察器门禁：全局 Ready → 群 Enabled → Observer
 ```
 
+- 并发：事件进入全局受限 worker pool 并发处理（不做每群串行、不保证同群顺序）；同群/同记录竞态由 DB 乐观锁（version）+ 唯一约束兜底；单个 Handler 内禁止长阻塞（Action 调用异步化）。
 - fail-closed：无全局状态记录等同关闭，无群状态记录等同关闭；`enabling/disabling/failed` 均拒绝新调用；身份未知或解析失败拒绝；私聊不进入普通插件链；超级管理员不隐式绕过命令授权。
 - 状态分离：数据库存管理员意图（`desired_enabled`、群 `enabled`），进程内存存实际状态（`runtime_status`）。启停使用乐观锁 + 审计（审计接口在 Spec 04 实现，本 Spec 先定义接口并在日志打点）。
 - 生命周期：`enabling`（OnEnable，失败回滚为 `failed`）→ `ready`；禁用先停止准入、等待在途 Handler、再 `OnDisable`。方法必须幂等、可取消、隔离 panic。
