@@ -57,7 +57,7 @@ web/src/plugins/{key}/
 
 ## 实现任务（按序）
 
-1. 迁移 `000005_invite_records`（配对 up/down）+ Repository + Service + 专属 API + 测试。
+1. 迁移 `000006_invite_records`（配对 up/down）+ Repository + Service + 专属 API + 测试。
 2. `invite_tree` 插件：spec/observer/handler/专属页面 + 注册。
 3. QQ 应急命令：`plugins/admin` 插件（命令：`bot list/status/enable/disable`、`bot group enable/disable`），复用 RuntimeController；身份授权 + 审计。
 4. 平台装配：把 admin 插件与应急命令挂到 Dispatcher（注意：平台命令走平台服务，不经普通插件门禁，但必须做身份校验）。

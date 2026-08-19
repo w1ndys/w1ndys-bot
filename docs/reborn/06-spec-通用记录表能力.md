@@ -106,7 +106,7 @@ GET    /api/plugins/{key}/groups/{gid}/records/export  (CSV 下载, 全量, 上�
 
 ## 实现任务（按序）
 
-1. 迁移 `000004_plugin_records`（配对 up/down）。
+1. 迁移 `000005_plugin_records`（配对 up/down）。
 2. `internal/recordtable/table.go`：契约 + 启动校验（列 Key 唯一、enum 有选项、UniqueKeys 引用存在的列、AppendOnly 与唯一键不冲突）。
 3. `repository.go`：List/Create/Update/Delete/LoadGroup/LoadAllEnabled + 唯一冲突检测（应用层 + 唯一索引兜底）、MaxRecords 上限、分页与排序（排序字段白名单 = 列 Key 集合）。
 4. `service.go`：校验（类型/必填/枚举/长度/自定义钩子）、乐观锁、审计（同事务）、快照回调编排。

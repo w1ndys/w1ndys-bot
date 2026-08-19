@@ -31,17 +31,17 @@ admin_audit_logs(
 - 审计写入与业务写入**同事务**（业务表在 Spec 06 引入后，通用记录表写操作在同一事务写审计）。
 - 标量配置 Schema（窄契约，仅这些类型）：`string`、`multiline`、`integer`、`number`、`boolean`、`enum`、`secret`。**禁止**：嵌套对象、任意 JSON、SQL、表达式、组件名。业务记录、工作流一律不进配置。
 - 配置存储：`plugin_runtime_configs.config_json`，读写走乐观锁，写后触发插件 `OnConfigChanged` 回调（刷新运行时行为）。
-- API 错误映射：统一 `{code, message, data}`；HTTP 状态码语义化（400 校验、401 未登录、403 无权限、404 不存在、409 冲突、500 内部）。
+- API 错误映射：统一 `{code, message, request_id, data}`；`request_id` 由中间件生成并写入访问日志、审计与错误响应，便于前后端联合排查；HTTP 状态码语义化（400 校验、401 未登录、403 无权限、404 不存在、409 冲突、500 内部）。
 
 ## 实现任务（按序）
 
-1. 迁移 `000003_admin_audit_logs`（配对 up/down，结构如上）。
+1. 迁移 `000004_admin_audit_logs`（配对 up/down，结构如上）。
 2. `internal/management`：
    - `contracts.go`：`Actor`、`Authorizer`（接口）。
    - `auth.go`：密码校验（`crypto/subtle` 常数时间比较）、JWT 签发/解析/中间件。
    - `audit.go`：`AuditWriter`（写审计，支持事务内注入）。
 3. `internal/webapi`：
-   - `server.go`：HTTP 路由框架（Go 标准库或 chi），统一中间件（恢复 panic、请求 ID、超时）、错误映射。
+   - `server.go`：HTTP 路由框架（Go 标准库或 chi），统一中间件（恢复 panic、请求 ID、超时）、错误映射（`request_id` 透出）。
    - `auth.go`：`POST /api/auth/login`（返回 JWT）、`GET /api/auth/me`。
    - `plugins.go`：`GET /api/plugins`（列出插件 Key、名称、状态、页面类型）、`GET/PUT /api/plugins/{key}/state`（全局启停）、`GET/PUT /api/plugins/{key}/groups/{gid}/state`（群开关）——全部复用 Spec 03 的 `RuntimeController` 并写审计。
    - `config.go`：`GET/PUT /api/plugins/{key}/config`（乐观锁 + 校验 Schema + 审计 + OnConfigChanged）。

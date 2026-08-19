@@ -8,7 +8,7 @@
 ## 前置依赖
 
 - Spec 04（认证 API、插件状态 API、配置 API）。
-- 技术栈：Vue 3、TypeScript、Vue Router、Vite、Naive UI、原生 Fetch（统一 `{code,message,data}` 响应）。
+- 技术栈：Vue 3、TypeScript、Vue Router、Vite、Naive UI、axios（统一拦截器：注入 token、401 跳登录、错误映射；响应统一 `{code,message,request_id,data}`）。
 
 ## 设计决策
 

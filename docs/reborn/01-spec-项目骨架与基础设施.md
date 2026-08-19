@@ -21,7 +21,7 @@
 
 ## 实现任务（按序）
 
-1. `go mod init github.com/w1ndys/w1ndys-bot-reborn`；安装依赖（viper、pflag、zap、pgx、golang-migrate）。
+1. `go mod init github.com/w1ndys/w1ndys-bot`；安装依赖（viper、pflag、zap、pgx、golang-migrate）。
 2. `internal/config`：定义 `Config` 结构、`Load()`（env + flags + 校验：JWT_SECRET ≥32 字节、WEBUI_PASSWORD ≥12 字符、SUPER_ADMIN_QQ 非空、DB 必填项）。
 3. `internal/logger`：zap 初始化，按 `LOG_LEVEL` 和 `LOG_FORMAT` 切换开发/生产格式。
 4. `internal/db`：`pgxpool` 连接池 + `Migrate(ctx)` 执行嵌入的迁移（up）；`cmd/migrate` 提供 `up`/`down` 子命令。
