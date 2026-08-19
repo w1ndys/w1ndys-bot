@@ -44,9 +44,9 @@ web/src/plugins/{key}/
 ### 示例插件：`invite_tree`（邀请树记录）
 
 - 自有表：`invite_records(id, group_id, inviter_qq, invitee_qq, invited_at, verified bool)`，群隔离 + 唯一约束 `(group_id, invitee_qq)`。
-- 观察器：监听群成员增加 → 记录邀请人（入群前最后活跃成员需配置/推算，简化为"邀请人字段由管理员事后维护"或读取群公告记录，MVP 允许管理员在 WebUI 手动登记）。
-- 专属 API：分页列表、登记邀请、按邀请人聚合统计（树状或排行）、导出。
-- 专属 Vue 页：表格 + 排行卡片 + 登记弹窗（复用公共组件）。
+- 观察器：监听 `notice.group_increase` 事件（NapCat 源码 `OB11GroupIncreaseEvent`：`notice_type=group_increase`、`sub_type=approve|invite`、`operator_id` 为操作者、`user_id` 为新成员）；`sub_type=invite` 时 `operator_id` 即为邀请人、`user_id` 为被邀请人，自动写入邀请记录，无需手动登记；`sub_type=approve` 时 `operator_id` 是审批管理员，不记入邀请树。
+- 专属 API：分页列表、按邀请人聚合统计（树状或排行）、导出。
+- 专属 Vue 页：表格 + 排行卡片（复用公共组件；无登记弹窗，数据来自事件自动写入）。
 
 ### QQ 应急入口
 
