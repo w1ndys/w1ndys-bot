@@ -57,7 +57,7 @@ type Lifecycle interface {
 - fail-closed：无全局状态记录等同关闭，无群状态记录等同关闭；`enabling/disabling/failed` 均拒绝新调用；身份未知或解析失败拒绝；私聊不进入普通插件链；超级管理员不隐式绕过命令授权。
 - 状态分离：数据库存管理员意图（`desired_enabled`、群 `enabled`），进程内存存实际状态（`runtime_status`）。启停使用乐观锁 + 审计（审计接口在 Spec 04 实现，本 Spec 先定义接口并在日志打点）。
 - 生命周期：`enabling`（OnEnable，失败回滚为 `failed`）→ `ready`；禁用先停止准入、等待在途 Handler、再 `OnDisable`。方法必须幂等、可取消、隔离 panic。
-- 身份解析：`SUPER_ADMIN_QQ` 环境变量为超级管理员；群主/群管/群成员从平台级"群成员同步服务"的内存快照解析；快照缺失时按需调用 `GetGroupMemberInfo` 兜底并回写快照；解析失败 fail-closed。
+- 身份解析：`SUPER_ADMIN_QQ` 环境变量为超级管理员；群主/群管/群成员从平台级"群成员同步服务"的内存快照解析；快照缺失时按需调用 `GetGroupMemberInfo` 兜底并回写快照；NapCat 的 `role` 原始值为 owner/admin/member，映射到内部 RoleSet（group_owner/group_admin/group_member）；解析失败 fail-closed。
 - 群成员同步服务（平台级能力，非插件）：定时（如每 30 分钟）调用 `get_group_list` 获取群列表，再对每个群调用 `get_group_member_list` 获取成员，持久化到 `group_members` 表并发布内存快照（atomic.Pointer）；监听 `notice` 的群成员增加/减少事件，仅刷新对应群；提供只读查询接口供身份解析与插件使用。数据规模小（几十群 × 数百人），全量快照可接受。
 - 运行快照：需要热路径查询数据的插件在 `OnEnable` 时从数据库加载不可变快照（atomic.Pointer），管理写操作后通过回调刷新。消息热路径零 SQL。
 
@@ -70,7 +70,7 @@ type Lifecycle interface {
    - `plugin_runtime_configs(plugin_key PK, config_json jsonb, version int8, updated_at)`
 3. `runtime_state_repository.go`：状态读写（乐观锁）、`LoadAllEnabledGroups`（供快照）、迁移数据由 Spec 04 审计补齐。
 4. `runtime_controller.go`：`Enable(ctx, actor, pluginKey)` / `Disable(...)` / 群开关 `EnableGroup/DisableGroup`：乐观锁 + 状态机 + OnEnable/OnDisable 编排 + panic 隔离 + 审计接口打点。
-5. 迁移 `000003_group_members`（配对 up/down）：`group_members(group_id, user_id, role text, nickname text, card text, joined_at timestamptz, updated_at timestamptz, PK(group_id, user_id))`；`group_member_store.go`：DB repository（批量 upsert / 按群加载 / 按人查询）+ 内存快照发布（atomic.Pointer）。
+5. 迁移 `000003_group_members`（配对 up/down）：`group_members(group_id bigint, user_id bigint, role text, nickname text, card text, joined_at timestamptz, updated_at timestamptz, PK(group_id, user_id))`（`role` 存 NapCat 原始值 owner/admin/member；`group_id`/`user_id` 用 bigint，QQ 号在 int64 范围内，传输层已统一）；`group_member_store.go`：DB repository（批量 upsert / 按群加载 / 按人查询）+ 内存快照发布（atomic.Pointer）。
 6. `group_sync.go`：定时同步任务（每 30 分钟：`get_group_list` → 逐群 `get_group_member_list` → upsert → 发布快照）+ 监听 `notice` 群成员增加/减少事件触发的单群刷新；同步失败告警但不清空旧快照。
 7. `identity_resolver.go`：`SUPER_ADMIN_QQ` + 从群成员快照解析当前群身份（群主/群管/群成员）；快照无记录时兜底 `GetGroupMemberInfo` 并回写。
 8. `runtime_bootstrap.go`：启动时读取 DB 意图，对 `desired_enabled=true` 的插件逐个 `Enable`；DB 不可用则全部保持 disabled 并告警（fail-closed）。

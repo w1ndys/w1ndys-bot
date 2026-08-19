@@ -12,20 +12,21 @@
 
 ## 设计决策
 
-- 反向 WS：程序监听 `WS_PORT`，NapCat 连入；握手校验 `Authorization: Bearer <token>`，失败拒绝并记日志。
+- **权威数据源**：NapCat API 的唯一权威来源是 <https://github.com/NapNeko/NapCatDocs/tree/main/src/api>（按版本目录组织，如 `4.18.9/openapi.json`）。事件字段、Action 名称/参数/返回结构一律以此为准，不凭经验或旧代码推断；开发时锁定一个 NapCat 版本，升级时同步更新依赖说明。
+- 反向 WS：程序监听 `WS_PORT`，NapCat 连入；握手校验 `Authorization: Bearer <token>`（或 `access_token` 查询参数），失败拒绝并记日志。
 - 读取循环单线程：优先处理 Action 响应（按 `echo` 匹配），普通事件交给受限并发 worker，避免插件等待 Action 响应时阻塞收包。
 - Action Client：每次调用生成唯一 `echo`（递增 + 随机），请求与响应通过 `map[echo]chan` 关联；默认超时（如 10s）与并发上限；断线时所有在途请求立即失败。
 - 重连：NapCat 断开后指数退避重连（1s→2s→4s→…上限 60s），连接恢复后触发 `OnConnect` 回调（供后续生命周期用）。
-- 事件模型最小化：`message`（group/private）、`notice`、`request`、`meta_event` 各一个结构体，`RawMessage` 保留原文；后续插件只消费需要的字段。
+- 事件模型最小化：`message`（group/private）、`notice`、`request`、`meta_event` 各一个结构体，`RawMessage` 保留纯文本、`Message` 保留消息段数组；**`group_id`/`user_id` 在 NapCat 事件中可能是 number 或 string，解析层必须兼容两种形态（自定义 UnmarshalJSON 或 `json.Number`），内部统一为 int64**；后续插件只消费需要的字段。
 - 测试不依赖真实 NapCat：用 gorilla/websocket 起假 NapCat 服务端。
 
 ## 实现任务（按序）
 
 1. `internal/ws`：
    - `server.go`：HTTP 升级 + token 校验 + 读写循环 + 重连（指数退避）+ 优雅关闭。
-   - `event.go`：`MessageEvent`、`NoticeEvent`、`RequestEvent`、`MetaEvent` 结构体与 JSON 解析（`post_type`、`message_type`、`group_id`、`user_id`、`raw_message`、`message_id`）。
+   - `event.go`：`MessageEvent`、`NoticeEvent`、`RequestEvent`、`MetaEvent` 结构体与 JSON 解析（`post_type`、`message_type`、`group_id`、`user_id`、`raw_message`、`message_id`）；`group_id`/`user_id` 兼容 number/string 双形态解析，内部统一 int64。
    - `action.go`：`ActionClient`——`Call(ctx, action, params) (json.RawMessage, error)`；`echo` 关联表（带锁）、超时、并发限制、断线失败注入。
-2. `internal/onebot`：类型化动作包，先实现 `GetLoginInfo`、`SendGroupMessage`、`SendPrivateMessage`、`DeleteMessage`、`GetGroupMemberInfo`（后续 Spec 再按需扩充）。
+2. `internal/onebot`：类型化动作包，Go 方法对应 NapCat action 名（`get_login_info`、`send_group_msg`、`send_private_msg`、`delete_msg`、`get_group_member_info`、`get_group_member_list`、`get_group_list`），先实现 `GetLoginInfo`、`SendGroupMessage`、`SendPrivateMessage`、`DeleteMessage`、`GetGroupMemberInfo`（后续 Spec 再按需扩充）；action 参数 `group_id`/`user_id` 为字符串。
 3. `cmd/bot`：启动 WS 服务，连接成功后调用 `GetLoginInfo` 打日志（验证 echo 关联）；收到任意事件打 debug 日志。
 4. 断线/重连日志与状态暴露（内存计数，供后续健康检查用）。
 
