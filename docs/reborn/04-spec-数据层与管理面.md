@@ -41,7 +41,7 @@ admin_audit_logs(
    - `auth.go`：密码校验（`crypto/subtle` 常数时间比较）、JWT 签发/解析/中间件。
    - `audit.go`：`AuditWriter`（写审计，支持事务内注入）。
 3. `internal/webapi`：
-   - `server.go`：HTTP 路由框架（Go 标准库或 chi），统一中间件（恢复 panic、请求 ID、超时）、错误映射（`request_id` 透出）。
+   - `server.go`：HTTP 服务用 Go 标准库 `net/http` + `http.ServeMux`（Go 1.22+ 的方法路由与路径参数），**不引入 gin/echo/chi 等第三方框架**；统一中间件（恢复 panic、请求 ID、超时、JWT 鉴权）用 `http.Handler` 包装函数实现，强类型 DTO + 显式校验函数（不使用反射绑定）；错误映射（`request_id` 透出）。
    - `auth.go`：`POST /api/auth/login`（返回 JWT）、`GET /api/auth/me`。
    - `plugins.go`：`GET /api/plugins`（列出插件 Key、名称、状态、页面类型）、`GET/PUT /api/plugins/{key}/state`（全局启停）、`GET/PUT /api/plugins/{key}/groups/{gid}/state`（群开关）——全部复用 Spec 03 的 `RuntimeController` 并写审计。
    - `config.go`：`GET/PUT /api/plugins/{key}/config`（乐观锁 + 校验 Schema + 审计 + OnConfigChanged）。
