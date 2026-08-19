@@ -12,7 +12,7 @@
 
 ## 设计决策
 
-- **权威数据源**：NapCat API 的唯一权威来源是 <https://github.com/NapNeko/NapCatDocs/tree/main/src/api>（按版本目录组织，如 `4.18.9/openapi.json`）。事件字段、Action 名称/参数/返回结构一律以此为准，不凭经验或旧代码推断；开发时锁定一个 NapCat 版本，升级时同步更新依赖说明。
+- **权威数据源**：NapCat API 的唯一权威来源是 <https://github.com/NapNeko/NapCatDocs/tree/main/src/api>（按版本目录组织，如 `4.18.9/openapi.json`）；事件上报字段与行为实现细节核对看源码 <https://github.com/NapNeko/NapCatQQ>（如 `packages/napcat-onebot/event/notice/OB11GroupIncreaseEvent.ts`）。事件字段、Action 名称/参数/返回结构一律以此为准，不凭经验或旧代码推断；开发时锁定一个 NapCat 版本，升级时同步更新依赖说明。
 - 反向 WS：程序监听 `WS_PORT`，NapCat 连入；握手校验 `Authorization: Bearer <token>`（或 `access_token` 查询参数），失败拒绝并记日志。
 - 读取循环单线程：优先处理 Action 响应（按 `echo` 匹配），普通事件交给受限并发 worker，避免插件等待 Action 响应时阻塞收包。
 - Action Client：每次调用生成唯一 `echo`（递增 + 随机），请求与响应通过 `map[echo]chan` 关联；默认超时（如 10s）与并发上限；断线时所有在途请求立即失败。
