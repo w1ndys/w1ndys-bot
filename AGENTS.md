@@ -13,9 +13,9 @@
 
 ## 项目结构与架构
 
-本仓库是 Go 1.26 编写的 NapCat OneBot 11 机器人，使用 PostgreSQL 持久化配置，并提供 Vue 3 + TypeScript 管理界面。`cmd/bot/` 是服务入口，`cmd/migrate/` 是迁移工具；核心实现位于 `internal/`（WebSocket、OneBot API、插件、命令、权限、管理 API 与数据库），可复用日志包位于 `pkg/logger/`，内置插件位于 `plugins/`。前端源码和依赖清单位于 `web/`，版本化 SQL 位于 `internal/migration/migrations/`，设计说明位于 `docs/guide.md`。Go 测试与实现同目录，文件名使用 `*_test.go`。
+本仓库是基于 `docs/reborn/` 开发文档从零重建的 NapCat OneBot 11 机器人（重生版，Go 1.26 + PostgreSQL + Vue 3）。目标架构与目录结构见 `docs/reborn/00-总体设计与开发决策.md`，每个开发里程碑见 `docs/reborn/01-spec-*.md` ~ `09-spec-*.md`。旧实现完整保存在 `old` 分支，仅作代码审计与逻辑参考，不作为当前架构依据。
 
-事件链路为：NapCat → 反向 WebSocket → EventDispatcher → 全局/群门禁 → 代码身份授权 → 插件 → OneBot Action Client。修改并发收包、`echo` 响应关联、身份解析、门禁或插件生命周期时，应先阅读 `docs/guide.md`。
+核心执行链（目标架构，见 00 文档 §3）：命令匹配 → 全局 Ready → 群 Enabled → 代码身份 → 允许角色 → Handler；观察器与后台任务同样经过全局/群门禁。修改并发收包、`echo` 响应关联、身份解析、门禁或插件生命周期时，先阅读对应 Spec 与 `docs/reborn/` 开发文档。
 
 ## 构建、测试与本地开发
 
@@ -35,13 +35,20 @@
 
 Go 代码必须通过 `gofmt`；包名小写，导出类型使用 `PascalCase`，函数和变量遵循 Go 惯例。Vue/TypeScript 使用 2 空格缩进，组件名使用 `PascalCase`，变量和函数使用 `camelCase`。环境变量使用 `UPPER_SNAKE_CASE`。避免无关格式化，公共接口注释说明设计原因。不得修改已部署的迁移；数据库变化应新增配对的 `NNNNNN_description.up.sql` 与 `.down.sql`。
 
+### 代码可读性与编译期约束（最高优先级）
+
+- 人工可读性是第一标准：代码必须让下一个开发者（包括未来的自己）不借助文档就能读懂意图。**不为"高级感"或过度设计引入抽象层、间接跳转或不必要的接口**；先写直白代码，出现至少 2-3 个真实重复点后再提取公共抽象。
+- 可扩展性来自清晰的结构和窄契约，而不是层层封装：优先让数据和控制流在代码里直接可见。
+- 能用编译期表达的就用编译期：优先通过 Go 泛型、类型约束（constraint interface）、强类型 DTO 和代码声明（如记录表列定义、配置 Schema）把规则固化为静态检查，让不合规的用法在 `go build` / `go vet` 阶段直接报错，而不是依赖运行时反射或 `any` 散落。
+- 禁止为绕过类型系统而滥用反射、`any`、空接口、动态注册；禁止用运行时字符串拼接构造逻辑（SQL、组件名、URL、表达式）。
+
 所有持久化时间统一以 UTC 写入和读取，数据库字段优先使用带时区的时间类型；后端 API 返回明确包含时区信息的时间值，不在服务端按部署机器或用户本地时区格式化。WebUI 在展示层统一根据当前用户时区转换时间，提交时间条件时必须携带明确时区并由后端规范化为 UTC，禁止在业务表中混存本地时间。
 
 WebUI 的成功、失败、警告和操作结果反馈必须统一使用应用级全局 Toast；组件不得自行创建局部 Toast、重复挂载消息 Provider，或使用页面内临时提示替代全局操作反馈。字段校验等与具体输入位置强关联的信息可保留在表单项内，但不得重复弹出同义 Toast。
 
 ## AI 辅助编程强制规范
 
-开发或评审插件、插件配置、插件业务数据 CRUD、管理 API 或 WebUI 时，必须先使用项目 Skill：`.agents/skills/plugin-development/SKILL.md`。详细架构位于该 Skill 的 `references/architecture.md`。
+开发或评审插件、插件配置、插件业务数据 CRUD、管理 API 或 WebUI 时，必须先阅读 `docs/reborn/00-总体设计与开发决策.md`（架构与决策）与对应步骤 Spec（`docs/reborn/01-spec-*.md` 起），遵循其中的契约、门禁与验收标准。
 
 AI 新增或修改代码时，应优先保持代码简洁、清晰，并遵循项目现有风格：
 
