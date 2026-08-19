@@ -1,0 +1,48 @@
+version: '3'
+
+tasks:
+  setup:
+    desc: 下载 Go 模块依赖
+    cmds:
+      - go mod download
+
+  run:
+    desc: 启动机器人服务
+    cmds:
+      - go run ./cmd/bot
+
+  migrate-up:
+    desc: 应用所有未执行的数据库迁移
+    cmds:
+      - go run ./cmd/migrate up
+
+  migrate-down:
+    desc: 回滚最近一个版本的数据库迁移
+    cmds:
+      - go run ./cmd/migrate down
+
+  test:
+    desc: 运行 Go 单元测试
+    cmds:
+      - go test ./...
+
+  lint:
+    desc: 检查代码格式（gofmt）与静态分析（go vet）
+    cmds:
+      - |
+        unformatted=$(gofmt -l .)
+        if [ -n "$unformatted" ]; then
+          printf '以下文件未通过 gofmt:\n%s\n' "$unformatted"
+          exit 1
+        fi
+      - go vet ./...
+
+  compose-up:
+    desc: 构建并启动 PostgreSQL 与机器人服务
+    cmds:
+      - docker compose up -d --build
+
+  compose-down:
+    desc: 停止并移除 PostgreSQL 与机器人服务
+    cmds:
+      - docker compose down

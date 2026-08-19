@@ -4,8 +4,8 @@
 
 ## 分支说明
 
-- `reborn`：当前开发分支，按 `docs/reborn/` 的步骤 Spec（01→09）逐步开发。
-- `main`：旧实现分支，仅作为代码审计与逻辑参考；Py 版旧仓库见 <https://github.com/w1ndys/w1ndysbot>。
+- `main`：当前开发分支（新项目），按 `docs/reborn/` 的步骤 Spec（01→09）逐步开发。
+- `old`：旧实现备份，仅作为代码审计与逻辑参考；Py 版旧仓库见 <https://github.com/w1ndys/w1ndysbot>。
 
 ## 开发文档
 

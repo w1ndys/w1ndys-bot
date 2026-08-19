@@ -1,0 +1,48 @@
+# 本地开发编排：PostgreSQL 16 + 机器人服务。
+# 变量从仓库根目录的 .env 读取（docker compose 默认读取 .env）。
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${DB_USER:-w1ndys}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?请先在 .env 设置 DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-w1ndys_bot}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-w1ndys} -d ${DB_NAME:-w1ndys_bot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  bot:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-w1ndys}
+      DB_PASSWORD: ${DB_PASSWORD:?请先在 .env 设置 DB_PASSWORD}
+      DB_NAME: ${DB_NAME:-w1ndys_bot}
+      DB_SSLMODE: disable
+      WEBUI_PORT: "8080"
+      JWT_SECRET: ${JWT_SECRET:?请先在 .env 设置 JWT_SECRET}
+      WEBUI_PASSWORD: ${WEBUI_PASSWORD:?请先在 .env 设置 WEBUI_PASSWORD}
+      SUPER_ADMIN_QQ: ${SUPER_ADMIN_QQ:?请先在 .env 设置 SUPER_ADMIN_QQ}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    ports:
+      - "${WEBUI_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pgdata:
